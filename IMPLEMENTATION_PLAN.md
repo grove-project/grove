@@ -8,10 +8,22 @@ A developer writes a normal Go app using a small explicit Grove SDK, tests it lo
 
 The permanent MVP reference application is **Grove Shop**. Its exact demo contract lives under `demo/` and must be treated as a first-class implementation target rather than a late-stage sample.
 
+## Normative developer-facing SDK
+The MVP SDK contract is defined under `sdk/` and must be treated as normative implementation guidance:
+- `sdk/README.md`
+- `sdk/DESIGN_PRINCIPLES.md`
+- `sdk/SERVICE_MODEL.md`
+- `sdk/INVOCATION.md`
+- `sdk/SERIALIZATION.md`
+- `sdk/EXAMPLE.md`
+
+The SDK must keep Grove explicit and Go-native: ordinary business types, explicit registration, explicit stable service/method IDs, no required interfaces, no generated stubs/codegen, no reflection-driven dispatch, Gob behind small Grove helpers, and one Grove invocation path whose routing may resolve locally or remotely.
+
 ## Core rules
 - Explicit distribution: explicit service registration and invocation; stable service/method IDs.
 - No required generated code and no interface-heavy RPC abstraction.
-- Same application-facing invocation API for local and remote calls.
+- Same application-facing Grove invocation API for local and remote calls.
+- Business services remain directly unit-testable as ordinary Go code.
 - Distributed E2E = multiple real Grovlet processes on one host using real transport.
 - All acceptance via Go testing framework and dedicated `grovetest` harness.
 - Build required binaries once per test package invocation where practical.
@@ -54,12 +66,13 @@ Read the detailed contracts before implementing demo-facing work:
 - `demo/UI.md`
 - `demo/CONFIGURATION.md`
 - `demo/DEMO_FLOW.md`
+- `demo/IMPLEMENTATION_GUIDE.md`
 
 Keep Grove Shop business logic deterministic and intentionally small. Add only the behavior required by the current task; do not prematurely implement later deployment, UI polling, config, or rollback capabilities.
 
 ## Phases
 A. Foundation (001-005): repository, Grovlet, process/cluster harness, Grove Shop reference app.
-B. Runtime (006-010): registry, local invocation, envelope, embedded System NATS transport, cross-node Grove Shop invocation.
+B. Runtime + SDK (006-010): explicit registry, local Grove invocation, Gob envelope, embedded System NATS transport, cross-node invocation using the same Grove API.
 C. Cluster awareness (011-015): identity, NATS-based cluster bootstrap, JetStream/KV membership, NATS heartbeats, explicit placement in replicated control state.
 D. Recovery/persistence (016-020): lifecycle, failure detection, recovery, desired state in JetStream/KV, JetStream-backed restart recovery.
 E. Developer workflow (021-024): minimal CLI, CLI E2E, immutable deployment artifact including embedded Web UI assets, embedded customer config.
@@ -67,12 +80,12 @@ F. Upgrades (025-028): versions/artifact identity, side-by-side candidate deploy
 G. Resilience/MVP proof (029-031): `grove test`, resilience injection, final Grove Shop lifecycle E2E matching `demo/DEMO_FLOW.md`.
 
 ## Outside MVP
-Firecracker/live migration, Kubernetes integration, edge-specific connectivity, DAP/debugger proxy, advanced scheduling hints, durable execution, WASM plugins, migration chains, sophisticated hot config, production multi-region control plane, advanced observability backend, and any separate Grove-owned Raft/etcd consensus implementation.
+Firecracker/live migration, Kubernetes integration, edge-specific connectivity, DAP/debugger proxy, advanced scheduling hints, durable execution, WASM plugins, migration chains, sophisticated hot config, production multi-region control plane, advanced observability backend, generated RPC clients/stubs, and any separate Grove-owned Raft/etcd consensus implementation.
 
 Debugger/DAP integration is a natural MVP v2 demo extension and must not expand MVP v1 scope.
 
 ## Execution prompt
-> Read AGENTS.md, IMPLEMENTATION_PLAN.md, the relevant `demo/*.md` contracts, and tasks/NNN-*.md. Implement only that task. Run all required tests. Do not proceed to the next task. Report changes, tests/results, deviations, and architectural issues.
+> Read AGENTS.md, IMPLEMENTATION_PLAN.md, the relevant `sdk/*.md` and `demo/*.md` contracts, and tasks/NNN-*.md. Implement only that task. Run all required tests. Do not proceed to the next task. Report changes, tests/results, deviations, and architectural issues.
 
 ## Status
 Each task starts `Status: TODO`; change to `DONE` only after all acceptance criteria pass.
