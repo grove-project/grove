@@ -8,6 +8,8 @@ Create the deterministic Grove Shop application domain reused by all later E2Es.
 
 ## Required reading
 - `IMPLEMENTATION_PLAN.md`
+- `sdk/DESIGN_PRINCIPLES.md`
+- `sdk/EXAMPLE.md`
 - `demo/README.md`
 - `demo/ARCHITECTURE.md`
 
@@ -27,7 +29,7 @@ The minimum business flow is:
 Created -> Reserved -> Paid -> Shipping -> Completed
 ```
 
-`Orders` coordinates Inventory, Payment, and Shipping through plain Go-callable abstractions that can later be wired to Grove invocation without changing the business semantics.
+`Orders` coordinates Inventory, Payment, and Shipping through ordinary Go code. Keep the concrete implementations directly navigable and unit-testable. Do not introduce generated stubs, required service interfaces, reflection-driven dispatch, or Grove-specific abstractions into the business methods.
 
 The application must be deterministic and intentionally small.
 
@@ -35,6 +37,7 @@ Define the Web-facing business model/API shape needed to create and inspect orde
 
 ## Out of scope
 - Grove service registry.
+- Grove invocation API.
 - Remote invocation.
 - NATS transport.
 - Cluster membership or placement.
@@ -53,6 +56,7 @@ Unit-test Grove Shop independently of Grove:
 - clear propagation of component errors.
 
 ## Done
-- Grove Shop replaces Greeter/Workflow as the permanent reference app.
-- Business logic is usable independently of Grove runtime plumbing.
+- Grove Shop is the permanent reference app.
+- Business services are ordinary Go types/methods and directly unit-testable without Grove.
+- No generated code or required framework interfaces are introduced.
 - `go test ./...` passes.
