@@ -1,75 +1,115 @@
 # Grove — Positioning & Differentiation
 
-Core Positioning
+Grove is an application-aware runtime for distributed Go applications. It separates the **logical application topology** developers write from the **physical execution topology** used at runtime.
 
-Nomad schedules workloads. Grove schedules application topology.
+The shortest positioning is:
 
-Grove is an application-aware runtime for distributed Go applications. Developers define the logical application — its services, components, dependencies, data, and expected behavior — without having to permanently encode where every component runs or which isolation boundary separates it from the others.
+> **Nomad schedules workloads. Service Weaver distributes components. Grove schedules application topology.**
 
-Grove can choose and evolve the physical execution topology: components may run together as goroutines, as separate processes, inside microVMs, or across cluster nodes. Placement can respond to scale, locality, isolation, resource pressure, resilience, and operational requirements while preserving the application's logical model.
+Service Weaver is Grove's closest philosophical predecessor: it demonstrated that a modular Go application can remain one application artifact while a runtime distributes its components. Nomad is useful from the opposite direction: it shows the boundary between infrastructure orchestration and Grove's application-aware runtime.
 
-The Key Abstraction Boundary
+## Comparison
 
-Traditional orchestrators such as Nomad and Kubernetes generally begin with already-packaged workloads. Their question is: “Where should this workload run?” The internals of the application are mostly opaque to the scheduler.
+| Dimension | Grove | Service Weaver | Nomad |
+|---|---|---|---|
+| Primary abstraction | Application-aware execution runtime | Distributed Go component framework/runtime | Workload orchestrator |
+| Input to scheduler/runtime | Logical application topology | Weaver components | Jobs and tasks |
+| Primary decision | How application components should physically execute and where they should run | Where components should run | Which node should run each allocation |
+| Application artifact | Application + Grove runtime + embedded customer configuration | Application + Weaver runtime | Arbitrary packaged workloads |
+| Service abstraction | Ordinary concrete Go services | Weaver components/interfaces | Opaque workload/task |
+| Distribution semantics | Explicit SDK primitives | Mostly transparent component calls | External to application code |
+| Generated RPC code | No | Yes | N/A |
+| Runtime-controlled placement | Yes — including locality/co-location | Yes | Yes, at workload level |
+| Execution boundaries | Goroutine, process, potential microVM, node | Process/deployment boundaries | Process/container/driver workload |
+| Built-in cluster-aware ingress | Yes | Application listeners + deployer exposure | Typically external/service-discovery ecosystem |
+| Configuration model | Customer config embedded in versioned artifact | External deployment configuration | Job/config mechanisms |
+| Same artifact across cluster | Core design principle | Application binary deployed across runtime | Not required |
+| Kubernetes relationship | Optional substrate; Grove can run inside it and interoperate with conventional workloads | Supported deployment environment | Alternative/complementary infrastructure orchestrator |
+| Stateful migration direction | Runtime/SDK designed; potential pause/snapshot/transfer/resume for suitable workloads | Component re-placement, not execution-state migration | Workload rescheduling rather than application-state migration |
+| Edge model | Edge nodes can join the same logical cluster using outbound connectivity | Not a primary design focus | Infrastructure-oriented multi-node scheduling |
+| Debugging | Cluster-aware Delve/DAP intended as runtime capability | Conventional/runtime tooling | Infrastructure/workload-level tooling |
+| Resilience testing | Application E2E × runtime-generated failure matrix intended as first-class capability | Not central to programming model | Not application-semantic testing |
+| Runtime understanding | Application graph, dependencies, placement and application-aware capabilities | Component graph | Resource/workload declarations |
+| Core promise | Write the logical application; Grove chooses and evolves its physical execution topology | Write modular Go components; runtime distributes them | Declare workloads; Nomad schedules and operates them |
 
-Grove moves the orchestration boundary into the application. Its question is: “How should this application execute right now?”
+## What Grove takes from Service Weaver
+
+Service Weaver validated a foundational idea behind Grove:
+
+> **One application artifact → multiple runtime instances → distributed application.**
+
+A distributed Go application does not inherently need to become a collection of independently built and operated microservices. Logical application structure can remain separate from physical placement, and the runtime can optimize locality without hard-coding deployment topology into the application.
+
+Grove deliberately diverges in the developer model. Service Weaver uses interfaces and generated RPC plumbing and intentionally makes local and remote component calls largely transparent. Grove instead follows three rules:
+
+- no required service interfaces
+- no generated RPC code
+- distribution boundaries are explicit in source
+
+The principle is:
+
+> **Developer controls semantics. Grove controls topology.**
+
+A local Go call remains an ordinary Go call. A call that may cross a process or network boundary visibly uses a Grove primitive because latency, failure and retry semantics are fundamentally different.
+
+## Why Grove is not Nomad
+
+Traditional orchestrators such as Nomad generally begin with already-packaged workloads. Their question is:
+
+> **Where should this workload run?**
+
+The application's internals are mostly opaque to the scheduler.
+
+Grove moves the orchestration boundary into the application. Its question is:
+
+> **How should this application execute right now?**
 
 For an application topology such as:
 
+```text
 API → Parser → Rules Engine → KV
+```
 
-Grove might initially place all four components in one worker process because they communicate heavily and benefit from local access. As load, isolation requirements, or failure domains change, Grove may move the Rules Engine or KV replicas to other processes, microVMs, or nodes without requiring the developer to redesign the logical application.
+Grove might initially co-locate all four components because they communicate heavily. As load, isolation requirements, locality, resource pressure or failure domains change, Grove may move components across processes, microVMs or cluster nodes without changing the application's logical structure.
 
-Why Grove Can Look Like Nomad
+That is why Grove can superficially resemble Nomad: both contain nodes, scheduling, health monitoring, consensus, networking and workload recovery. Those mechanisms are infrastructure inside Grove, not Grove's defining abstraction.
 
-From the outside, both systems include familiar cluster machinery: nodes, scheduling, placement, service lifecycle, health monitoring, consensus, networking, and workload recovery. Describing Grove primarily through those mechanisms makes it sound like a lightweight Nomad or Kubernetes alternative.
+## The Grove artifact
 
-Those mechanisms are implementation infrastructure, not Grove's defining abstraction. The differentiation appears when describing what the runtime understands and controls: Grove understands the application graph and can optimize its physical execution topology.
+A Grove application artifact is intended to contain the runtime, application services, built-in ingress/runtime capabilities, embedded customer configuration and configuration/schema version information.
 
-Developer Promise
+The intended property is:
 
-Write the distributed application according to its logical structure. Grove determines how that structure should physically execute.
+> **The artifact is the complete description of what should run.**
 
-This allows developers to postpone infrastructure boundaries that normally become architectural commitments. A component does not need to become a network service merely because it might need independent scaling later.
+Every Grove node runs the same versioned application artifact. Grove determines which services execute where and can optimize placement and co-location while preserving the application's explicit distribution semantics.
 
-Consequences
+A simple Kubernetes deployment can therefore look like:
 
-This application-aware model enables several Grove capabilities to reinforce one another:
+```text
+3 Kubernetes pods → 3 Grove nodes → 1 Grove application cluster
+```
 
-• Locality — tightly coupled components can be co-located and communicate cheaply.  
-• Elastic boundaries — execution can move between goroutine, process, microVM, and node boundaries.  
-• Storage locality — data placement can be optimized together with compute placement.  
-• Resilience — failure domains and replication can be reasoned about using application relationships.  
-• Testing — the same logical application can be exercised locally and under distributed/resilience scenarios.  
-• Debugging — Grove can provide cluster-aware debugging because it understands both application topology and current placement.  
-• Kubernetes interoperability — Grove can run within Kubernetes and interact with conventional workloads without making Kubernetes the application programming model.
+and the same application can run without Kubernetes:
 
-Comparison Lens
+```text
+3 VMs → 3 Grove nodes → 1 Grove application cluster
+```
 
-Nomad: workload orchestrator. Input is jobs/tasks; primary decision is which node should run each allocation.
+The Grove application model does not change; only the infrastructure substrate does.
 
-Kubernetes: container/application infrastructure orchestrator. Input is declarative resources; primary decision is how desired workload state is realized across the cluster.
+## Positioning guidance
 
-Grove: application-aware execution runtime. Input is the logical application topology; primary decision is how components should physically execute and be placed.
+Avoid leading with **lightweight cluster**, **scheduler**, **single binary**, **NATS/Raft**, or **alternative to Kubernetes**. Those describe mechanisms and immediately place Grove in the infrastructure-orchestrator category.
 
-Positioning Guidance
+Lead with the developer property:
 
-Avoid leading with “lightweight cluster,” “scheduler,” “single binary,” “Raft,” or “alternative to Kubernetes.” These are important implementation characteristics, but they place Grove immediately into the existing infrastructure-orchestrator category.
+> **Write the logical application once; let Grove choose and evolve its physical execution topology.**
 
-Lead with the developer property instead:
+Then explain the cluster, ingress, storage, migration, debugging, configuration and resilience capabilities that make that possible.
 
-“With Grove, you write a distributed application without deciding upfront which parts are local processes, isolated workloads, or remote services. Grove chooses and can evolve the execution topology for you.”
+Service Weaver explains Grove's programming-model lineage. Nomad explains the orchestration boundary Grove moves beyond.
 
-Then explain the cluster, storage, networking, migration, debugging, and resilience mechanisms that make that property possible.
+The Grove thesis is:
 
-Short Forms
-
-One line: Nomad schedules workloads. Grove schedules application topology.
-
-Developer-oriented: Write the logical application once; let Grove choose its physical execution topology.
-
-Architecture-oriented: Grove separates logical application topology from physical execution topology.
-
-Relationship to Existing Orchestrators
-
-Grove does not necessarily need to replace Nomad or Kubernetes. They can serve as underlying infrastructure environments while Grove operates at the application-aware layer above them. The important boundary is ownership: the infrastructure orchestrator manages machines and workloads; Grove manages how the application's logical components map onto those execution resources.  
+> **Keep the application ordinary Go. Make distribution explicit. Put the operational complexity into the runtime.**
