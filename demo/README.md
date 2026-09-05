@@ -44,6 +44,7 @@ The browser should be enough to observe the full upgrade, failure, and rollback 
 - `UI.md` — single-screen Orders + Cluster Status contract.
 - `CONFIGURATION.md` — embedded config and intentional failure scenario.
 - `DEMO_FLOW.md` — exact end-to-end demo sequence and expected observable states.
+- `IMPLEMENTATION_GUIDE.md` — how the demo contracts map onto the numbered tasks without violating incremental scope.
 
 ## Non-goals for MVP v1
 - Debugger/DAP integration.
