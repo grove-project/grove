@@ -39,4 +39,4 @@ Development                  Production
 
 Grove is opinionated about one thing: **distributed systems shouldn't force developers to stop thinking in terms of their application.**
 
-[Quickstart](docs/getting-started/) · [Why Grove?](docs/vision/) · [Architecture](docs/architecture/) · [Developer Experience](docs/developer-experience/)
+[Quickstart](docs/README.md) · [Why Grove?](docs/vision/) · [Architecture](docs/architecture/) · [Developer Experience](docs/developer-experience/)
