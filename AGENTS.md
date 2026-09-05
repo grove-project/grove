@@ -1,9 +1,26 @@
 # Grove Agent Instructions
 
-Read `AGENTS.md`, `IMPLEMENTATION_PLAN.md`, and the selected `tasks/NNN-*.md` before implementation.
+Read `AGENTS.md`, `IMPLEMENTATION_PLAN.md`, the selected `tasks/NNN-*.md`, and any relevant normative contracts under `sdk/` and `demo/` before implementation.
 
 ## One task at a time
 Implement exactly one task. Do not implement future functionality unless explicitly required. Prefer the smallest implementation satisfying the current task. If a task requires an unplanned architectural change, stop and report it rather than silently redesigning Grove.
+
+## Accepted SDK contract
+The developer-facing Grove SDK is defined under `sdk/` and is an accepted product contract, not an area for implementation agents to redesign casually.
+
+- Business services remain ordinary Go types and methods.
+- No required service interfaces.
+- No generated RPC stubs or build-time code generation.
+- No reflection-driven service discovery/dispatch.
+- Service IDs and method IDs are explicit stable application-owned constants.
+- Registration is explicit.
+- Distribution is explicit at the Grove call boundary.
+- Local and remote Grove invocation use the same application-facing Grove call path.
+- Business packages remain directly unit-testable without Grove.
+- MVP application payload serialization uses Gob behind small Grove encode/decode helpers.
+- Do not introduce protobuf, generated clients, transparent proxies, actor semantics, or other competing SDK models unless a later accepted design explicitly changes this contract.
+
+When implementing SDK/runtime tasks, read the relevant files under `sdk/` first.
 
 ## Accepted control-plane architecture
 Grove uses embedded NATS as its system communication and coordination substrate.
