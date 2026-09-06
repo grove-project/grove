@@ -32,26 +32,11 @@ Restarts     0
 ## A failure should tell a story
 
 ```bash
-$ grove status
-
-Cluster     degraded
-
-orders      degraded
-  instance on node-2 failed after configuration update
-
-Recovery
-  production-43 → production-42
-  rollback in progress
-```
-
-```bash
 $ grove inspect orders
 
 Timeline
   10:41:02  production-43 deployed
   10:41:04  node-2 became unhealthy
-  10:41:06  process restarted
-  10:41:09  process exited again
   10:41:10  rollout stopped
   10:41:10  rollback initiated
   10:41:13  production-42 healthy
@@ -88,6 +73,8 @@ Deploy → Observe → Diagnose → Recover → Verify
 ```
 
 The same Grove model should cover local clusters, production clusters, and customer-edge nodes. Where a service runs may change; the way an operator understands it should not.
+
+See [Deployments and Recovery](deployments.md) for immutable artifacts, configuration rollout, version transitions, state migrations, rollback, and edge deployment.
 
 ## Operational principles
 
