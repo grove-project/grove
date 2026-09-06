@@ -1,177 +1,158 @@
-Grove — Vision
+# Grove Vision
 
-Status: Concept / evolving
+**A distributed application should still feel like one application.**
 
-1\. The Problem
+Modern teams often build business logic and then assemble a second system around it: containers, orchestration, service discovery, ingress, configuration, health checks, deployment machinery, observability, and debugging workflows.
 
-Modern distributed applications often pay a large operational tax before they deliver any business value. Developers build several services, then separately assemble containers, orchestration manifests, service discovery, ingress, storage, messaging, health checks, debugging workflows, and deployment procedures.
+Grove's thesis is narrower: when a set of Go services belongs to one product, the runtime can know enough about the application to make development and operations dramatically simpler.
 
-The result is a widening gap between the application that developers understand and the production system that operators must run.
-
-Local development usually exercises only part of the real system. End-to-end testing requires another environment. Production introduces additional infrastructure and failure modes. Troubleshooting becomes a cross-layer exercise spanning application code, containers, orchestration, networking, storage, and observability.
-
-For many applications, especially Go applications built as a tightly related set of services, that complexity is disproportionate to the problem being solved.
-
-2\. The Grove Thesis
-
-Grove is an attempt to make a distributed application feel like one coherent product again.
-
-A Grove application should contain both its application services and the runtime capabilities required to execute them. The same application artifact should move through the entire lifecycle:
-
+```text
 Develop → Test → Deploy → Operate → Debug → Upgrade
+                     one application model
+```
 
-The central promise is simple:
+## What Grove should feel like
 
-What you test locally is what you ship.
+On a laptop:
 
-Grove does not try to eliminate distribution. It tries to make distribution part of the application runtime instead of an external assembly project.
+```bash
+$ go build -o shop .
+$ ./shop
 
-3\. What Grove Should Feel Like
+Grove cluster ready
+  nodes      1
+  services   api, orders, inventory
+```
 
-A developer should be able to build a multi-service application and run the complete application locally without first constructing a miniature production platform.
+In production, the application grows into a cluster without becoming a different product:
 
-The same application should then be deployable as a single Grove artifact onto one machine or a cluster of machines. Grove should handle placement, lifecycle, communication, failure detection, ingress, and durability using built-in runtime capabilities.
+```bash
+$ grove status
 
-When something goes wrong, the same Grove tooling should expose where the application is running, what is unhealthy, how services are connected, where data is located, and how to attach a debugger.
+Cluster     healthy
+Version     v0.8.2
+Nodes       3 / 3 healthy
+Services    3 / 3 healthy
+Config      production-42
+```
 
-An upgrade should mean deploying a new application version, not manually coordinating a collection of independently versioned runtime pieces and application services.
+And when something fails, Grove should explain the transition:
 
-4\. Primary Users
+```bash
+$ grove inspect orders
 
-Grove is primarily designed for teams building and operating cohesive distributed applications where the services belong to one product and can benefit from sharing one runtime model.
+Cause
+  configuration production-43
 
-Developers
+Timeline
+  10:41:02  configuration deployed
+  10:41:04  orders became unhealthy
+  10:41:10  rollout stopped
+  10:41:10  rollback initiated
+  10:41:13  production-42 healthy
 
-Developers should be able to focus on application behavior instead of repeatedly rebuilding deployment infrastructure. Grove should make multi-service development and realistic end-to-end testing available directly on a laptop.
+Result
+  recovered
+```
 
-Solution Engineers and Field Engineers
+That experience is the product goal.
 
-Customer deployments are often where infrastructure complexity becomes most painful. Grove should make it possible to deliver, diagnose, and upgrade a complete system using one artifact and one operational model, even in constrained customer environments.
+## The two users
 
-Operators
+### Developers
 
-Operators should receive a system with explicit health, placement, lifecycle, routing, storage, and debugging semantics rather than a collection of loosely connected components that must be understood independently.
+Developers should spend their time on application behavior. Grove should preserve ordinary Go code, explicit distributed boundaries, normal unit testing, IDE navigation, and a short path from code to a realistic running system.
 
-5\. Core Principles
+### Operators
 
-Single application artifact
+Operators should see one coherent application: its services, nodes, versions, configuration, health, placement, changes, failures, and recovery actions. Automatic behavior must be observable behavior.
 
-The application and its Grove runtime are distributed as one versioned artifact. This does not require everything to execute in one operating-system process; it means deployment is centered around one coherent release unit.
+Field and solution engineers inherit both concerns, especially in customer and edge environments. The same Grove model should continue to work there.
 
-Local-first, not local-only
+## Principles
 
-A complete Grove application should run locally with the same runtime behavior that matters in production. Distribution and high availability are extensions of the same model rather than a separate platform.
+### The application is the release unit
 
-What you test is what you ship
+Application code, Grove runtime behavior, and embedded configuration move together as one versioned artifact. Execution may span processes and machines; release identity remains coherent.
 
-The system exercised during local and end-to-end testing should be structurally the same system that reaches production. Grove should minimize hidden production-only infrastructure paths.
+### Distribution is explicit
 
-Integrated operations
+Grove should not make remote calls look accidentally local. Developers should be able to see distributed boundaries in their code without generated RPC clients or framework-owned service interfaces.
 
-Deployment, health, troubleshooting, debugging, and upgrades are runtime responsibilities. They should not require assembling unrelated external tools before Grove becomes operable.
+### What you test is what you ship
 
-Locality first
+Local and end-to-end testing should exercise the same important runtime paths used in deployment. Production should not introduce a hidden second application architecture.
 
-Services and data that communicate heavily should be kept close whenever correctness, resilience, and capacity allow it. Grove should exploit knowledge that general-purpose schedulers often do not have.
+### Start small; scale the same model
 
-Opinionated defaults, explicit escape hatches
+A Grove application should run as one binary on one machine and expand to multiple nodes without changing its application model.
 
-The default Grove experience should be simple and coherent. More complex deployment and isolation options can exist, but developers should not be forced to configure them before the application can run.
+### The runtime should explain itself
 
-Production capability without platform sprawl
+Grove should expose **state, change, cause, action, and result**. Logs, metrics, traces, health signals, placement, and configuration history are evidence; operators should not have to manually reconstruct basic runtime causality from them.
 
-Grove should provide the minimum set of distributed-systems capabilities required to run serious applications: coordination, failure recovery, durable state, routing, observability, and safe upgrades—without automatically importing the operational surface area of a general-purpose cloud platform.
+### Recovery is part of the product
 
-Extensible runtime
+Failure detection, restart, rollout control, rollback, migration, and recovery should be runtime capabilities with visible progress and outcomes—not external operational choreography.
 
-Grove should provide primitives that allow new runtime capabilities to be added without turning every extension into another external infrastructure dependency.
+### One operational model from cloud to edge
 
-6\. The Application Lifecycle
+Edge nodes may have different connectivity and placement constraints, but they should participate in the same logical application and expose the same health, diagnostics, debugging, and upgrade model.
 
-Development
+### Opinionated defaults, explicit escape hatches
 
-A developer writes multiple cooperating services as one Grove application. Services can be developed together and run under the Grove runtime directly on a development machine.
+The common path should require little ceremony. Advanced isolation, placement, and deployment controls can exist without making them prerequisites for running the application.
 
-Testing
+### Complexity must earn its place
 
-The entire application can be started as a self-contained system for end-to-end testing. Tests exercise the application logic and the runtime paths that will later be used in deployment.
+Grove should not become a smaller-looking general-purpose platform with the same operational surface area. Every capability should justify itself by making the application easier to develop, test, deploy, understand, operate, or upgrade.
 
-Deployment
+## One lifecycle
 
-The same versioned Grove artifact is copied to the target machines. A Grove cluster determines where application work should execute and how services should reach each other.
+```text
+write Go
+   ↓
+grove run
+   ↓
+grove test --resilience
+   ↓
+grove deploy
+   ↓
+grove status / inspect
+   ↓
+grove debug
+   ↓
+grove upgrade / rollback
+```
 
-Operation
+The exact CLI is evolving, but the desired property is stable: **the tools developers use to understand Grove should agree with the tools operators use to understand Grove.**
 
-Grove continuously maintains desired application state, detects failures, routes requests, and keeps required data available.
+## Why not just Kubernetes?
 
-Troubleshooting
+Kubernetes is a general-purpose orchestrator for independently packaged workloads. Grove intentionally starts with a narrower assumption: these services belong to one application and can share a release, runtime model, tooling, and operational context.
 
-The Grove CLI should expose the application as one system: nodes, workers, services, communication paths, storage ownership, health, and recent failures.
+That narrower scope creates room for a simpler experience: one application artifact, built-in knowledge of service relationships, integrated configuration and ingress, application-aware health and recovery, locality-aware placement, and Grove-native diagnosis and debugging.
 
-Debugging
+Grove can also run inside Kubernetes when that is the right deployment environment. The goal is not to replace every orchestrator; it is to avoid forcing application teams to assemble a platform before their application becomes operable.
 
-A developer or support engineer should be able to attach or activate debugging through Grove with knowledge of where the relevant code is actually running. Debugging should be useful locally and, when permitted, in deployed environments.
+## What Grove is not
 
-Upgrade
+Grove is not a universal workload orchestrator. It is not designed around independently versioned services with unrelated lifecycles. It does not make consensus, networking, durability, or partial failure disappear.
 
-A new Grove application version is deployed as another coherent release. Grove coordinates the transition while preserving explicit version boundaries instead of casually mixing incompatible service versions.
+Instead, Grove takes responsibility for a coherent subset of those concerns so each application team does not have to assemble and operate them independently.
 
-7\. Why Not Just Kubernetes?
+Grove is also under active development. Vision examples describe the intended experience; they are not a claim that every command or capability shown here is implemented today.
 
-Kubernetes is a powerful general-purpose orchestration platform. Grove is intentionally solving a narrower problem.
+## Success looks like this
 
-Kubernetes starts from independently packaged workloads and provides infrastructure for operating arbitrary applications. Grove starts from the assumption that the services belong to one application and can therefore share more knowledge, lifecycle, tooling, and runtime behavior.
+A meaningful Grove application can run completely on a laptop, exercise realistic failure behavior in tests, deploy as one versioned application to multiple nodes, recover from common failures without application-specific orchestration, and tell an operator what happened when recovery occurs.
 
-That narrower scope creates opportunities to simplify:
+Small deployments stay small. Larger deployments gain distribution without adopting a different application model.
 
-• one application artifact instead of many deployment units;  
-• one runtime model from laptop to cluster;  
-• built-in knowledge of application versions and service relationships;  
-• locality-aware placement across related services and data;  
-• integrated troubleshooting and debugging;  
-• fewer independently operated infrastructure components.
+## The guiding test
 
-Grove should not attempt to reproduce every Kubernetes capability. If Grove eventually becomes as complicated to operate as the platform it was intended to simplify, it has failed its purpose.
+For every new Grove capability, ask:
 
-8\. What Grove Is Not
+> **Does this make the application easier to develop, test, deploy, understand, operate, and upgrade as one coherent system?**
 
-Grove is not intended to be a universal replacement for Kubernetes or every workload orchestrator.
-
-It is not initially optimized for running arbitrary third-party workloads that have no shared application lifecycle.
-
-It is not based on the assumption that every service must have an independent deployment lifecycle.
-
-It is not a promise that distributed systems become trivial. Consensus, replication, partial failure, networking, and durability still exist. Grove’s goal is to own those concerns coherently so every application team does not have to assemble them again.
-
-It is not currently a finished product. Grove is an evolving architecture and implementation concept, and unresolved design questions should remain explicit rather than being presented as completed capabilities.
-
-9\. Success Criteria
-
-Grove is succeeding if a team can build a meaningful multi-service application and experience the following:
-
-• The complete system runs on a developer machine with little or no external infrastructure setup.  
-• End-to-end tests exercise essentially the same application/runtime structure used in deployment.  
-• Deploying to a new environment means delivering the Grove application artifact and joining machines to the runtime, rather than assembling a platform first.  
-• A node or worker failure is detected and recovered without application-specific orchestration code.  
-• Application data can be given explicit durability guarantees without requiring a separate storage control plane for basic use cases.  
-• A support engineer can determine where a service is running and inspect or debug it using Grove-native tooling.  
-• Upgrading the application is a versioned application operation rather than a manual coordination exercise across many independently packaged services.  
-• Small deployments remain genuinely small, while the same model can expand to multiple nodes and stronger availability requirements.
-
-10\. Long-Term Direction
-
-The long-term goal is for Grove to become a compact distributed application runtime on top of which richer infrastructure capabilities can be built.
-
-The Grove core should provide a small set of strong primitives: application lifecycle, process supervision, cluster state, messaging, placement, routing, durable storage, observability, and debugging.
-
-Higher-level capabilities—such as durable execution, specialized storage services, schedulers, or other application infrastructure—should be able to build on those primitives as Grove-native extensions.
-
-The desired end state is not a smaller collection of infrastructure products. It is a runtime where the infrastructure required by an application can increasingly become part of the application itself.
-
-11\. Guiding Test
-
-When considering a new Grove feature or architectural choice, ask:
-
-Does this make the application easier to develop, test, deploy, understand, operate, and upgrade as one coherent system?
-
-If the answer is no, the feature should justify why its complexity belongs in Grove.  
+If not, its complexity needs a very strong reason to belong in Grove.
