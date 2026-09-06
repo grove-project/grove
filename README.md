@@ -1,42 +1,63 @@
 # Grove 🍁
 
-**Build, run, debug, and ship a distributed Go application as if it were one program.**
+**Build, run, debug, and operate a distributed Go application as one coherent system.**
 
-One binary. One cluster. Built-in RPC, ingress, configuration, resilience, upgrades, and debugging.
+Grove keeps the application familiar: ordinary Go code, explicit distribution, one versioned artifact, and one runtime model from laptop to cluster.
 
 ```go
 grove.Register(OrderServiceID, CreateOrderID, createOrder)
 
-// Distribution is explicit. No generated code. No magic.
-result, err := grove.Call[CreateOrderResponse](
-    ctx, OrderServiceID, CreateOrderID, request,
+// A distributed boundary looks distributed.
+order, err := grove.Call[CreateOrderRequest, CreateOrderResponse](
+    ctx, client, OrderServiceID, CreateOrderID, request,
 )
 ```
 
 ```bash
-go build -o shop .
-./shop
+$ go build -o shop .
+$ ./shop
+
+Grove cluster ready
+  nodes      1
+  services   3
+  ingress    http://localhost:8080
 ```
 
-**That's a Grove cluster.**
-
-Start with one binary. Add nodes when you need them. Move services without rewriting them. Debug the cluster from your IDE. Test failures against your real E2E tests. Ship configuration with the application.
-
-**Your application stays a Go application. Distribution becomes a runtime capability.**
+Add nodes without changing the application:
 
 ```text
-Development                  Production
+Laptop                         Cluster
 
-./shop                       ./shop
-  │                            │
-  └─ Grove                    ├─ Grove
-     ├─ API                   ├─ Grove
-     ├─ Orders                └─ Grove
-     └─ Inventory
-
-        same binary → same app → more nodes
+./shop                         ./shop   ./shop   ./shop
+  ├─ API                         ├────────┼────────┤
+  ├─ Orders                     same application
+  └─ Inventory                  same version
 ```
 
-Grove is opinionated about one thing: **distributed systems shouldn't force developers to stop thinking in terms of their application.**
+When something changes, Grove should tell you what happened rather than make you reconstruct it from infrastructure:
 
-[Quickstart](docs/README.md) · [Why Grove?](docs/vision/) · [Architecture](docs/architecture/) · [Developer Experience](docs/developer-experience/)
+```bash
+$ grove status
+
+Cluster     healthy
+Nodes       3 / 3 healthy
+Services    3 / 3 healthy
+Version     v0.8.2
+Config      production-42
+
+Last event
+  orders recovered after config rollback
+```
+
+## Start here
+
+| | |
+|---|---|
+| **[SDK](sdk/)** | Write ordinary Go services and make distributed boundaries explicit. |
+| **[CLI](docs/cli/)** | Run, inspect, test, debug, deploy, and recover the application. |
+| **[Operations](docs/operations/)** | Understand cluster state, changes, failures, and recovery. |
+| **[Vision](docs/vision/vision.md)** | Why Grove treats a distributed application as one product. |
+
+Want the machinery underneath? Read the **[architecture](docs/architecture/system-architecture.md)** and **[ADRs](docs/adr/)**.
+
+> **Project status:** Grove is under active development. Examples in the docs define the intended experience; some commands and runtime behavior may not be implemented yet.

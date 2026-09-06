@@ -2,6 +2,24 @@
 
 Read `AGENTS.md`, `IMPLEMENTATION_PLAN.md`, the selected `tasks/NNN-*.md`, and any relevant normative contracts under `sdk/` and `demo/` before implementation.
 
+## Documentation standard
+
+Before creating, restructuring, or substantially rewriting Grove documentation, read [`docs/DOCUMENTATION_GUIDE.md`](docs/DOCUMENTATION_GUIDE.md).
+
+That guide is the authoritative editorial standard for user-facing Grove docs. In particular:
+
+- **Show the experience. Explain only what the example cannot.**
+- Developers are the primary audience; operators are the second primary audience.
+- Developer experience is a quality bar across all docs, not a standalone product concept.
+- Prefer code, CLI commands, realistic output, and diagrams over large blocks of prose.
+- Reuse **Grove Shop** (`api`, `orders`, `inventory`) as the canonical example where practical.
+- Show operational consequences and failure/recovery paths when they are part of a feature's value.
+- Make Grove explain state, change, cause, action, and result rather than merely claiming observability.
+- Keep architecture and ADR detail behind the user-facing experience through progressive disclosure.
+- State trade-offs and distinguish implemented behavior from intended/target behavior explicitly.
+
+If a documentation task conflicts with these principles, preserve the principles unless the task explicitly changes the documentation standard.
+
 ## One task at a time
 Implement exactly one task. Do not implement future functionality unless explicitly required. Prefer the smallest implementation satisfying the current task. If a task requires an unplanned architectural change, stop and report it rather than silently redesigning Grove.
 

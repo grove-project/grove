@@ -1,49 +1,69 @@
 # Grove Documentation
 
-This directory mirrors the architectural and product documentation maintained in the Grove Google Drive. For this initial sync, Drive is the authoring source and this repository contains the implementation-facing Markdown copy.
+Grove documentation starts with the experience: **what you write, what you run, and what Grove tells you.** Architecture comes later, when you want to understand how the runtime delivers those guarantees.
 
-## Start here
+## Build with Grove
 
-- [Vision](vision/vision.md)
-- [Positioning & Differentiation](vision/positioning-and-differentiation.md)
-- [System Architecture](architecture/system-architecture.md)
-- [Developer Experience Principles](developer-experience/principles.md)
-- [MVP](roadmap/mvp.md)
+```go
+type Inventory struct{}
 
-## Architecture
+func (s *Inventory) Reserve(ctx context.Context, req ReserveRequest) (ReserveResponse, error) {
+    // Ordinary Go business logic.
+}
+```
 
-- [System Architecture](architecture/system-architecture.md)
-- [Process Model](architecture/process-model.md)
-- [Cluster Control Plane](architecture/control-plane.md)
-- [Networking & Ingress](architecture/networking-and-ingress.md)
-- [Storage Architecture](architecture/storage.md)
+Register the distributed boundary explicitly and keep the business package directly testable.
 
-## Developer Experience
+→ **[Grove SDK](../sdk/)** — services, invocation, serialization, and the canonical Shop example.
 
-- [Principles](developer-experience/principles.md)
-- [Application Model & SDK](developer-experience/application-model-and-sdk.md)
-- [Explicit Service-to-Service Communication](developer-experience/service-to-service-communication.md)
-- [Local Development](developer-experience/local-development.md)
-- [Testing](developer-experience/testing.md)
-- [Debugging](developer-experience/debugging.md)
-- [Deployment](developer-experience/deployment.md)
+## Work with Grove
 
-## Architecture Decision Records
+The CLI is the shared surface for developers and operators.
 
-See the [ADR index](adr/README.md).
+```bash
+$ grove status
 
-> Note: the Drive source currently contains two different documents numbered ADR-009. Both are preserved here without silently rewriting the historical numbering.
+Cluster     healthy
+Nodes       3 / 3 healthy
+Services    3 / 3 healthy
+Version     v0.8.2
+Config      production-42
+```
 
-## Research
+→ **[CLI](cli/)** — run, inspect, test, debug, deploy, and recover.
 
-- [Comparisons, Prior Art & Experiments](research/comparisons-and-prior-art.md)
-- The live **Grove — Open Source Competitors** spreadsheet remains in Google Drive rather than being flattened into Markdown.
+## Operate Grove
 
-## Roadmap
+Grove should explain the system, not merely expose telemetry.
 
-- [MVP](roadmap/mvp.md)
-- [Roadmap](roadmap/roadmap.md)
+```bash
+$ grove inspect orders
 
-## MVP Demo
+orders        degraded
+Cause         config production-43
+Observed      2 crash-looping instances
+Action        rollback to production-42
+Result        recovered
+```
 
-Implementation-oriented demo documentation remains under [`mvp-demo/`](mvp-demo/).
+→ **[Operations](operations/)** — health, observability, changes, diagnosis, and recovery.
+
+## Understand Grove
+
+**[Vision](vision/vision.md)** explains why Grove exists and the product principles behind the experience.
+
+**[Architecture](architecture/system-architecture.md)** explains how Grove implements the runtime.
+
+**[ADRs](adr/README.md)** capture important architectural decisions and their trade-offs.
+
+**[Roadmap](roadmap/roadmap.md)** shows where the project is going.
+
+**[MVP demo](mvp-demo/README.md)** turns the core experience into one end-to-end scenario.
+
+## Documentation rule
+
+> **Show the experience. Explain only what the example cannot.**
+
+Feature docs should normally lead with code, commands, output, or a diagram. Prose should clarify guarantees, trade-offs, and internals rather than make readers imagine the experience.
+
+See the **[documentation guide](DOCUMENTATION_GUIDE.md)** for the project-wide writing standard.
