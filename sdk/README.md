@@ -1,29 +1,89 @@
-# Grove SDK Contract
+# Grove SDK
 
-## Purpose
-This folder defines the developer-facing Grove SDK contract for the MVP. These files are normative implementation guidance for coding agents and contributors.
+**Write ordinary Go. Make distribution explicit. Let Grove own the runtime mechanics.**
 
-Grove's runtime may evolve internally, but the MVP SDK should remain explicit, small, unsurprising, and natural for Go developers.
+A Grove service starts as a normal Go type:
 
-## Core principles
-- Business services remain ordinary Go types with ordinary methods.
+```go
+type Inventory struct{}
+
+func (s *Inventory) Reserve(ctx context.Context, req ReserveRequest) (ReserveResponse, error) {
+    if req.Qty <= 0 {
+        return ReserveResponse{}, errors.New("qty must be positive")
+    }
+    return ReserveResponse{Reserved: true}, nil
+}
+```
+
+No Grove interface. No generated base class. The business package stays directly unit-testable.
+
+## Make a method remotely invokable
+
+Grove makes the distributed boundary visible through stable service and method IDs plus explicit registration.
+
+```go
+const (
+    ServiceInventory grove.ServiceID = 2
+    MethodReserve    grove.MethodID  = 1
+)
+
+reg.Register(ServiceInventory, MethodReserve, reserveHandler)
+```
+
+The registration glue owns serialization and dispatch. It is intentionally visible and debuggable rather than generated behind the build.
+
+## Call another service
+
+```go
+reserve, err := grove.Call[ReserveRequest, ReserveResponse](
+    ctx,
+    client,
+    ServiceInventory,
+    MethodReserve,
+    ReserveRequest{OrderID: order.ID, SKU: order.SKU, Qty: 1},
+)
+```
+
+The code tells you that the call may cross a distribution boundary. The source does not change when Grove moves Inventory to another node.
+
+```text
+same node    grove.Call → local registry → Inventory.Reserve
+remote       grove.Call → transport      → remote registry → Inventory.Reserve
+```
+
+## Test the business logic normally
+
+```go
+func TestReserve(t *testing.T) {
+    svc := &Inventory{}
+    got, err := svc.Reserve(context.Background(), ReserveRequest{Qty: 1})
+
+    require.NoError(t, err)
+    require.True(t, got.Reserved)
+}
+```
+
+Grove integration tests separately prove registration, routing, transport, and failure behavior.
+
+## The SDK contract
+
+| Topic | Read |
+|---|---|
+| End-to-end example | [Grove Shop](EXAMPLE.md) |
+| Service registration and dispatch | [Service model](SERVICE_MODEL.md) |
+| Local and remote calls | [Invocation](INVOCATION.md) |
+| Request/response encoding | [Serialization](SERIALIZATION.md) |
+| Constraints and non-goals | [Design principles](DESIGN_PRINCIPLES.md) |
+
+### Design invariants
+
+- Business services remain ordinary Go types.
 - No required service interfaces.
 - No generated RPC stubs or build-time code generation.
-- No reflection-driven magic registration.
-- Developers explicitly register each remotely invokable method.
-- Service IDs and method IDs are explicit stable constants.
-- Distribution is visible at the call boundary; Grove does not pretend a remote call is an ordinary in-process function call.
-- Local and remote Grove invocation use the same Grove call API.
-- Business packages remain directly unit-testable without starting Grove.
-- The SDK should preserve normal IDE code navigation to concrete implementations.
-- The MVP serialization format is Go `encoding/gob` behind explicit Grove encode/decode helpers.
+- No reflection-driven registration magic.
+- Distribution is explicit at the call boundary.
+- Local and remote invocation use the same Grove call API.
+- Normal IDE navigation reaches concrete implementations.
+- Business logic remains testable without starting Grove.
 
-## Normative documents
-- `DESIGN_PRINCIPLES.md` — constraints and non-goals.
-- `SERVICE_MODEL.md` — service IDs, method IDs, registration, and dispatch.
-- `INVOCATION.md` — explicit application-facing call model and local/remote behavior.
-- `SERIALIZATION.md` — request/response envelope and Gob encoding.
-- `EXAMPLE.md` — canonical Grove Shop example.
-
-## Agent rule
-When a numbered task conflicts with these SDK documents, do not silently invent a different SDK. Report the conflict and implement the smallest solution consistent with this contract unless the task explicitly supersedes it.
+> **MVP status:** this directory defines the intended SDK contract. Exact package names may evolve while the implementation catches up.
