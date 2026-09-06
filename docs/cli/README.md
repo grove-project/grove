@@ -21,6 +21,8 @@ Starting Grove cluster...
 Cluster ready at http://localhost:8080
 ```
 
+Local development should preserve the runtime semantics that matter in production without requiring Kubernetes or a hand-built infrastructure stack.
+
 ## See what is running
 
 ```bash
@@ -89,7 +91,7 @@ Injecting node failure...
 PASS
 ```
 
-Resilience belongs in the normal development loop rather than a separate production-only discipline.
+Resilience belongs in the normal development loop rather than a separate production-only discipline. See [Testing with Grove](../sdk/testing.md).
 
 ## Debug where the code actually runs
 
@@ -101,7 +103,7 @@ DAP endpoint ready at localhost:4711
 Waiting for IDE...
 ```
 
-Grove resolves placement; the developer debugs the application.
+Grove resolves placement; the developer debugs the application. See the [debugging guide](debugging.md).
 
 ## Change configuration safely
 
@@ -121,6 +123,8 @@ Restoring production-42...
 ```
 
 The important output is not that an operation failed. It is **what changed, what Grove observed, what Grove did, and whether the system recovered**.
+
+See [Deployments and Recovery](../operations/deployments.md) for the operational model.
 
 ## CLI design rule
 
