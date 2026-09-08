@@ -1,6 +1,6 @@
 # Task 001 — Repository skeleton
 
-Status: TODO
+Status: DONE
 
 ## Goal
 Establish a minimal Go repository where `go test ./...` succeeds from a clean checkout.
