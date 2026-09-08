@@ -1,6 +1,6 @@
 # Task 012 — NATS cluster bootstrap
 
-Status: TODO
+Status: DONE
 Depends on: 011
 
 ## Goal

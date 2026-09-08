@@ -139,3 +139,138 @@ func TestTransportRequest(t *testing.T) {
 		t.Errorf("Request() canceled error = %v; want %v", err, context.Canceled)
 	}
 }
+
+// Independently embedded servers form one transport plane through an explicit
+// seed route before a joiner is reported ready.
+func TestStartClusterServer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	seed, err := systemnats.StartClusterServer(ctx, systemnats.ClusterConfig{
+		Name:      "seed",
+		Host:      "127.0.0.1",
+		RouteHost: "127.0.0.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(seed.Shutdown)
+	if seed.RouteURL() == "" {
+		t.Fatal("seed route URL is empty")
+	}
+
+	joiner, err := systemnats.StartClusterServer(ctx, systemnats.ClusterConfig{
+		Name:      "joiner",
+		Host:      "127.0.0.1",
+		RouteHost: "127.0.0.1",
+		SeedURLs:  []string{seed.RouteURL()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(joiner.Shutdown)
+	if joiner.URL() == seed.URL() || joiner.RouteURL() == seed.RouteURL() {
+		t.Error("clustered servers did not select distinct client and route addresses")
+	}
+
+	responder, err := systemnats.Connect(ctx, joiner.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(responder.Close)
+	if err := responder.Serve(ctx, "_GROVE.system.cluster.joiner", func(_ context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
+		return grove.ResponseEnvelope{Payload: request.Payload}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	requester, err := systemnats.Connect(ctx, seed.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(requester.Close)
+	request := grove.RequestEnvelope{
+		RequestID: "request-across-route",
+		ServiceID: 2,
+		MethodID:  1,
+		Payload:   []byte("inventory"),
+	}
+	response, err := requestEventually(ctx, requester, "_GROVE.system.cluster.joiner", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.RequestID != request.RequestID || string(response.Payload) != "inventory" {
+		t.Errorf("response = %#v; want correlated inventory payload", response)
+	}
+
+	invalidConfigs := []struct {
+		name string
+		cfg  systemnats.ClusterConfig
+		want error
+	}{
+		{
+			name: "NameMissing",
+			cfg:  systemnats.ClusterConfig{RouteHost: "127.0.0.1"},
+			want: systemnats.ErrServerNameRequired,
+		},
+		{
+			name: "RouteHostMissing",
+			cfg:  systemnats.ClusterConfig{Name: "node"},
+			want: systemnats.ErrRouteHostRequired,
+		},
+		{
+			name: "SeedSchemeInvalid",
+			cfg: systemnats.ClusterConfig{
+				Name:      "node",
+				RouteHost: "127.0.0.1",
+				SeedURLs:  []string{"nats://127.0.0.1:6222"},
+			},
+			want: systemnats.ErrSeedURLInvalid,
+		},
+	}
+	for _, test := range invalidConfigs {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := systemnats.StartClusterServer(ctx, test.cfg); !errors.Is(err, test.want) {
+				t.Errorf("StartClusterServer() error = %v; want %v", err, test.want)
+			}
+		})
+	}
+
+	unreachableCtx, cancelUnreachable := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancelUnreachable()
+	_, err = systemnats.StartClusterServer(unreachableCtx, systemnats.ClusterConfig{
+		Name:      "unreachable-joiner",
+		Host:      "127.0.0.1",
+		RouteHost: "127.0.0.1",
+		SeedURLs:  []string{"nats-route://127.0.0.1:1"},
+	})
+	if !errors.Is(err, systemnats.ErrServerNotReady) || !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("unreachable seed error = %v; want readiness deadline", err)
+	}
+}
+
+func requestEventually(
+	ctx context.Context,
+	transport *systemnats.Transport,
+	subject string,
+	request grove.RequestEnvelope,
+) (grove.ResponseEnvelope, error) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		requestCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		response, err := transport.Request(requestCtx, subject, request)
+		cancel()
+		if err == nil {
+			return response, nil
+		}
+		lastErr = err
+		if err := ctx.Err(); err != nil {
+			return grove.ResponseEnvelope{}, errors.Join(lastErr, err)
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return grove.ResponseEnvelope{}, errors.Join(lastErr, ctx.Err())
+		}
+	}
+}

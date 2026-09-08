@@ -21,18 +21,23 @@ import (
 )
 
 var (
-	errRuntimeDirRequired = errors.New("runtime directory is required")
-	errSystemNATSConflict = errors.New("system NATS listen address and URL are mutually exclusive")
-	errSystemNATSRequired = errors.New("system NATS endpoint requires a listen address or URL")
-	errGroveShopEndpoint  = errors.New("reference application service placement requires a System NATS endpoint")
-	errNodeIdentityPair   = errors.New("node ID and advertised endpoint must be configured together")
-	errNodeIDInvalid      = errors.New("node ID is invalid")
-	errAdvertiseInvalid   = errors.New("advertised endpoint is invalid")
+	errRuntimeDirRequired            = errors.New("runtime directory is required")
+	errSystemNATSConflict            = errors.New("embedded System NATS configuration and URL are mutually exclusive")
+	errSystemNATSRequired            = errors.New("system NATS endpoint requires a listen address or URL")
+	errSystemNATSRouteListenRequired = errors.New("system NATS route listener requires an embedded client listener")
+	errSystemNATSSeedRouteRequired   = errors.New("system NATS seed requires a route listener")
+	errSystemNATSClusterIdentity     = errors.New("system NATS clustering requires node identity")
+	errGroveShopEndpoint             = errors.New("reference application service placement requires a System NATS endpoint")
+	errNodeIdentityPair              = errors.New("node ID and advertised endpoint must be configured together")
+	errNodeIDInvalid                 = errors.New("node ID is invalid")
+	errAdvertiseInvalid              = errors.New("advertised endpoint is invalid")
 )
 
 type config struct {
 	runtimeDir                string
 	systemNATSListen          string
+	systemNATSRouteListen     string
+	systemNATSSeed            string
 	systemNATSURL             string
 	systemNATSSubject         string
 	groveShopInventory        bool
@@ -46,6 +51,7 @@ type lifecycleEvent struct {
 	NodeID             string `json:"node_id,omitempty"`
 	AdvertisedEndpoint string `json:"advertised_endpoint,omitempty"`
 	SystemNATSURL      string `json:"system_nats_url,omitempty"`
+	SystemNATSRouteURL string `json:"system_nats_route_url,omitempty"`
 }
 
 type runtimeDirError struct {
@@ -90,6 +96,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		NodeID:             cfg.nodeID,
 		AdvertisedEndpoint: cfg.advertisedEndpoint,
 		SystemNATSURL:      systemRuntime.url,
+		SystemNATSRouteURL: systemRuntime.routeURL,
 	}); err != nil {
 		systemRuntime.stop()
 		return fmt.Errorf("encode ready event: %w", err)
@@ -110,6 +117,8 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.SetOutput(stderr)
 	flags.StringVar(&cfg.runtimeDir, "runtime-dir", "", "directory for Grovlet runtime state")
 	flags.StringVar(&cfg.systemNATSListen, "system-nats-listen", "", "loopback address for an embedded System NATS server")
+	flags.StringVar(&cfg.systemNATSRouteListen, "system-nats-route-listen", "", "address for the embedded System NATS route listener")
+	flags.StringVar(&cfg.systemNATSSeed, "system-nats-seed", "", "explicit System NATS seed route URL")
 	flags.StringVar(&cfg.systemNATSURL, "system-nats-url", "", "System NATS server URL")
 	flags.StringVar(&cfg.systemNATSSubject, "system-nats-subject", "", "System NATS transport endpoint subject")
 	flags.BoolVar(&cfg.groveShopInventory, "grove-shop-inventory", false, "register Grove Shop Inventory on this Grovlet")
@@ -125,8 +134,23 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	if cfg.runtimeDir == "" {
 		return config{}, errRuntimeDirRequired
 	}
-	if cfg.systemNATSListen != "" && cfg.systemNATSURL != "" {
+	if cfg.systemNATSURL != "" && (cfg.systemNATSListen != "" || cfg.systemNATSRouteListen != "" || cfg.systemNATSSeed != "") {
 		return config{}, errSystemNATSConflict
+	}
+	if cfg.systemNATSRouteListen != "" && cfg.systemNATSListen == "" {
+		return config{}, errSystemNATSRouteListenRequired
+	}
+	if cfg.systemNATSSeed != "" && cfg.systemNATSRouteListen == "" {
+		return config{}, errSystemNATSSeedRouteRequired
+	}
+	if cfg.systemNATSSeed != "" {
+		seed, err := url.Parse(cfg.systemNATSSeed)
+		if err != nil || seed.Scheme != "nats-route" || seed.Host == "" {
+			return config{}, fmt.Errorf(
+				"validate System NATS seed: %w",
+				errors.Join(systemnats.ErrSeedURLInvalid, err),
+			)
+		}
 	}
 	if cfg.systemNATSSubject != "" && cfg.systemNATSListen == "" && cfg.systemNATSURL == "" {
 		return config{}, errSystemNATSRequired
@@ -145,6 +169,9 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 		if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
 			return config{}, fmt.Errorf("validate advertised endpoint: %w", errors.Join(errAdvertiseInvalid, err))
 		}
+	}
+	if cfg.systemNATSRouteListen != "" && cfg.nodeID == "" {
+		return config{}, errSystemNATSClusterIdentity
 	}
 	return cfg, nil
 }
@@ -168,28 +195,41 @@ type systemNATSRuntime struct {
 	server    *systemnats.Server
 	transport *systemnats.Transport
 	url       string
+	routeURL  string
 }
 
 func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error) {
 	runtime := &systemNATSRuntime{}
 	url := cfg.systemNATSURL
 	if cfg.systemNATSListen != "" {
-		host, portText, err := net.SplitHostPort(cfg.systemNATSListen)
+		host, port, err := parseListenAddress(cfg.systemNATSListen)
 		if err != nil {
-			return nil, fmt.Errorf("parse System NATS listen address: %w", err)
+			return nil, fmt.Errorf("parse System NATS client listener: %w", err)
 		}
-		port, err := strconv.Atoi(portText)
-		if err != nil {
-			return nil, fmt.Errorf("parse System NATS listen port: %w", err)
+		if cfg.systemNATSRouteListen == "" {
+			runtime.server, err = systemnats.StartServer(ctx, host, port)
+		} else {
+			routeHost, routePort, routeErr := parseListenAddress(cfg.systemNATSRouteListen)
+			if routeErr != nil {
+				return nil, fmt.Errorf("parse System NATS route listener: %w", routeErr)
+			}
+			clusterConfig := systemnats.ClusterConfig{
+				Name:      cfg.nodeID,
+				Host:      host,
+				Port:      port,
+				RouteHost: routeHost,
+				RoutePort: routePort,
+			}
+			if cfg.systemNATSSeed != "" {
+				clusterConfig.SeedURLs = []string{cfg.systemNATSSeed}
+			}
+			runtime.server, err = systemnats.StartClusterServer(ctx, clusterConfig)
 		}
-		if port < 0 || port > 65535 {
-			return nil, fmt.Errorf("validate System NATS listen port: %w", syscall.EINVAL)
-		}
-		runtime.server, err = systemnats.StartServer(ctx, host, port)
 		if err != nil {
 			return nil, err
 		}
 		url = runtime.server.URL()
+		runtime.routeURL = runtime.server.RouteURL()
 	}
 	if url == "" {
 		return runtime, nil
@@ -249,6 +289,21 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 		}
 	}
 	return runtime, nil
+}
+
+func parseListenAddress(address string) (string, int, error) {
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", 0, err
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		return "", 0, err
+	}
+	if port < 0 || port > 65535 {
+		return "", 0, syscall.EINVAL
+	}
+	return host, port, nil
 }
 
 func (r *systemNATSRuntime) stop() {

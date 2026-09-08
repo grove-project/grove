@@ -59,36 +59,43 @@ membership or persisted as Grove control state.
   **Outcome:** Chose explicit NATS route seeding with independently embedded
   servers, route-gated readiness, and no JetStream/KV or Grove membership.
 
-- [ ] 2. Extend the embedded System NATS server for routed clustering.
+- [x] 2. Extend the embedded System NATS server for routed clustering.
   **Context:** Add configuration for node name, client/route listeners, and seed
   URLs; expose the selected route URL; and wait for at least one route when a
   join seed is configured while preserving standalone startup.
-  **Acceptance:** Package tests start independently embedded servers, join them
-  through a seed, and exchange a Grove envelope across the NATS route.
+  **Outcome:** Added clustered embedded-server configuration, strict route URL
+  parsing, dynamic client/route ports, selected route URL reporting, and a
+  bounded route-established startup gate. Package tests join two independent
+  servers and exchange a correlated Grove envelope across the route; invalid
+  config and an unreachable seed are also covered.
 
-- [ ] 3. Configure clustered Grovlet startup and readiness.
+- [x] 3. Configure clustered Grovlet startup and readiness.
   **Context:** Add route-listen and seed flags, reject incomplete or conflicting
   combinations, start the clustered embedded server using the explicit node ID,
   and include the route URL in the machine-readable ready event.
-  **Acceptance:** Configuration tests cover valid bootstrap plus invalid seed,
-  listener, external-URL, and missing-identity combinations; prior lifecycle
-  output stays compatible.
+  **Outcome:** Added explicit route-listen and seed flags, combination and route
+  URL validation, stable NATS server naming from node identity, local transport
+  connection to each embedded server, and the selected route URL in readiness.
+  Prior standalone and external-server configurations remain compatible.
 
-- [ ] 4. Prove a three-Grovlet shared System NATS plane.
+- [x] 4. Prove a three-Grovlet shared System NATS plane.
   **Context:** Start one seed and two joiners as real OS processes with unique
   runtime directories, identities, client listeners, route listeners, and
   endpoint subjects. Use each joiner's explicit seed configuration and request
   every subject through only the seed's client endpoint.
-  **Acceptance:** The E2E uses bounded waits, emits process logs on timeout,
-  verifies three distinct client/route URLs, and receives correlated responses
-  from all three Grovlets.
+  **Outcome:** Added a real three-process E2E with one seed and two explicit
+  joiners. It verifies distinct client and route URLs, then connects only to the
+  seed and receives correlated responses from every Grovlet subject using a
+  bounded condition wait with all process logs on timeout.
 
-- [ ] 5. Verify and close Task 012.
+- [x] 5. Verify and close Task 012.
   **Context:** Review exported docs, format, vet, repeat focused package and E2E
   tests, run race and full suites, then mark Task 012 DONE.
-  **Acceptance:** `gofmt -l` is empty; `go vet ./...`, focused repeated tests,
-  `go test -race -count=1 ./...`, and `go test -count=1 ./...` pass without
-  weakening prior coverage.
+  **Outcome:** Exported API documentation and the complete diff were reviewed;
+  `gofmt -l .` and `git diff --check` are clean. `go vet ./...`, 25 repeated
+  clustered-server tests, 25 repeated three-process cluster E2Es,
+  `go test -race -count=1 ./...`, and `go test -count=1 ./...` pass. Task 012
+  is marked DONE.
 
 ## Log
 
@@ -97,3 +104,9 @@ membership or persisted as Grove control state.
 - 2026-09-08: Selected Task 012 and recorded NATS route seeding,
   independently embedded servers, route-gated readiness, and the Task 013
   membership boundary.
+- 2026-09-08: Extended the hidden System NATS runtime with explicit clustered
+  startup and verified cross-route request/reply plus readiness failure.
+- 2026-09-08: Wired clustered startup into Grovlet configuration/readiness and
+  passed the focused three-process shared-plane E2E.
+- 2026-09-08: Completed Task 012 after repeated, vet, race, formatting, and full
+  suite verification; no scope deviations or architectural issues found.

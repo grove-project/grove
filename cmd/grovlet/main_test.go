@@ -65,6 +65,23 @@ func TestParseConfig(t *testing.T) {
 	if cfg.systemNATSSubject != "_GROVE.system.invoke.node-a" {
 		t.Errorf("System NATS subject = %q; want _GROVE.system.invoke.node-a", cfg.systemNATSSubject)
 	}
+	clusterCfg, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+		"--advertise-endpoint", "nats-subject://system/node-a",
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-route-listen", "127.0.0.1:0",
+		"--system-nats-seed", "nats-route://127.0.0.1:6222",
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clusterCfg.systemNATSRouteListen != "127.0.0.1:0" {
+		t.Errorf("System NATS route listener = %q; want 127.0.0.1:0", clusterCfg.systemNATSRouteListen)
+	}
+	if clusterCfg.systemNATSSeed != "nats-route://127.0.0.1:6222" {
+		t.Errorf("System NATS seed = %q; want nats-route://127.0.0.1:6222", clusterCfg.systemNATSSeed)
+	}
 
 	if _, err := parseConfig(nil, io.Discard); !errors.Is(err, errRuntimeDirRequired) {
 		t.Errorf("error = %v; want %v", err, errRuntimeDirRequired)
@@ -81,6 +98,36 @@ func TestParseConfig(t *testing.T) {
 		"--system-nats-subject", "_GROVE.system.invoke.node-a",
 	}, io.Discard); !errors.Is(err, errSystemNATSRequired) {
 		t.Errorf("endpoint without connection error = %v; want %v", err, errSystemNATSRequired)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-route-listen", "127.0.0.1:0",
+	}, io.Discard); !errors.Is(err, errSystemNATSRouteListenRequired) {
+		t.Errorf("route without embedded server error = %v; want %v", err, errSystemNATSRouteListenRequired)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-seed", "nats-route://127.0.0.1:6222",
+	}, io.Discard); !errors.Is(err, errSystemNATSSeedRouteRequired) {
+		t.Errorf("seed without route listener error = %v; want %v", err, errSystemNATSSeedRouteRequired)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-route-listen", "127.0.0.1:0",
+	}, io.Discard); !errors.Is(err, errSystemNATSClusterIdentity) {
+		t.Errorf("cluster without identity error = %v; want %v", err, errSystemNATSClusterIdentity)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+		"--advertise-endpoint", "nats-subject://system/node-a",
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-route-listen", "127.0.0.1:0",
+		"--system-nats-seed", "nats://127.0.0.1:6222",
+	}, io.Discard); !errors.Is(err, systemnats.ErrSeedURLInvalid) {
+		t.Errorf("invalid seed URL error = %v; want %v", err, systemnats.ErrSeedURLInvalid)
 	}
 	if _, err := parseConfig([]string{
 		"--runtime-dir", runtimeDir,
@@ -277,6 +324,164 @@ func TestGrovletSystemNATSTransport(t *testing.T) {
 	if err := host.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// Three independently embedded NATS servers exchange control traffic after two
+// Grovlets join through the first Grovlet's explicit seed route.
+func TestGrovletSystemNATSCluster(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	subjects := []string{
+		"_GROVE.system.invoke.cluster.node-1",
+		"_GROVE.system.invoke.cluster.node-2",
+		"_GROVE.system.invoke.cluster.node-3",
+	}
+	nodes := make([]*grovetest.Node, 0, len(subjects))
+	readyEvents := make([]lifecycleEvent, 0, len(subjects))
+
+	seed, err := grovetest.StartNode(
+		grovletPath,
+		"--node-id", "node-1",
+		"--advertise-endpoint", "nats-subject://system/node-1",
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-route-listen", "127.0.0.1:0",
+		"--system-nats-subject", subjects[0],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes = append(nodes, seed)
+	t.Cleanup(func() {
+		if err := seed.Cleanup(); err != nil {
+			t.Errorf("cleanup seed: %v", err)
+		}
+	})
+	if err := seed.WaitReady(ctx); err != nil {
+		t.Fatal(err)
+	}
+	seedReady := readyEventFromLogs(t, seed.Logs())
+	readyEvents = append(readyEvents, seedReady)
+	if seedReady.SystemNATSRouteURL == "" {
+		t.Fatalf("seed route URL is empty; logs: %q", seed.Logs())
+	}
+
+	for i := 1; i < len(subjects); i++ {
+		nodeID := fmt.Sprintf("node-%d", i+1)
+		node, err := grovetest.StartNode(
+			grovletPath,
+			"--node-id", nodeID,
+			"--advertise-endpoint", "nats-subject://system/"+nodeID,
+			"--system-nats-listen", "127.0.0.1:0",
+			"--system-nats-route-listen", "127.0.0.1:0",
+			"--system-nats-seed", seedReady.SystemNATSRouteURL,
+			"--system-nats-subject", subjects[i],
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nodes = append(nodes, node)
+		t.Cleanup(func() {
+			if err := node.Cleanup(); err != nil {
+				t.Errorf("cleanup %s: %v", nodeID, err)
+			}
+		})
+		if err := node.WaitReady(ctx); err != nil {
+			t.Fatal(err)
+		}
+		readyEvents = append(readyEvents, readyEventFromLogs(t, node.Logs()))
+	}
+
+	clientURLs := make(map[string]struct{}, len(readyEvents))
+	routeURLs := make(map[string]struct{}, len(readyEvents))
+	for i, ready := range readyEvents {
+		wantNodeID := fmt.Sprintf("node-%d", i+1)
+		if ready.NodeID != wantNodeID {
+			t.Errorf("ready node ID = %q; want %q", ready.NodeID, wantNodeID)
+		}
+		if ready.SystemNATSURL == "" || ready.SystemNATSRouteURL == "" {
+			t.Errorf("%s readiness lacks NATS client or route URL: %#v", wantNodeID, ready)
+		}
+		clientURLs[ready.SystemNATSURL] = struct{}{}
+		routeURLs[ready.SystemNATSRouteURL] = struct{}{}
+	}
+	if len(clientURLs) != len(nodes) || len(routeURLs) != len(nodes) {
+		t.Errorf("cluster addresses are not distinct: client=%v route=%v", clientURLs, routeURLs)
+	}
+
+	transport, err := systemnats.Connect(ctx, seedReady.SystemNATSURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(transport.Close)
+	payload, err := grove.Encode("shared control plane")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, subject := range subjects {
+		request := grove.RequestEnvelope{
+			RequestID: fmt.Sprintf("request-node-%d", i+1),
+			ServiceID: 2,
+			MethodID:  1,
+			Payload:   payload,
+		}
+		response, err := requestGrovletEventually(ctx, transport, subject, request)
+		if err != nil {
+			t.Fatalf("request %s through seed: %v\n%s", subject, err, clusterLogs(nodes))
+		}
+		var got string
+		if err := grove.Decode(response.Payload, &got); err != nil {
+			t.Fatal(err)
+		}
+		if response.RequestID != request.RequestID || got != "shared control plane" {
+			t.Errorf("response through %s = %#v, %q; want correlated shared control plane", subject, response, got)
+		}
+	}
+
+	for i := len(nodes) - 1; i >= 0; i-- {
+		if err := nodes[i].Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func requestGrovletEventually(
+	ctx context.Context,
+	transport *systemnats.Transport,
+	subject string,
+	request grove.RequestEnvelope,
+) (grove.ResponseEnvelope, error) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		requestCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		response, err := transport.Request(requestCtx, subject, request)
+		cancel()
+		if err == nil {
+			return response, nil
+		}
+		lastErr = err
+		if err := ctx.Err(); err != nil {
+			return grove.ResponseEnvelope{}, errors.Join(lastErr, err)
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return grove.ResponseEnvelope{}, errors.Join(lastErr, ctx.Err())
+		}
+	}
+}
+
+func clusterLogs(nodes []*grovetest.Node) string {
+	var logs strings.Builder
+	for i, node := range nodes {
+		nodeLogs := node.Logs()
+		fmt.Fprintf(&logs, "node-%d logs:\n%s", i+1, nodeLogs)
+		if !strings.HasSuffix(nodeLogs, "\n") {
+			logs.WriteByte('\n')
+		}
+	}
+	return logs.String()
 }
 
 // Orders and Inventory keep one Grove call path when placed in separate real
