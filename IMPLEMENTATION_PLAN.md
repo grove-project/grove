@@ -19,11 +19,18 @@ The MVP SDK contract is defined under `sdk/` and must be treated as normative im
 
 The SDK must keep Grove explicit and Go-native: ordinary business types, explicit registration, explicit stable service/method IDs, no required interfaces, no generated stubs/codegen, no reflection-driven dispatch, Gob behind small Grove helpers, and one Grove invocation path whose routing may resolve locally or remotely.
 
+Service placement requirements are also developer-defined through the SDK when needed. A service may provide an optional placement validator that each Grovlet evaluates locally. No validator means the service is eligible everywhere. A failed validator is a hard constraint: that Grovlet must not host the service.
+
 ## Core rules
 - Explicit distribution: explicit service registration and invocation; stable service/method IDs.
 - No required generated code and no interface-heavy RPC abstraction.
 - Same application-facing Grove invocation API for local and remote calls.
 - Business services remain directly unit-testable as ordinary Go code.
+- Placement validation is optional and developer-supplied through the SDK.
+- No placement validator = service eligible on every Grovlet.
+- Placement validation determines where a service **can** run; scheduling/placement policy chooses where it **should** run among eligible nodes.
+- Grovlets evaluate placement validation locally because it may depend on node-local environmental truth.
+- A Grovlet must never start or restart a service whose placement validation fails.
 - Distributed E2E = multiple real Grovlet processes on one host using real transport.
 - All acceptance via Go testing framework and dedicated `grovetest` harness.
 - Build required binaries once per test package invocation where practical.
@@ -39,6 +46,8 @@ The MVP must follow Grove's accepted NATS architecture:
 - Grove relies on JetStream's internal Raft implementation for replicated consensus and must not implement a separate Raft/etcd control store.
 - Grove reconciliation and cluster semantics are built on top of System NATS + JetStream/KV.
 - Membership, desired state, placement, ownership, versions, and durable control-plane metadata are represented in System NATS JetStream/KV as the corresponding tasks introduce them.
+- Placement eligibility is evaluated locally by Grovlets; enough result/reason is surfaced into the control-plane view for placement decisions and diagnostics.
+- The control plane may place a service only on Grovlets that pass its placement validation.
 - RPC, heartbeats, commands, and other transient control traffic use NATS messaging where appropriate.
 - System NATS and Data NATS are logically separate planes even if the MVP initially runs them in the same physical NATS server process.
 
@@ -60,6 +69,8 @@ The Web component serves the application's embedded HTML/CSS/JavaScript from the
 
 The final demo must also prove embedded customer configuration. A good config produces a healthy deployment. A second artifact built from the same application with a deliberately invalid Inventory config value must cause the candidate to become unhealthy. Grove must detect this and automatically retain/restore the previous complete known-good artifact including its previous embedded config.
 
+Placement-validation semantics must be covered by the permanent test suite even if the headline Grove Shop demo does not require a real customer LAN. Use deterministic per-node test conditions to prove unrestricted services, passing validators, failing validators, mixed eligibility, and refusal to start on an ineligible Grovlet.
+
 Read the detailed contracts before implementing demo-facing work:
 - `demo/README.md`
 - `demo/ARCHITECTURE.md`
@@ -73,14 +84,16 @@ Keep Grove Shop business logic deterministic and intentionally small. Add only t
 ## Phases
 A. Foundation (001-005): repository, Grovlet, process/cluster harness, Grove Shop reference app.
 B. Runtime + SDK (006-010): explicit registry, local Grove invocation, Gob envelope, embedded System NATS transport, cross-node invocation using the same Grove API.
-C. Cluster awareness (011-015): identity, NATS-based cluster bootstrap, JetStream/KV membership, NATS heartbeats, explicit placement in replicated control state.
-D. Recovery/persistence (016-020): lifecycle, failure detection, recovery, desired state in JetStream/KV, JetStream-backed restart recovery.
+C. Cluster awareness and placement (011-015): identity, NATS-based cluster bootstrap, JetStream/KV membership, NATS heartbeats, local service eligibility validation, explicit placement in replicated control state.
+D. Recovery/persistence (016-020): eligibility-enforcing lifecycle, failure detection, recovery, desired state in JetStream/KV, JetStream-backed restart recovery.
 E. Developer workflow (021-024): minimal CLI, CLI E2E, immutable deployment artifact including embedded Web UI assets, embedded customer config.
-F. Upgrades (025-028): versions/artifact identity, side-by-side candidate deployment, health-gated cutover, automatic rollback to previous complete artifact.
+F. Upgrades (025-028): versions/artifact identity, side-by-side candidate deployment, health-gated cutover, automatic rollback to previous complete artifact. Candidate placement obeys the same eligibility rules.
 G. Resilience/MVP proof (029-031): `grove test`, resilience injection, final Grove Shop lifecycle E2E matching `demo/DEMO_FLOW.md`.
 
 ## Outside MVP
 Firecracker/live migration, Kubernetes integration, edge-specific connectivity, DAP/debugger proxy, advanced scheduling hints, durable execution, WASM plugins, migration chains, sophisticated hot config, production multi-region control plane, advanced observability backend, generated RPC clients/stubs, and any separate Grove-owned Raft/etcd consensus implementation.
+
+General-purpose scheduling/scoring, affinity/anti-affinity, and dynamic relocation after changing placement eligibility remain outside MVP. The MVP does include the hard placement-eligibility boundary because it is part of the service execution contract.
 
 Debugger/DAP integration is a natural MVP v2 demo extension and must not expand MVP v1 scope.
 
@@ -91,4 +104,4 @@ Debugger/DAP integration is a natural MVP v2 demo extension and must not expand 
 Each task starts `Status: TODO`; change to `DONE` only after all acceptance criteria pass.
 
 ## Task index
-001 repository skeleton; 002 Grovlet lifecycle; 003 process harness; 004 local multi-Grovlet harness; 005 Grove Shop reference app; 006 service registry; 007 local invocation; 008 serialization envelope; 009 embedded System NATS transport; 010 cross-node invocation; 011 node identity; 012 NATS cluster bootstrap; 013 JetStream/KV membership; 014 NATS heartbeats/health; 015 explicit placement in control state; 016 component lifecycle; 017 node-failure E2E; 018 service recovery; 019 desired state in JetStream/KV; 020 JetStream-backed restart recovery; 021 CLI; 022 CLI E2E; 023 deployment artifact; 024 embedded config; 025 versions/artifact identity; 026 N/N+1 side-by-side; 027 traffic switch; 028 rollback; 029 `grove test`; 030 resilience scenario; 031 final Grove Shop MVP E2E.
+001 repository skeleton; 002 Grovlet lifecycle; 003 process harness; 004 local multi-Grovlet harness; 005 Grove Shop reference app; 006 service registry; 007 local invocation; 008 serialization envelope; 009 embedded System NATS transport; 010 cross-node invocation; 011 node identity; 012 NATS cluster bootstrap; 013 JetStream/KV membership; 014 NATS heartbeats/health; 015 placement validation + explicit placement in control state; 016 eligibility-enforcing component lifecycle; 017 node-failure E2E; 018 service recovery; 019 desired state in JetStream/KV; 020 JetStream-backed restart recovery; 021 CLI; 022 CLI E2E; 023 deployment artifact; 024 embedded config; 025 versions/artifact identity; 026 N/N+1 side-by-side; 027 traffic switch; 028 rollback; 029 `grove test`; 030 resilience scenario; 031 final Grove Shop MVP E2E.
