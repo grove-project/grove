@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"sync/atomic"
 )
 
 var (
@@ -11,10 +13,9 @@ var (
 	ErrRegistryRequired = errors.New("registry is required")
 	// ErrClientRequired is returned when Call receives a nil Client.
 	ErrClientRequired = errors.New("client is required")
-	// ErrResponseType is returned when a Handler returns a value that does not
-	// match the response type requested by Call.
-	ErrResponseType = errors.New("unexpected handler response type")
 )
+
+var requestSequence atomic.Uint64
 
 // InvocationError identifies the service and method involved in a failed
 // Grove call.
@@ -67,19 +68,46 @@ func Call[Request, Response any](
 		return zero, invocationError(serviceID, methodID, err)
 	}
 
-	handler, err := client.registry.Resolve(serviceID, methodID)
+	payload, err := Encode(request)
 	if err != nil {
 		return zero, invocationError(serviceID, methodID, err)
 	}
-	response, err := handler(ctx, request)
-	if err != nil {
+	requestID := "request-" + strconv.FormatUint(requestSequence.Add(1), 10)
+	response := client.invoke(ctx, RequestEnvelope{
+		RequestID: requestID,
+		ServiceID: serviceID,
+		MethodID:  methodID,
+		Payload:   payload,
+	})
+	if response.RequestID != requestID {
+		return zero, invocationError(serviceID, methodID, ErrRequestIDMismatch)
+	}
+	if response.Error != nil {
+		return zero, invocationError(serviceID, methodID, response.Error)
+	}
+	if err := Decode(response.Payload, &zero); err != nil {
 		return zero, invocationError(serviceID, methodID, err)
 	}
-	typed, ok := response.(Response)
-	if !ok {
-		return zero, invocationError(serviceID, methodID, ErrResponseType)
+	return zero, nil
+}
+
+func (c *Client) invoke(ctx context.Context, request RequestEnvelope) ResponseEnvelope {
+	response := ResponseEnvelope{RequestID: request.RequestID}
+	handler, err := c.registry.Resolve(request.ServiceID, request.MethodID)
+	if err != nil {
+		response.Error = responseError(ErrorDispatch, err)
+		return response
 	}
-	return typed, nil
+	response.Payload, err = handler(ctx, request.Payload)
+	if err != nil {
+		code := ErrorHandler
+		var codecErr *CodecError
+		if errors.As(err, &codecErr) {
+			code = ErrorSerialization
+		}
+		response.Error = responseError(code, err)
+	}
+	return response
 }
 
 func invocationError(serviceID ServiceID, methodID MethodID, err error) error {

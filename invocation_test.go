@@ -19,8 +19,12 @@ var grovletPath string
 // call site.
 func ExampleCall() {
 	var registry grove.Registry
-	err := registry.Register(2, 1, func(_ context.Context, request any) (any, error) {
-		return request.(string) + " reserved", nil
+	err := registry.Register(2, 1, func(_ context.Context, payload []byte) ([]byte, error) {
+		var request string
+		if err := grove.Decode(payload, &request); err != nil {
+			return nil, err
+		}
+		return grove.Encode(request + " reserved")
 	})
 	if err != nil {
 		fmt.Println(err)
@@ -51,11 +55,15 @@ func TestCall(t *testing.T) {
 	if _, err := grove.NewClient(nil); !errors.Is(err, grove.ErrRegistryRequired) {
 		t.Errorf("NewClient() nil registry error = %v; want %v", err, grove.ErrRegistryRequired)
 	}
-	if err := registry.Register(serviceID, methodID, func(ctx context.Context, request any) (any, error) {
+	if err := registry.Register(serviceID, methodID, func(ctx context.Context, payload []byte) ([]byte, error) {
 		if got := ctx.Value(contextKey{}); got != "context value" {
 			t.Errorf("handler context value = %v; want context value", got)
 		}
-		return request.(string) + " response", nil
+		var request string
+		if err := grove.Decode(payload, &request); err != nil {
+			return nil, err
+		}
+		return grove.Encode(request + " response")
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -74,28 +82,54 @@ func TestCall(t *testing.T) {
 
 	if _, err := grove.Call[string, string](ctx, client, serviceID+1, methodID, "request"); !errors.Is(err, grove.ErrUnknownService) {
 		t.Errorf("Call() unknown service error = %v; want %v", err, grove.ErrUnknownService)
+	} else {
+		checkResponseCode(t, err, grove.ErrorDispatch)
 	}
 	if _, err := grove.Call[string, string](ctx, client, serviceID, methodID+1, "request"); !errors.Is(err, grove.ErrUnknownMethod) {
 		t.Errorf("Call() unknown method error = %v; want %v", err, grove.ErrUnknownMethod)
+	} else {
+		checkResponseCode(t, err, grove.ErrorDispatch)
 	}
 
 	handlerErr := errors.New("handler failed")
-	if err := registry.Register(serviceID, methodID+1, func(context.Context, any) (any, error) {
+	if err := registry.Register(serviceID, methodID+1, func(context.Context, []byte) ([]byte, error) {
 		return nil, handlerErr
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := grove.Call[string, string](ctx, client, serviceID, methodID+1, "request"); !errors.Is(err, handlerErr) {
 		t.Errorf("Call() handler error = %v; want %v", err, handlerErr)
+	} else {
+		checkResponseCode(t, err, grove.ErrorHandler)
 	}
 
-	if err := registry.Register(serviceID, methodID+2, func(context.Context, any) (any, error) {
-		return 42, nil
+	if err := registry.Register(serviceID, methodID+2, func(_ context.Context, payload []byte) ([]byte, error) {
+		var number int
+		if err := grove.Decode(payload, &number); err != nil {
+			return nil, err
+		}
+		return grove.Encode(number)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := grove.Call[string, string](ctx, client, serviceID, methodID+2, "request"); !errors.Is(err, grove.ErrResponseType) {
-		t.Errorf("Call() response error = %v; want %v", err, grove.ErrResponseType)
+	if _, err := grove.Call[string, int](ctx, client, serviceID, methodID+2, "request"); err == nil {
+		t.Error("Call() accepted handler serialization failure")
+	} else {
+		checkResponseCode(t, err, grove.ErrorSerialization)
+	}
+
+	if err := registry.Register(serviceID, methodID+3, func(context.Context, []byte) ([]byte, error) {
+		return []byte("not a Gob response"), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := grove.Call[string, string](ctx, client, serviceID, methodID+3, "request"); err == nil {
+		t.Error("Call() accepted malformed response payload")
+	} else {
+		var codecErr *grove.CodecError
+		if !errors.As(err, &codecErr) || codecErr.Operation != grove.CodecDecode {
+			t.Errorf("Call() malformed response error = %v; want decode CodecError", err)
+		}
 	}
 
 	canceled, cancel := context.WithCancel(t.Context())
@@ -105,6 +139,18 @@ func TestCall(t *testing.T) {
 	}
 	if _, err := grove.Call[string, string](ctx, nil, serviceID, methodID, "request"); !errors.Is(err, grove.ErrClientRequired) {
 		t.Errorf("Call() nil client error = %v; want %v", err, grove.ErrClientRequired)
+	}
+}
+
+func checkResponseCode(t *testing.T, err error, want grove.ErrorCode) {
+	t.Helper()
+	var responseErr *grove.ResponseError
+	if !errors.As(err, &responseErr) {
+		t.Errorf("Call() error type = %T; want *grove.ResponseError", err)
+		return
+	}
+	if responseErr.Code != want {
+		t.Errorf("Call() response error code = %q; want %q", responseErr.Code, want)
 	}
 }
 

@@ -64,28 +64,39 @@ retry, and compatibility negotiation remain outside this task.
   **Outcome:** Chose canonical byte handlers plus transport-neutral envelopes
   and preserved local causes alongside wire-safe structured errors.
 
-- [ ] 2. Implement Gob helpers and envelope types.
+- [x] 2. Implement Gob helpers and envelope types.
   **Context:** Add generic encoding/decoding, typed codec failures, request and
   response structures, error codes, local cause retention, and correlation
   mismatch handling.
-  **Outcome:** Pending.
+  **Outcome:** Added generic Gob-backed Encode/Decode, typed operation-aware
+  codec failures, correlated request/response envelopes, three stable error
+  classes, and locally unwrap-capable structured response errors.
 
-- [ ] 3. Route local invocation through envelopes.
+- [x] 3. Route local invocation through envelopes.
   **Context:** Convert Handler and adapters to bytes; have Call encode its
   request, create a request ID, dispatch locally, validate the response ID,
   surface structured errors, and decode the typed response.
-  **Outcome:** Pending.
+  **Outcome:** Migrated Handler to bytes and Call to encode requests, allocate
+  monotonic IDs, dispatch an envelope locally, validate response correlation,
+  surface structured errors, and decode the typed result. All Grove Shop
+  adapters now show the canonical Decode -> concrete call -> Encode sequence.
 
-- [ ] 4. Prove serialization and regression behavior.
+- [x] 4. Prove serialization and regression behavior.
   **Context:** Test payload and envelope round trips, malformed and incompatible
   input, request ID preservation, each response error class, local cause
   preservation, explicit Grove Shop adapters, and the existing local E2E.
-  **Outcome:** Pending.
+  **Outcome:** Added value and envelope round trips, request ID preservation,
+  unsupported encode, nil target, malformed/incompatible decode, dispatch,
+  handler and serialization classification, local cause preservation, explicit
+  adapter checks, and retained the one-Grovlet local flow.
 
-- [ ] 5. Verify and close Task 008.
+- [x] 5. Verify and close Task 008.
   **Context:** Review `go doc`, format, vet, run repeated and race tests, run the
   full repository suite, then mark Task 008 DONE after every check succeeds.
-  **Outcome:** Pending.
+  **Outcome:** Reviewed the complete `go doc` surfaces; `gofmt -l` reports no
+  files; `go vet ./...`, 50 repeated codec/envelope/call runs, 20 repeated
+  real-process local E2Es, 25 repeated Grove Shop adapter runs, `go test -race
+  -count=1 ./...`, and `go test -count=1 ./...` pass. Task 008 is marked DONE.
 
 ## Log
 
@@ -93,3 +104,5 @@ retry, and compatibility negotiation remain outside this task.
   full-suite checks passing.
 - 2026-09-08: Selected Task 008 and recorded the canonical Handler migration,
   envelope correlation, structured/local error model, and NATS boundary.
+- 2026-09-08: Completed Task 008 after focused, repeated, race, vet, and full
+  suite verification; no scope deviations or architectural issues found.

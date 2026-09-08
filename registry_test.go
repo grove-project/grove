@@ -13,8 +13,8 @@ import (
 // implementation.
 func ExampleRegistry() {
 	var registry grove.Registry
-	err := registry.Register(7, 3, func(_ context.Context, request any) (any, error) {
-		return "handled " + request.(string), nil
+	err := registry.Register(7, 3, func(_ context.Context, request []byte) ([]byte, error) {
+		return append([]byte("handled "), request...), nil
 	})
 	if err != nil {
 		fmt.Println(err)
@@ -25,12 +25,12 @@ func ExampleRegistry() {
 		fmt.Println(err)
 		return
 	}
-	response, err := handler(context.Background(), "order")
+	response, err := handler(context.Background(), []byte("order"))
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	fmt.Println(response)
+	fmt.Println(string(response))
 	// Output:
 	// handled order
 }
@@ -41,8 +41,8 @@ func TestRegistryRegisterAndResolve(t *testing.T) {
 		methodID  grove.MethodID  = 3
 	)
 	var registry grove.Registry
-	first := func(_ context.Context, _ any) (any, error) { return "first", nil }
-	second := func(_ context.Context, _ any) (any, error) { return "second", nil }
+	first := func(_ context.Context, _ []byte) ([]byte, error) { return []byte("first"), nil }
+	second := func(_ context.Context, _ []byte) ([]byte, error) { return []byte("second"), nil }
 
 	if err := registry.Register(serviceID, methodID, first); err != nil {
 		t.Fatal(err)
@@ -58,7 +58,7 @@ func TestRegistryRegisterAndResolve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != "first" {
+	if string(got) != "first" {
 		t.Errorf("resolved handler response = %q; want first registration", got)
 	}
 

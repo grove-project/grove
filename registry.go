@@ -28,10 +28,9 @@ type ServiceID uint32
 // ServiceID.
 type MethodID uint32
 
-// Handler executes one explicitly registered local service method. Request and
-// response values remain application-owned; serialization belongs to the
-// transport boundary.
-type Handler func(context.Context, any) (any, error)
+// Handler executes one explicitly registered local service method across
+// Grove's serialized application boundary.
+type Handler func(context.Context, []byte) ([]byte, error)
 
 // RegistryError identifies the service and method involved in a failed
 // registration or resolution.

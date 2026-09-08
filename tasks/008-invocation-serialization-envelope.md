@@ -1,6 +1,6 @@
 # Task 008 — Invocation serialization envelope
 
-Status: TODO
+Status: DONE
 Depends on: 007
 
 ## Goal

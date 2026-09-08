@@ -9,7 +9,7 @@ import (
 )
 
 // Application registrations must dispatch each stable ID pair to the intended
-// concrete Grove Shop implementation.
+// concrete Grove Shop implementation through explicit serialization adapters.
 func TestGroveShopRegistration(t *testing.T) {
 	registry := &grove.Registry{}
 	inventory := &groveshop.Inventory{}
@@ -27,66 +27,83 @@ func TestGroveShopRegistration(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	client, err := grove.NewClient(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	reserved, err := grove.Call[groveshop.ReserveRequest, groveshop.Reservation](
+		t.Context(),
+		client,
+		groveshop.ServiceInventory,
+		groveshop.MethodReserve,
+		groveshop.ReserveRequest{OrderID: "order-1", SKU: "coffee-beans", Quantity: 2},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reserved.ID != "reservation-order-1" {
+		t.Errorf("Inventory handler reservation ID = %q; want reservation-order-1", reserved.ID)
+	}
+
+	charged, err := grove.Call[groveshop.ChargeRequest, groveshop.PaymentResult](
+		t.Context(),
+		client,
+		groveshop.ServicePayment,
+		groveshop.MethodCharge,
+		groveshop.ChargeRequest{OrderID: "order-1", AmountCents: 2400},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if charged.ID != "payment-order-1" {
+		t.Errorf("Payment handler payment ID = %q; want payment-order-1", charged.ID)
+	}
+
+	shipped, err := grove.Call[groveshop.ShippingRequest, groveshop.Shipment](
+		t.Context(),
+		client,
+		groveshop.ServiceShipping,
+		groveshop.MethodArrangeShipping,
+		groveshop.ShippingRequest{OrderID: "order-1", Address: "12 Grove Lane"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shipped.ID != "shipment-order-1" {
+		t.Errorf("Shipping handler shipment ID = %q; want shipment-order-1", shipped.ID)
+	}
+
+	created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](
+		t.Context(),
+		client,
+		groveshop.ServiceOrders,
+		groveshop.MethodCreateOrder,
+		groveshop.CreateOrderRequest{
+			OrderID:         "order-1",
+			SKU:             "coffee-beans",
+			Quantity:        2,
+			AmountCents:     2400,
+			ShippingAddress: "12 Grove Lane",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != groveshop.OrderCompleted {
+		t.Errorf("Orders handler status = %q; want %q", created.Status, groveshop.OrderCompleted)
+	}
 
 	reserve, err := registry.Resolve(groveshop.ServiceInventory, groveshop.MethodReserve)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reserved, err := reserve(t.Context(), groveshop.ReserveRequest{
-		OrderID:  "order-1",
-		SKU:      "coffee-beans",
-		Quantity: 2,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := reserved.(groveshop.Reservation).ID; got != "reservation-order-1" {
-		t.Errorf("Inventory handler reservation ID = %q; want reservation-order-1", got)
-	}
-
-	charge, err := registry.Resolve(groveshop.ServicePayment, groveshop.MethodCharge)
-	if err != nil {
-		t.Fatal(err)
-	}
-	charged, err := charge(t.Context(), groveshop.ChargeRequest{OrderID: "order-1", AmountCents: 2400})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := charged.(groveshop.PaymentResult).ID; got != "payment-order-1" {
-		t.Errorf("Payment handler payment ID = %q; want payment-order-1", got)
-	}
-
-	ship, err := registry.Resolve(groveshop.ServiceShipping, groveshop.MethodArrangeShipping)
-	if err != nil {
-		t.Fatal(err)
-	}
-	shipped, err := ship(t.Context(), groveshop.ShippingRequest{OrderID: "order-1", Address: "12 Grove Lane"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := shipped.(groveshop.Shipment).ID; got != "shipment-order-1" {
-		t.Errorf("Shipping handler shipment ID = %q; want shipment-order-1", got)
-	}
-
-	create, err := registry.Resolve(groveshop.ServiceOrders, groveshop.MethodCreateOrder)
-	if err != nil {
-		t.Fatal(err)
-	}
-	created, err := create(t.Context(), groveshop.CreateOrderRequest{
-		OrderID:         "order-1",
-		SKU:             "coffee-beans",
-		Quantity:        2,
-		AmountCents:     2400,
-		ShippingAddress: "12 Grove Lane",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := created.(groveshop.Order).Status; got != groveshop.OrderCompleted {
-		t.Errorf("Orders handler status = %q; want %q", got, groveshop.OrderCompleted)
-	}
-
-	if _, err := reserve(t.Context(), groveshop.ChargeRequest{}); !errors.Is(err, groveshop.ErrHandlerRequestType) {
-		t.Errorf("Inventory handler request error = %v; want %v", err, groveshop.ErrHandlerRequestType)
+	if _, err := reserve(t.Context(), []byte("not Gob")); err == nil {
+		t.Error("Inventory handler accepted malformed request payload")
+	} else {
+		var codecErr *grove.CodecError
+		if !errors.As(err, &codecErr) || codecErr.Operation != grove.CodecDecode {
+			t.Errorf("Inventory handler malformed request error = %v; want decode CodecError", err)
+		}
 	}
 }

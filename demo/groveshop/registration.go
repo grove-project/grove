@@ -3,7 +3,6 @@ package groveshop
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/grove-project/grove"
 )
@@ -36,9 +35,6 @@ var (
 	// ErrServiceRequired is returned when registration receives a nil concrete
 	// service implementation.
 	ErrServiceRequired = errors.New("service implementation is required")
-	// ErrHandlerRequestType is returned when a registered handler receives the
-	// wrong application request type.
-	ErrHandlerRequestType = errors.New("unexpected handler request type")
 )
 
 // RegisterOrders explicitly associates Orders.Create with the Grove Shop IDs.
@@ -52,12 +48,16 @@ func RegisterOrders(registry *grove.Registry, orders *Orders) error {
 	return registry.Register(
 		ServiceOrders,
 		MethodCreateOrder,
-		func(ctx context.Context, request any) (any, error) {
-			req, ok := request.(CreateOrderRequest)
-			if !ok {
-				return nil, fmt.Errorf("create order: %w", ErrHandlerRequestType)
+		func(ctx context.Context, payload []byte) ([]byte, error) {
+			var req CreateOrderRequest
+			if err := grove.Decode(payload, &req); err != nil {
+				return nil, err
 			}
-			return orders.Create(ctx, req)
+			response, err := orders.Create(ctx, req)
+			if err != nil {
+				return nil, err
+			}
+			return grove.Encode(response)
 		},
 	)
 }
@@ -74,12 +74,16 @@ func RegisterInventory(registry *grove.Registry, inventory *Inventory) error {
 	return registry.Register(
 		ServiceInventory,
 		MethodReserve,
-		func(ctx context.Context, request any) (any, error) {
-			req, ok := request.(ReserveRequest)
-			if !ok {
-				return nil, fmt.Errorf("reserve inventory: %w", ErrHandlerRequestType)
+		func(ctx context.Context, payload []byte) ([]byte, error) {
+			var req ReserveRequest
+			if err := grove.Decode(payload, &req); err != nil {
+				return nil, err
 			}
-			return inventory.Reserve(ctx, req)
+			response, err := inventory.Reserve(ctx, req)
+			if err != nil {
+				return nil, err
+			}
+			return grove.Encode(response)
 		},
 	)
 }
@@ -96,12 +100,16 @@ func RegisterPayment(registry *grove.Registry, payment *Payment) error {
 	return registry.Register(
 		ServicePayment,
 		MethodCharge,
-		func(ctx context.Context, request any) (any, error) {
-			req, ok := request.(ChargeRequest)
-			if !ok {
-				return nil, fmt.Errorf("charge payment: %w", ErrHandlerRequestType)
+		func(ctx context.Context, payload []byte) ([]byte, error) {
+			var req ChargeRequest
+			if err := grove.Decode(payload, &req); err != nil {
+				return nil, err
 			}
-			return payment.Charge(ctx, req)
+			response, err := payment.Charge(ctx, req)
+			if err != nil {
+				return nil, err
+			}
+			return grove.Encode(response)
 		},
 	)
 }
@@ -118,12 +126,16 @@ func RegisterShipping(registry *grove.Registry, shipping *Shipping) error {
 	return registry.Register(
 		ServiceShipping,
 		MethodArrangeShipping,
-		func(ctx context.Context, request any) (any, error) {
-			req, ok := request.(ShippingRequest)
-			if !ok {
-				return nil, fmt.Errorf("arrange shipping: %w", ErrHandlerRequestType)
+		func(ctx context.Context, payload []byte) ([]byte, error) {
+			var req ShippingRequest
+			if err := grove.Decode(payload, &req); err != nil {
+				return nil, err
 			}
-			return shipping.Arrange(ctx, req)
+			response, err := shipping.Arrange(ctx, req)
+			if err != nil {
+				return nil, err
+			}
+			return grove.Encode(response)
 		},
 	)
 }
