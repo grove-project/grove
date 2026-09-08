@@ -56,46 +56,51 @@ and unique node-level networking details.
   **Outcome:** Chose a public, error-returning single-node process harness with
   context-bounded waits and no cluster, membership, service, or transport APIs.
 
-- [ ] 2. Build the matching Grovlet executable.
+- [x] 2. Build the matching Grovlet executable.
   **Context:** Add `BuildGrovlet(ctx, outputDir)` to compile `cmd/grovlet` from
   the module source associated with the `grovetest` package. Capture compiler
   output in a typed diagnostic error and leave output-directory lifecycle with
   the caller.
-  **Acceptance:** The harness self-test builds one executable for the entire
-  test-package invocation and uses that exact binary for every scenario.
+  **Outcome:** Added `BuildGrovlet`, which derives the matching module source,
+  builds into a caller-owned directory, and returns `ProcessError` diagnostics.
+  `grovetest` uses `TestMain` to build one binary shared by its entire suite.
 
-- [ ] 3. Control one real Grovlet process.
+- [x] 3. Control one real Grovlet process.
   **Context:** Add `StartNode`, `Node.WaitReady`, `Node.Stop`, `Node.Kill`,
   `Node.Restart`, `Node.Logs`, `Node.TempDir`, and `Node.Cleanup`. Parse the Task
   002 JSON lifecycle stream, retain combined output, preserve the runtime path
   across restarts, and return diagnostic errors on timeouts or process failure.
-  **Acceptance:** Every operation is documented, bounded waits use contexts,
-  cleanup is idempotent, and process output is safe to read while running.
+  **Outcome:** Added the complete documented single-node API in
+  `grovetest/grovetest.go`. Contexts bound waits, a synchronized buffer retains
+  output across restarts, and idempotent cleanup kills live children and removes
+  their runtime directories.
 
-- [ ] 4. Prove the complete harness workflow.
+- [x] 4. Prove the complete harness workflow.
   **Context:** Through a real binary, test startup/readiness, graceful stop,
   forced kill, successful restart after both stop modes, log retention, runtime
   directory reuse, cleanup of a live child, and invalid-runtime startup failure.
   Manipulate the stopped node's runtime path into a file to trigger the real
   Task 002 startup error after restart.
-  **Acceptance:** Tests contain no fixed sleeps, always clean up children, use
-  bounded contexts, verify typed failures include useful logs, and include a
-  runnable example of the normal node lifecycle.
+  **Outcome:** `TestNode` covers every required transition using one real binary
+  and no sleeps. It verifies `ProcessError` startup logs and cleanup of both
+  failed and live nodes; `ExampleNode` documents the normal lifecycle.
 
-- [ ] 5. Migrate the existing command integration test.
+- [x] 5. Migrate the existing command integration test.
   **Context:** Replace the Task 002 test's package-local binary building and
   direct `os/exec` lifecycle plumbing with `grovetest` calls while retaining its
   real-process readiness and graceful-stop coverage.
-  **Acceptance:** `cmd/grovlet/main_test.go` no longer owns a process harness or
-  invokes `os/exec` directly, and its real-process contract still passes.
+  **Outcome:** `TestGrovletProcess` now uses `BuildGrovlet`, `StartNode`,
+  `WaitReady`, and `Stop`. The package-local process helpers and direct
+  `os/exec` usage were removed while the real-process contract remains covered.
 
-- [ ] 6. Verify and close Task 003.
+- [x] 6. Verify and close Task 003.
   **Context:** Review exported docs and tests, format the repository, run focused
   harness tests plus all earlier tests, and mark only Task 003 DONE after every
   check succeeds.
-  **Acceptance:** `gofmt -l`, `go vet ./...`, repeated harness runs,
-  `go test -race ./...`, and `go test ./...` pass with no leaked processes or
-  unintended changes.
+  **Outcome:** Reviewed the complete `go doc` contract and test sources;
+  `gofmt -l` reports no files; `go vet ./...`, ten consecutive `TestNode` runs,
+  `go test -race -count=1 ./...`, and `go test -count=1 ./...` pass. Task 003 is
+  marked DONE with no leaked processes or unintended changes.
 
 ## Log
 
@@ -104,3 +109,8 @@ and unique node-level networking details.
 - 2026-09-08: Selected Task 003 and recorded the public single-node API,
   diagnostics model, test-build reuse, Task 002 test migration, and Task 004
   boundary.
+- 2026-09-08: The focused `grovetest` and migrated `cmd/grovlet` suites pass;
+  every Task 003 process transition and cleanup path is covered without sleeps.
+- 2026-09-08: Completed Task 003 after API documentation review, vet, race,
+  repeated harness, and full-suite verification; no deviations or architectural
+  issues found.

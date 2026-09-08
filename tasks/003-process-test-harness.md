@@ -1,6 +1,6 @@
 # Task 003 — Process test harness
 
-Status: TODO
+Status: DONE
 Depends on: 002
 
 ## Goal
