@@ -21,6 +21,9 @@ const (
 	ErrorHandler ErrorCode = "handler"
 	// ErrorSerialization identifies request or response serialization failure.
 	ErrorSerialization ErrorCode = "serialization"
+	// ErrorTransport identifies a failure exchanging an invocation with its
+	// destination.
+	ErrorTransport ErrorCode = "transport"
 )
 
 // RequestEnvelope carries one serialized invocation independently of network

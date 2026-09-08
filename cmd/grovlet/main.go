@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
@@ -22,13 +23,16 @@ var (
 	errRuntimeDirRequired = errors.New("runtime directory is required")
 	errSystemNATSConflict = errors.New("system NATS listen address and URL are mutually exclusive")
 	errSystemNATSRequired = errors.New("system NATS endpoint requires a listen address or URL")
+	errGroveShopEndpoint  = errors.New("reference application service placement requires a System NATS endpoint")
 )
 
 type config struct {
-	runtimeDir        string
-	systemNATSListen  string
-	systemNATSURL     string
-	systemNATSSubject string
+	runtimeDir                string
+	systemNATSListen          string
+	systemNATSURL             string
+	systemNATSSubject         string
+	groveShopInventory        bool
+	groveShopInventorySubject string
 }
 
 type lifecycleEvent struct {
@@ -95,6 +99,8 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.StringVar(&cfg.systemNATSListen, "system-nats-listen", "", "loopback address for an embedded System NATS server")
 	flags.StringVar(&cfg.systemNATSURL, "system-nats-url", "", "System NATS server URL")
 	flags.StringVar(&cfg.systemNATSSubject, "system-nats-subject", "", "System NATS transport endpoint subject")
+	flags.BoolVar(&cfg.groveShopInventory, "grove-shop-inventory", false, "register Grove Shop Inventory on this Grovlet")
+	flags.StringVar(&cfg.groveShopInventorySubject, "grove-shop-orders-inventory-subject", "", "explicit Inventory endpoint for Grove Shop Orders")
 	if err := flags.Parse(args); err != nil {
 		return config{}, fmt.Errorf("parse flags: %w", err)
 	}
@@ -109,6 +115,9 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	}
 	if cfg.systemNATSSubject != "" && cfg.systemNATSListen == "" && cfg.systemNATSURL == "" {
 		return config{}, errSystemNATSRequired
+	}
+	if (cfg.groveShopInventory || cfg.groveShopInventorySubject != "") && cfg.systemNATSSubject == "" {
+		return config{}, errGroveShopEndpoint
 	}
 	return cfg, nil
 }
@@ -152,12 +161,46 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 	}
 	runtime.transport = transport
 	if cfg.systemNATSSubject != "" {
+		handler := systemnats.Handler(func(_ context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
+			return grove.ResponseEnvelope{Payload: request.Payload}
+		})
+		if cfg.groveShopInventory || cfg.groveShopInventorySubject != "" {
+			registry := &grove.Registry{}
+			if cfg.groveShopInventory {
+				if err := groveshop.RegisterInventory(registry, &groveshop.Inventory{}); err != nil {
+					runtime.stop()
+					return nil, fmt.Errorf("register Grove Shop Inventory: %w", err)
+				}
+			}
+			if cfg.groveShopInventorySubject != "" {
+				inventoryClient, err := transport.RoutedClient(cfg.groveShopInventorySubject)
+				if err != nil {
+					runtime.stop()
+					return nil, err
+				}
+				orders := groveshop.NewGroveOrders(
+					inventoryClient,
+					&groveshop.Payment{},
+					&groveshop.Shipping{},
+				)
+				if err := groveshop.RegisterOrders(registry, orders); err != nil {
+					runtime.stop()
+					return nil, fmt.Errorf("register Grove Shop Orders: %w", err)
+				}
+			}
+			dispatcher, err := grove.NewDispatcher(registry)
+			if err != nil {
+				runtime.stop()
+				return nil, err
+			}
+			handler = func(ctx context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
+				return dispatcher.Dispatch(ctx, request)
+			}
+		}
 		if err := transport.Serve(
 			ctx,
 			cfg.systemNATSSubject,
-			func(_ context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
-				return grove.ResponseEnvelope{Payload: request.Payload}
-			},
+			handler,
 		); err != nil {
 			runtime.stop()
 			return nil, err

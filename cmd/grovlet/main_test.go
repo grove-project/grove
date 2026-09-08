@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/systemnats"
 )
@@ -254,6 +255,105 @@ func TestGrovletSystemNATSTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := host.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Orders and Inventory keep one Grove call path when placed in separate real
+// Grovlet processes.
+func TestGrovletCrossNodeServiceInvocation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	const (
+		ordersSubject    = "_GROVE.system.invoke.orders-node"
+		inventorySubject = "_GROVE.system.invoke.inventory-node"
+	)
+
+	ordersNode, err := grovetest.StartNode(
+		grovletPath,
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-subject", ordersSubject,
+		"--grove-shop-orders-inventory-subject", inventorySubject,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := ordersNode.Cleanup(); err != nil {
+			t.Errorf("cleanup Orders node: %v", err)
+		}
+	})
+	if err := ordersNode.WaitReady(ctx); err != nil {
+		t.Fatal(err)
+	}
+	serverURL := systemNATSURLFromLogs(t, ordersNode.Logs())
+
+	inventoryNode, err := grovetest.StartNode(
+		grovletPath,
+		"--system-nats-url", serverURL,
+		"--system-nats-subject", inventorySubject,
+		"--grove-shop-inventory",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := inventoryNode.Cleanup(); err != nil {
+			t.Errorf("cleanup Inventory node: %v", err)
+		}
+	})
+	if err := inventoryNode.WaitReady(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	transport, err := systemnats.Connect(ctx, serverURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(transport.Close)
+	client, err := transport.RoutedClient(ordersSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](
+		ctx,
+		client,
+		groveshop.ServiceOrders,
+		groveshop.MethodCreateOrder,
+		groveshop.CreateOrderRequest{
+			OrderID:         "order-cross-node",
+			SKU:             "coffee-beans",
+			Quantity:        2,
+			AmountCents:     2400,
+			ShippingAddress: "12 Grove Lane",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != groveshop.OrderCompleted {
+		t.Errorf("cross-node order status = %q; want %q", created.Status, groveshop.OrderCompleted)
+	}
+	if created.Reservation.ID != "reservation-order-cross-node" {
+		t.Errorf("cross-node reservation ID = %q; want reservation-order-cross-node", created.Reservation.ID)
+	}
+
+	_, err = grove.Call[groveshop.CreateOrderRequest, groveshop.Order](
+		ctx,
+		client,
+		groveshop.ServiceOrders,
+		groveshop.MethodCreateOrder,
+		groveshop.CreateOrderRequest{OrderID: "invalid-cross-node", SKU: "coffee-beans"},
+	)
+	var responseErr *grove.ResponseError
+	if !errors.As(err, &responseErr) || responseErr.Code != grove.ErrorHandler {
+		t.Errorf("cross-node handler error = %v; want handler ResponseError", err)
+	}
+
+	if err := inventoryNode.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := ordersNode.Stop(ctx); err != nil {
 		t.Fatal(err)
 	}
 }

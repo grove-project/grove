@@ -60,27 +60,40 @@ balance, or add a second remote call API.
   **Outcome:** Chose one Client/Call API with local and explicit-subject routes,
   shared Registry dispatch, and no placement or discovery.
 
-- [ ] 2. Generalize Client routing and Registry dispatch.
+- [x] 2. Generalize Client routing and Registry dispatch.
   **Context:** Add Router, Dispatcher, routed Client construction, and public
   transport failure classification while preserving local errors and tests.
-  **Outcome:** Pending.
+  **Outcome:** Added the runtime Router contract, routed Client construction,
+  reusable local Dispatcher, transport failure sentinel/code, and propagation
+  of nested remote failure classes. Existing local Client and Call behavior is
+  unchanged.
 
-- [ ] 3. Compose remote Grove Shop endpoints in Grovlets.
+- [x] 3. Compose remote Grove Shop endpoints in Grovlets.
   **Context:** Add explicit Orders/Inventory placement flags; build registries,
   create the Orders-to-peer routed client, and serve Dispatcher responses over
   the existing System NATS endpoint.
-  **Outcome:** Pending.
+  **Outcome:** Added explicit reference-app placement flags. A Grovlet can
+  register Inventory or construct Orders with an Inventory client routed to an
+  explicit peer subject, then serve the same Registry Dispatcher over its
+  existing System NATS endpoint.
 
-- [ ] 4. Prove same-API cross-node behavior.
+- [x] 4. Prove same-API cross-node behavior.
   **Context:** Start two real Grovlets, invoke Orders on A with ordinary
   `grove.Call`, traverse NATS to Inventory on B, verify the completed business
   result, verify structured remote failure, and clean up without sleeps.
-  **Outcome:** Pending.
+  **Outcome:** Added a two-real-process E2E where the test calls Orders on A,
+  A executes its registered handler and calls Inventory on B, and the completed
+  order returns through both request/reply hops. Invalid Inventory input returns
+  a structured remote handler failure; hidden routed-client tests also classify
+  unavailable subjects as transport failures.
 
-- [ ] 5. Verify and close Task 010.
+- [x] 5. Verify and close Task 010.
   **Context:** Review `go doc`, format, vet, run repeated and race tests, run the
   full repository suite, then mark Task 010 DONE after every check succeeds.
-  **Outcome:** Pending.
+  **Outcome:** Reviewed all affected `go doc` surfaces; `gofmt -l` reports no
+  files; `go vet ./...`, 25 repeated two-process Grove Shop E2Es, 50 repeated
+  routed transport integrations, 50 repeated Call tests, `go test -race
+  -count=1 ./...`, and `go test -count=1 ./...` pass. Task 010 is marked DONE.
 
 ## Log
 
@@ -89,3 +102,5 @@ balance, or add a second remote call API.
 - 2026-09-08: Selected Task 010 and recorded shared dispatch, hidden NATS
   routing, explicit reference-app composition, and the identity/placement
   boundary.
+- 2026-09-08: Completed Task 010 after focused, repeated, race, vet, and full
+  suite verification; no scope deviations or architectural issues found.

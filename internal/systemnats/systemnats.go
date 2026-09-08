@@ -195,6 +195,31 @@ func (t *Transport) Request(
 	return response, nil
 }
 
+// RoutedClient creates a Grove Client that sends every call to subject through
+// this System NATS connection.
+func (t *Transport) RoutedClient(subject string) (*grove.Client, error) {
+	if subject == "" {
+		return nil, &Error{Operation: "create routed Grove client", Err: ErrSubjectRequired}
+	}
+	return grove.NewRoutedClient(subjectRouter{transport: t, subject: subject})
+}
+
+type subjectRouter struct {
+	transport *Transport
+	subject   string
+}
+
+func (r subjectRouter) Route(
+	ctx context.Context,
+	request grove.RequestEnvelope,
+) (grove.ResponseEnvelope, error) {
+	response, err := r.transport.Request(ctx, r.subject, request)
+	if err != nil {
+		return grove.ResponseEnvelope{}, fmt.Errorf("request: %w: %w", grove.ErrTransportFailure, err)
+	}
+	return response, nil
+}
+
 // Close closes the System NATS connection. It is safe to call Close more than
 // once.
 func (t *Transport) Close() {

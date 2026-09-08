@@ -98,6 +98,31 @@ func TestTransportRequest(t *testing.T) {
 	if got := string(response.Payload); got != "handled inventory" {
 		t.Errorf("response payload = %q; want handled inventory", got)
 	}
+	if err := responder.Serve(ctx, "_GROVE.system.invoke.call", func(_ context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
+		return grove.ResponseEnvelope{Payload: request.Payload}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	client, err := requester.RoutedClient("_GROVE.system.invoke.call")
+	if err != nil {
+		t.Fatal(err)
+	}
+	called, err := grove.Call[string, string](ctx, client, 2, 1, "inventory")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called != "inventory" {
+		t.Errorf("routed Call() = %q; want inventory", called)
+	}
+	missingClient, err := requester.RoutedClient("_GROVE.system.invoke.missing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestCtx, cancelMissing := context.WithTimeout(t.Context(), time.Second)
+	defer cancelMissing()
+	if _, err := grove.Call[string, string](requestCtx, missingClient, 2, 1, "inventory"); !errors.Is(err, grove.ErrTransportFailure) {
+		t.Errorf("routed Call() transport error = %v; want %v", err, grove.ErrTransportFailure)
+	}
 
 	if err := responder.Serve(ctx, "", func(context.Context, grove.RequestEnvelope) grove.ResponseEnvelope {
 		return grove.ResponseEnvelope{}

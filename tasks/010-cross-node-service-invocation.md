@@ -1,6 +1,6 @@
 # Task 010 — Cross-node service invocation
 
-Status: TODO
+Status: DONE
 Depends on: 007, 009
 
 ## Goal

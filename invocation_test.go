@@ -52,6 +52,9 @@ func TestCall(t *testing.T) {
 		methodID  grove.MethodID  = 3
 	)
 	var registry grove.Registry
+	if _, err := grove.NewRoutedClient(nil); !errors.Is(err, grove.ErrRouterRequired) {
+		t.Errorf("NewRoutedClient() nil router error = %v; want %v", err, grove.ErrRouterRequired)
+	}
 	if _, err := grove.NewClient(nil); !errors.Is(err, grove.ErrRegistryRequired) {
 		t.Errorf("NewClient() nil registry error = %v; want %v", err, grove.ErrRegistryRequired)
 	}

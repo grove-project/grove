@@ -13,6 +13,11 @@ var (
 	ErrRegistryRequired = errors.New("registry is required")
 	// ErrClientRequired is returned when Call receives a nil Client.
 	ErrClientRequired = errors.New("client is required")
+	// ErrRouterRequired is returned when NewRoutedClient receives a nil Router.
+	ErrRouterRequired = errors.New("router is required")
+	// ErrTransportFailure identifies a failure to reach or exchange a response
+	// with a routed destination.
+	ErrTransportFailure = errors.New("transport failure")
 )
 
 var requestSequence atomic.Uint64
@@ -36,10 +41,17 @@ func (e *InvocationError) Unwrap() error {
 	return e.Err
 }
 
-// Client routes Grove calls. NewClient creates a Client whose destinations are
-// methods registered in the current process.
+// Router resolves an invocation envelope to a local or remote destination.
+// Runtime packages implement Router; application services continue to use
+// Call.
+type Router interface {
+	Route(context.Context, RequestEnvelope) (ResponseEnvelope, error)
+}
+
+// Client routes Grove calls without exposing the selected route to application
+// code.
 type Client struct {
-	registry *Registry
+	router Router
 }
 
 // NewClient creates a Client that resolves calls through registry.
@@ -47,7 +59,20 @@ func NewClient(registry *Registry) (*Client, error) {
 	if registry == nil {
 		return nil, ErrRegistryRequired
 	}
-	return &Client{registry: registry}, nil
+	dispatcher, err := NewDispatcher(registry)
+	if err != nil {
+		return nil, err
+	}
+	return &Client{router: localRouter{dispatcher: dispatcher}}, nil
+}
+
+// NewRoutedClient creates a Client using router. It changes call routing, not
+// the application-facing Call API.
+func NewRoutedClient(router Router) (*Client, error) {
+	if router == nil {
+		return nil, ErrRouterRequired
+	}
+	return &Client{router: router}, nil
 }
 
 // Call invokes one explicit service and method through client and returns its
@@ -73,12 +98,15 @@ func Call[Request, Response any](
 		return zero, invocationError(serviceID, methodID, err)
 	}
 	requestID := "request-" + strconv.FormatUint(requestSequence.Add(1), 10)
-	response := client.invoke(ctx, RequestEnvelope{
+	response, err := client.router.Route(ctx, RequestEnvelope{
 		RequestID: requestID,
 		ServiceID: serviceID,
 		MethodID:  methodID,
 		Payload:   payload,
 	})
+	if err != nil {
+		return zero, invocationError(serviceID, methodID, err)
+	}
 	if response.RequestID != requestID {
 		return zero, invocationError(serviceID, methodID, ErrRequestIDMismatch)
 	}
@@ -91,9 +119,24 @@ func Call[Request, Response any](
 	return zero, nil
 }
 
-func (c *Client) invoke(ctx context.Context, request RequestEnvelope) ResponseEnvelope {
+// Dispatcher executes invocation envelopes against one local Registry.
+type Dispatcher struct {
+	registry *Registry
+}
+
+// NewDispatcher creates a local envelope dispatcher for registry.
+func NewDispatcher(registry *Registry) (*Dispatcher, error) {
+	if registry == nil {
+		return nil, ErrRegistryRequired
+	}
+	return &Dispatcher{registry: registry}, nil
+}
+
+// Dispatch resolves and executes request and returns a correlated response with
+// a structured dispatch, handler, or serialization failure.
+func (d *Dispatcher) Dispatch(ctx context.Context, request RequestEnvelope) ResponseEnvelope {
 	response := ResponseEnvelope{RequestID: request.RequestID}
-	handler, err := c.registry.Resolve(request.ServiceID, request.MethodID)
+	handler, err := d.registry.Resolve(request.ServiceID, request.MethodID)
 	if err != nil {
 		response.Error = responseError(ErrorDispatch, err)
 		return response
@@ -102,12 +145,25 @@ func (c *Client) invoke(ctx context.Context, request RequestEnvelope) ResponseEn
 	if err != nil {
 		code := ErrorHandler
 		var codecErr *CodecError
-		if errors.As(err, &codecErr) {
+		var remoteErr *ResponseError
+		if errors.As(err, &remoteErr) {
+			code = remoteErr.Code
+		} else if errors.Is(err, ErrTransportFailure) {
+			code = ErrorTransport
+		} else if errors.As(err, &codecErr) {
 			code = ErrorSerialization
 		}
 		response.Error = responseError(code, err)
 	}
 	return response
+}
+
+type localRouter struct {
+	dispatcher *Dispatcher
+}
+
+func (r localRouter) Route(ctx context.Context, request RequestEnvelope) (ResponseEnvelope, error) {
+	return r.dispatcher.Dispatch(ctx, request), nil
 }
 
 func invocationError(serviceID ServiceID, methodID MethodID, err error) error {
