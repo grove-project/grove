@@ -114,4 +114,21 @@ Inspection should expose information such as config revision/digest, encoding an
 Artifact Hashing  
 Grove should distinguish a code digest that excludes or normalizes the reserved configuration section from the complete artifact digest. This allows two customer artifacts to prove they contain identical executable code while still having distinct configuration and artifact identities.
 
-The resulting operational model is round-trip and self-contained: YAML is used to author configuration; Grove compiles it into a compact typed embedded representation; the resulting binary is the deployment source of truth; and Grove can always inspect or extract that configuration back into an operator-friendly form.  
+The resulting operational model is round-trip and self-contained: YAML is used to author configuration; Grove compiles it into a compact typed embedded representation; the resulting binary is the deployment source of truth; and Grove can always inspect or extract that configuration back into an operator-friendly form.
+
+Placement Eligibility During Deployment  
+Grove separates service eligibility from scheduling preference. A service may optionally include placement-validation logic through the SDK. Every Grovlet evaluates that logic against its own local environment, and only Grovlets that pass are eligible to host the service.
+
+A service with no placement validator is eligible on every Grove node. Developers therefore do not need placement declarations for ordinary portable services.
+
+This is especially useful in mixed cloud/edge deployments. A service that must reach a customer-LAN endpoint can validate that requirement directly. The same application binary may be present on every node, but only the edge Grovlets that can actually reach the endpoint become placement candidates.
+
+For example:
+
+  cloud-a       cannot reach customer LAN   → ineligible  
+  edge-a        can reach customer LAN      → eligible  
+  edge-b        cannot reach endpoint       → ineligible
+
+The deployment model should prefer testing real environmental capability over forcing operators to mirror that capability through manually maintained node labels. Labels, affinity, locality, resource scoring, or other scheduling policy may still influence which eligible node Grove chooses, but they must not override failed placement validation.
+
+Placement validation is a hard runtime requirement. Scheduling policy is an optimization among nodes that have already demonstrated they can run the service.
