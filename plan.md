@@ -1,112 +1,108 @@
-# Plan: Bootstrap a shared System NATS cluster
+# Plan: Replicate Grove membership through JetStream/KV
 
 ## Goal
 
-Complete Task 012 by allowing explicitly identified Grovlets to start embedded
-NATS route listeners, join through a configured seed route, and announce
-readiness only after the route is established. Prove three real Grovlet
-processes exchange control-plane messages through distinct embedded servers in
-one System NATS fabric without introducing Grove membership or consensus.
+Complete Task 013 by enabling JetStream on clustered embedded System NATS
+servers, registering every Grovlet's logical identity in one replicated KV
+bucket, maintaining a watched local membership view, and exposing that view
+through a machine-readable per-node System NATS endpoint. Prove three real
+Grovlets converge on the same membership records without adding health,
+placement, or a parallel consensus mechanism.
 
 ## Context
 
-Tasks 001 through 011 are complete. Task 012 owns only NATS server-cluster
-bootstrap. Task 013 will enable JetStream/KV and define authoritative Grove
-membership, so NATS route connectivity must not be presented as logical node
-membership or persisted as Grove control state.
+Tasks 001 through 012 are complete. Task 012 established NATS server-route
+connectivity but deliberately did not equate NATS peers with Grove members.
+Task 013 introduces the first authoritative Grove control state on NATS
+JetStream/KV. Task 014 owns ephemeral heartbeats and health transitions, so
+membership records remain durable declarations containing only node ID and
+advertised endpoint.
 
 ### Key Files
 
-- `tasks/012-static-cluster-join.md` — explicit seed bootstrap and three-process
-  E2E requirements.
-- `tasks/013-membership-view.md` — boundary for JetStream/KV and logical Grove
-  membership.
-- `internal/systemnats/systemnats.go` — embedded server lifecycle and hidden
-  NATS transport.
-- `internal/systemnats/systemnats_test.go` — server-cluster and cross-route
-  transport contract tests.
-- `cmd/grovlet/main.go` — process flags, startup validation, and readiness
-  metadata.
-- `cmd/grovlet/main_test.go` — real-process bootstrap E2E and configuration
-  validation.
+- `tasks/013-membership-view.md` — JetStream/KV membership and convergence
+  requirements.
+- `tasks/014-heartbeats-and-node-health.md` — boundary for liveness and health.
+- `internal/systemnats/systemnats.go` — embedded NATS cluster configuration
+  and transport connection.
+- `internal/systemnats/membership.go` — planned KV schema, watcher-backed view,
+  and query endpoint.
+- `cmd/grovlet/main.go` — clustered server storage, membership lifecycle, and
+  per-node API startup.
+- `cmd/grovlet/main_test.go` — real-process three-node convergence E2E.
 
 ### Decisions Made
 
-- Keep the existing standalone `StartServer` entry point and add a clustered
-  server entry point configured with a node name, client listener, route
-  listener, and explicit seed route URLs.
-- Use NATS server routes and NATS's own cluster behavior. Do not add a Grove
-  discovery, election, membership, or consensus protocol.
-- A clustered Grovlet embeds its own NATS server and connects its runtime
-  transport to that local server. Joiners receive a seed's route URL, not its
-  client URL.
-- Allow port zero for both client and route listeners so the embedded server
-  selects ports without a test-side reservation race. Publish both resulting
-  URLs in the ready event.
-- Require Task 011 identity when clustered startup is configured so the NATS
-  server name is stable and independent of host identity.
-- A joiner does not report ready until its embedded server has at least one
-  established NATS route. Bounded condition waits carry startup context errors;
-  no fixed sleeps are used.
-- Prove one shared plane by connecting a test client to the seed's client URL
-  and requesting unique endpoint subjects hosted by all three Grovlets.
+- Enable JetStream only for clustered embedded System NATS servers and store
+  each server's data beneath its harness-owned or configured Grovlet runtime
+  directory.
+- Use one file-backed `GROVE_MEMBERSHIP` KV bucket with three replicas and
+  history depth one. Keys are `nodes.<node-id>`; JSON values contain exactly
+  the stable node ID and advertised endpoint.
+- Treat JetStream/KV as authoritative. Each Grovlet may cache a sorted observed
+  view populated by `WatchAll`, but the cache is not a second source of truth.
+- Start the membership query responder before KV convergence. Its JSON response
+  reports readiness, the current sorted records, and a transient error when
+  initialization is still retrying.
+- Create/register/watch asynchronously because the first seed Grovlet must
+  publish its dynamically selected NATS route URL before a three-replica bucket
+  can be created. Retry is a bounded condition loop tied to process context.
+- Address query endpoints by logical node ID on System NATS so tests and the
+  future CLI can ask a specific Grovlet for its locally observed view.
+- Keep membership records after process exit. Health/unavailability and any
+  removal policy belong to Task 014 or later recovery work.
 
 ## Sub-Tasks
 
-- [x] 1. Select and bound Task 012.
-  **Context:** Read Task 012, Task 013, accepted NATS ADRs, SDK transport
-  boundaries, the current embedded server/runtime, and the pinned NATS API.
-  **Outcome:** Chose explicit NATS route seeding with independently embedded
-  servers, route-gated readiness, and no JetStream/KV or Grove membership.
+- [x] 1. Select and bound Task 013.
+  **Context:** Read Task 013, Task 014, accepted control-plane architecture,
+  current routed server/runtime, and the pinned JetStream/KV APIs.
+  **Outcome:** Chose a three-replica file-backed KV bucket, watcher-derived local
+  views, asynchronous bootstrap, and a per-node JSON request/reply endpoint,
+  with heartbeat health explicitly excluded.
 
-- [x] 2. Extend the embedded System NATS server for routed clustering.
-  **Context:** Add configuration for node name, client/route listeners, and seed
-  URLs; expose the selected route URL; and wait for at least one route when a
-  join seed is configured while preserving standalone startup.
-  **Outcome:** Added clustered embedded-server configuration, strict route URL
-  parsing, dynamic client/route ports, selected route URL reporting, and a
-  bounded route-established startup gate. Package tests join two independent
-  servers and exchange a correlated Grove envelope across the route; invalid
-  config and an unreachable seed are also covered.
+- [ ] 2. Enable clustered JetStream storage.
+  **Context:** Extend clustered embedded-server configuration with an optional
+  storage directory and enable JetStream when supplied. Grovlet must use a
+  node-local path under its runtime directory.
+  **Acceptance:** Clustered server tests can start three JetStream peers with
+  distinct storage directories while standalone behavior remains unchanged.
 
-- [x] 3. Configure clustered Grovlet startup and readiness.
-  **Context:** Add route-listen and seed flags, reject incomplete or conflicting
-  combinations, start the clustered embedded server using the explicit node ID,
-  and include the route URL in the machine-readable ready event.
-  **Outcome:** Added explicit route-listen and seed flags, combination and route
-  URL validation, stable NATS server naming from node identity, local transport
-  connection to each embedded server, and the selected route URL in readiness.
-  Prior standalone and external-server configurations remain compatible.
+- [ ] 3. Implement authoritative membership and watched views.
+  **Context:** Define the bucket, key/value schema, registration, retrying
+  create/open behavior, WatchAll observation, sorted snapshots, and clean
+  cancellation in the hidden System NATS package.
+  **Acceptance:** Package tests verify three-replica bucket configuration,
+  node registration, watch convergence, deterministic ordering, and context
+  shutdown without a parallel state store.
 
-- [x] 4. Prove a three-Grovlet shared System NATS plane.
-  **Context:** Start one seed and two joiners as real OS processes with unique
-  runtime directories, identities, client listeners, route listeners, and
-  endpoint subjects. Use each joiner's explicit seed configuration and request
-  every subject through only the seed's client endpoint.
-  **Outcome:** Added a real three-process E2E with one seed and two explicit
-  joiners. It verifies distinct client and route URLs, then connects only to the
-  seed and receives correlated responses from every Grovlet subject using a
-  bounded condition wait with all process logs on timeout.
+- [ ] 4. Expose and manage the per-Grovlet membership API.
+  **Context:** Serve a JSON membership response on a node-addressed System NATS
+  subject before asynchronous KV initialization; wire its goroutine lifecycle
+  into Grovlet shutdown.
+  **Acceptance:** Callers can query a specific node and distinguish initializing
+  from converged state; shutdown cancels and joins membership work before the
+  NATS transport closes.
 
-- [x] 5. Verify and close Task 012.
-  **Context:** Review exported docs, format, vet, repeat focused package and E2E
-  tests, run race and full suites, then mark Task 012 DONE.
-  **Outcome:** Exported API documentation and the complete diff were reviewed;
-  `gofmt -l .` and `git diff --check` are clean. `go vet ./...`, 25 repeated
-  clustered-server tests, 25 repeated three-process cluster E2Es,
-  `go test -race -count=1 ./...`, and `go test -count=1 ./...` pass. Task 012
-  is marked DONE.
+- [ ] 5. Prove three-Grovlet membership convergence.
+  **Context:** Launch one seed and two joiners as real processes, query each
+  node's local membership endpoint through its own System NATS client URL, and
+  condition-wait for identical views containing all three IDs and endpoints.
+  **Acceptance:** The E2E has no fixed sleeps, includes every process log on
+  timeout, and proves every Grovlet observes the same three records.
+
+- [ ] 6. Verify and close Task 013.
+  **Context:** Review exported docs and schema boundaries, format, vet, repeat
+  focused membership/E2E tests, run race and full suites, then mark Task 013
+  DONE.
+  **Acceptance:** `gofmt -l` is empty; `go vet ./...`, focused repeated tests,
+  `go test -race -count=1 ./...`, and `go test -count=1 ./...` pass without
+  weakening prior coverage.
 
 ## Log
 
-- 2026-09-08: Tasks 001 through 011 completed with focused, repeated, race,
+- 2026-09-08: Tasks 001 through 012 completed with focused, repeated, race,
   vet, and full-suite checks passing.
-- 2026-09-08: Selected Task 012 and recorded NATS route seeding,
-  independently embedded servers, route-gated readiness, and the Task 013
-  membership boundary.
-- 2026-09-08: Extended the hidden System NATS runtime with explicit clustered
-  startup and verified cross-route request/reply plus readiness failure.
-- 2026-09-08: Wired clustered startup into Grovlet configuration/readiness and
-  passed the focused three-process shared-plane E2E.
-- 2026-09-08: Completed Task 012 after repeated, vet, race, formatting, and full
-  suite verification; no scope deviations or architectural issues found.
+- 2026-09-08: Selected Task 013 and recorded the replicated membership schema,
+  async three-node bootstrap, watcher-derived views, query API, and Task 014
+  health boundary.
