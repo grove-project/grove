@@ -1,104 +1,106 @@
-# Plan: Implement the Grovlet executable lifecycle
+# Plan: Implement the Grovlet process test harness
 
 ## Goal
 
-Complete Task 002 by making `grovlet` a long-running process with an explicit
-runtime directory, newline-delimited JSON readiness, clear startup failures,
-and graceful SIGTERM shutdown. Verify the lifecycle through unit tests and a
-real-process integration test without introducing the reusable Task 003 test
-harness.
+Complete Task 003 by adding a reusable `grovetest` Go package that builds and
+controls the real Grovlet executable. The harness must provide deterministic
+readiness, graceful stop, forced kill, restart, logs, isolated temporary state,
+cleanup, and startup-failure diagnostics without adding multi-node behavior.
 
 ## Context
 
 The repository is on branch `adiludmer/implement-mvp` with `origin/main` as
-its base. Task 001 is complete in commits `e0b47e3` and `772314b`; the current
-`cmd/grovlet` command only prints its name and exits. Task 002 in
-`tasks/002-grovlet-executable-lifecycle.md` is the sole implementation scope.
-The accepted Grovlet process model makes this process the node supervisor, but
-worker supervision, node identity, membership, services, and transport remain
-future tasks.
-
-An unrelated `.idea/` directory was present at task start and belongs to the
-user. Do not modify or commit it.
+its base. Tasks 001 and 002 are complete; Task 002 established the executable
+contract consumed here: `grovlet --runtime-dir PATH` emits newline-delimited
+`{"event":"ready"}` and `{"event":"stopped"}` records and handles SIGTERM.
+Task 003 in `tasks/003-process-test-harness.md` is the sole implementation
+scope. Task 004 owns cluster composition, node counts, multi-node diagnostics,
+and unique node-level networking details.
 
 ### Key Files
 
-- `tasks/002-grovlet-executable-lifecycle.md` — lifecycle scope and completion
-  state.
-- `cmd/grovlet/main.go` — flag parsing, runtime-directory preparation,
-  lifecycle events, and signal-controlled entry point.
-- `cmd/grovlet/main_test.go` — unit and direct-`os/exec` process coverage.
-- `tasks/003-process-test-harness.md` — boundary for reusable process-testing
-  support that must not be implemented yet.
-- `tasks/011-node-identity-and-endpoint.md` — boundary for node identity and
-  advertised readiness fields that must not be introduced here.
+- `tasks/003-process-test-harness.md` — required harness operations and tests.
+- `grovetest/grovetest.go` — exported binary-build and node-process harness.
+- `grovetest/grovetest_test.go` — runnable example and real-process harness
+  self-test.
+- `cmd/grovlet/main_test.go` — existing direct-`os/exec` integration coverage
+  to migrate onto `grovetest` once the harness exists.
+- `tasks/004-local-multi-grovlet-cluster-harness.md` — boundary for future
+  multi-node orchestration.
 
 ### Decisions Made
 
-- Require `--runtime-dir` so every process receives explicit isolated state;
-  create a missing directory with owner-only permissions and reject unusable
-  paths before reporting readiness.
-- Emit one JSON object per stdout line: `{"event":"ready"}` after startup
-  validation and `{"event":"stopped"}` after graceful shutdown. Keep startup
-  diagnostics human-readable on stderr.
-- Handle SIGTERM through a cancellable context. Unit tests cancel the context
-  directly; the integration test signals a real child process.
-- Build the real binary once inside this package's tests using direct
-  `os/exec`. Do not create reusable `grovetest` APIs before Task 003.
-- Use bounded condition waits and channel synchronization only; no fixed sleeps.
+- Keep `grovetest` as a public root package because later Grove application and
+  E2E tests are explicit consumers of the harness.
+- `BuildGrovlet` takes a context plus caller-owned output directory and derives
+  the matching Grove module source directory, allowing one build to be reused
+  throughout a test-package invocation.
+- `StartNode` creates and owns one isolated runtime directory. `Restart` reuses
+  that directory, while `Cleanup` forcibly stops any live process and removes
+  the directory idempotently.
+- `WaitReady`, `Stop`, and `Kill` take caller-controlled contexts. Timeouts and
+  premature exits return a typed `ProcessError` containing captured logs.
+- Preserve logs across restarts and synchronize log access so failure
+  diagnostics are safe while a child is running.
+- Keep node lifecycle sequential. Concurrent method calls and multi-node
+  semantics are not promised by Task 003.
+- Build the binary once in the harness self-test's `TestMain`; use no fixed
+  sleeps or shell orchestration.
 
 ## Sub-Tasks
 
-- [x] 1. Select and bound Task 002.
-  **Context:** Read `AGENTS.md`, `IMPLEMENTATION_PLAN.md`, Task 002, the process
-  model, relevant SDK/demo guidance, and the Task 003 and Task 011 boundaries.
-  **Outcome:** Limited the change to executable lifecycle behavior and chose a
-  minimal JSON event protocol without worker, node, service, or cluster state.
+- [x] 1. Select and bound Task 003.
+  **Context:** Read `AGENTS.md`, `IMPLEMENTATION_PLAN.md`, Task 003, the current
+  Grovlet protocol, relevant SDK/demo testing guidance, and the Task 004
+  boundary.
+  **Outcome:** Chose a public, error-returning single-node process harness with
+  context-bounded waits and no cluster, membership, service, or transport APIs.
 
-- [x] 2. Validate and prepare the runtime directory.
-  **Context:** Parse `--runtime-dir` with an isolated `flag.FlagSet`, require a
-  non-empty value, create missing directories, and return typed startup errors
-  for invalid paths.
-  **Outcome:** `cmd/grovlet/main.go` now requires `--runtime-dir`, creates it
-  with owner-only permissions, rejects positional arguments, and returns a
-  `runtimeDirError` for unusable paths. `TestParseConfig` and
-  `TestPrepareRuntimeDir` pass.
+- [ ] 2. Build the matching Grovlet executable.
+  **Context:** Add `BuildGrovlet(ctx, outputDir)` to compile `cmd/grovlet` from
+  the module source associated with the `grovetest` package. Capture compiler
+  output in a typed diagnostic error and leave output-directory lifecycle with
+  the caller.
+  **Acceptance:** The harness self-test builds one executable for the entire
+  test-package invocation and uses that exact binary for every scenario.
 
-- [x] 3. Run until graceful shutdown.
-  **Context:** Emit the ready event only after startup succeeds, block on the
-  provided context, emit the stopped event after cancellation, and have `main`
-  translate SIGTERM into that cancellation.
-  **Outcome:** `run` emits newline-delimited JSON lifecycle events and blocks on
-  its context; `main` derives that context from SIGTERM. `TestRun` uses
-  `testing/synctest` to verify readiness, continued liveness, shutdown, and
-  output-error propagation without sleeps.
+- [ ] 3. Control one real Grovlet process.
+  **Context:** Add `StartNode`, `Node.WaitReady`, `Node.Stop`, `Node.Kill`,
+  `Node.Restart`, `Node.Logs`, `Node.TempDir`, and `Node.Cleanup`. Parse the Task
+  002 JSON lifecycle stream, retain combined output, preserve the runtime path
+  across restarts, and return diagnostic errors on timeouts or process failure.
+  **Acceptance:** Every operation is documented, bounded waits use contexts,
+  cleanup is idempotent, and process output is safe to read while running.
 
-- [x] 4. Prove the real process lifecycle.
-  **Context:** Build the actual `grovlet` binary once for this test package,
-  launch it with a temporary runtime directory, decode readiness, send SIGTERM,
-  and require the stopped event plus exit status zero. Separately run it with an
-  invalid runtime path and require a non-zero exit with useful diagnostics.
-  **Outcome:** `TestGrovletProcess` builds one real binary, verifies the complete
-  SIGTERM lifecycle, and verifies invalid-path startup failure. It uses bounded
-  contexts, temporary paths, deferred child cleanup, and stderr diagnostics;
-  the focused integration run passes.
+- [ ] 4. Prove the complete harness workflow.
+  **Context:** Through a real binary, test startup/readiness, graceful stop,
+  forced kill, successful restart after both stop modes, log retention, runtime
+  directory reuse, cleanup of a live child, and invalid-runtime startup failure.
+  Manipulate the stopped node's runtime path into a file to trigger the real
+  Task 002 startup error after restart.
+  **Acceptance:** Tests contain no fixed sleeps, always clean up children, use
+  bounded contexts, verify typed failures include useful logs, and include a
+  runnable example of the normal node lifecycle.
 
-- [x] 5. Verify and close Task 002.
-  **Context:** Review package documentation and tests, format the repository,
-  run focused tests and all earlier tests, and mark only Task 002 DONE after all
-  checks pass.
-  **Outcome:** Package docs and tests were reviewed; the binary builds;
-  `gofmt -l` reports no files; `go vet ./...`, `go test -race -count=1 ./...`,
-  ten consecutive real-process test runs, and `go test -count=1 ./...` pass.
-  Task 002 is marked DONE and the unrelated `.idea/` content was not included.
+- [ ] 5. Migrate the existing command integration test.
+  **Context:** Replace the Task 002 test's package-local binary building and
+  direct `os/exec` lifecycle plumbing with `grovetest` calls while retaining its
+  real-process readiness and graceful-stop coverage.
+  **Acceptance:** `cmd/grovlet/main_test.go` no longer owns a process harness or
+  invokes `os/exec` directly, and its real-process contract still passes.
+
+- [ ] 6. Verify and close Task 003.
+  **Context:** Review exported docs and tests, format the repository, run focused
+  harness tests plus all earlier tests, and mark only Task 003 DONE after every
+  check succeeds.
+  **Acceptance:** `gofmt -l`, `go vet ./...`, repeated harness runs,
+  `go test -race ./...`, and `go test ./...` pass with no leaked processes or
+  unintended changes.
 
 ## Log
 
-- 2026-09-08: Task 001 completed without deviations or architectural issues;
-  `go vet ./...`, `go test ./...`, and race-enabled tests passed.
-- 2026-09-08: Selected Task 002 and recorded the JSON lifecycle protocol,
-  runtime-directory behavior, signal path, and adjacent-task boundaries.
-- 2026-09-08: Runtime-directory, lifecycle, and real-process tests pass; no
-  fixed sleeps or reusable Task 003 harness APIs were introduced.
-- 2026-09-08: Completed Task 002 after format, vet, race, repeated integration,
-  and full-suite verification; no deviations or architectural issues found.
+- 2026-09-08: Tasks 001 and 002 completed without deviations or architectural
+  issues; the Grovlet lifecycle and real-process tests pass.
+- 2026-09-08: Selected Task 003 and recorded the public single-node API,
+  diagnostics model, test-build reuse, Task 002 test migration, and Task 004
+  boundary.
