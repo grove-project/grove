@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 )
@@ -25,6 +26,9 @@ var (
 	ErrNodeCleaned = errors.New("node has been cleaned up")
 	// ErrNodeRunning is returned when Restart targets a running Node.
 	ErrNodeRunning = errors.New("node is still running")
+	// ErrRuntimeDirArgument is returned when StartNode arguments try to replace
+	// the harness-owned runtime directory.
+	ErrRuntimeDirArgument = errors.New("runtime directory argument is owned by grovetest")
 )
 
 var (
@@ -97,6 +101,7 @@ func groveModuleDir() (string, error) {
 // process is running.
 type Node struct {
 	binaryPath string
+	args       []string
 	id         string
 	port       int
 	tempDir    string
@@ -106,9 +111,10 @@ type Node struct {
 }
 
 // StartNode starts binaryPath as a Grovlet with a new isolated runtime
-// directory. Call Cleanup when the test finishes.
-func StartNode(binaryPath string) (*Node, error) {
-	node, err := newNode(binaryPath)
+// directory and additional command arguments. Arguments must not set
+// --runtime-dir. Call Cleanup when the test finishes.
+func StartNode(binaryPath string, args ...string) (*Node, error) {
+	node, err := newNode(binaryPath, args)
 	if err != nil {
 		return nil, err
 	}
@@ -119,12 +125,17 @@ func StartNode(binaryPath string) (*Node, error) {
 	return node, nil
 }
 
-func newNode(binaryPath string) (*Node, error) {
+func newNode(binaryPath string, args []string) (*Node, error) {
+	for _, arg := range args {
+		if arg == "--runtime-dir" || strings.HasPrefix(arg, "--runtime-dir=") {
+			return nil, &ProcessError{Operation: "configure node", Err: ErrRuntimeDirArgument}
+		}
+	}
 	tempDir, err := os.MkdirTemp("", "grovetest-node-")
 	if err != nil {
 		return nil, &ProcessError{Operation: "create node runtime directory", Err: err}
 	}
-	return &Node{binaryPath: binaryPath, tempDir: tempDir}, nil
+	return &Node{binaryPath: binaryPath, args: append([]string(nil), args...), tempDir: tempDir}, nil
 }
 
 func (n *Node) start() error {
@@ -136,7 +147,8 @@ func (n *Node) start() error {
 	}
 
 	stdout := newLifecycleWriter(&n.logs)
-	cmd := exec.Command(n.binaryPath, "--runtime-dir", n.tempDir)
+	args := append([]string{"--runtime-dir", n.tempDir}, n.args...)
+	cmd := exec.Command(n.binaryPath, args...)
 	cmd.Stdout = stdout
 	cmd.Stderr = &n.logs
 	if err := cmd.Start(); err != nil {

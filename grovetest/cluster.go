@@ -80,7 +80,7 @@ func NewCluster(binaryPath string, nodeCount int) (*Cluster, error) {
 		}
 		cluster.reservations = append(cluster.reservations, reservation)
 
-		node, err := newNode(binaryPath)
+		node, err := newNode(binaryPath, nil)
 		if err != nil {
 			clusterErr := cluster.failure("create node", nodeID, err)
 			_ = cluster.Cleanup()

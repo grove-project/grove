@@ -8,19 +8,32 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
+
+	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/internal/systemnats"
 )
 
-var errRuntimeDirRequired = errors.New("runtime directory is required")
+var (
+	errRuntimeDirRequired = errors.New("runtime directory is required")
+	errSystemNATSConflict = errors.New("system NATS listen address and URL are mutually exclusive")
+	errSystemNATSRequired = errors.New("system NATS endpoint requires a listen address or URL")
+)
 
 type config struct {
-	runtimeDir string
+	runtimeDir        string
+	systemNATSListen  string
+	systemNATSURL     string
+	systemNATSSubject string
 }
 
 type lifecycleEvent struct {
-	Event string `json:"event"`
+	Event         string `json:"event"`
+	SystemNATSURL string `json:"system_nats_url,omitempty"`
 }
 
 type runtimeDirError struct {
@@ -54,13 +67,19 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err := prepareRuntimeDir(cfg.runtimeDir); err != nil {
 		return err
 	}
+	systemRuntime, err := startSystemNATS(ctx, cfg)
+	if err != nil {
+		return err
+	}
 
 	encoder := json.NewEncoder(stdout)
-	if err := encoder.Encode(lifecycleEvent{Event: "ready"}); err != nil {
+	if err := encoder.Encode(lifecycleEvent{Event: "ready", SystemNATSURL: systemRuntime.url}); err != nil {
+		systemRuntime.stop()
 		return fmt.Errorf("encode ready event: %w", err)
 	}
 
 	<-ctx.Done()
+	systemRuntime.stop()
 
 	if err := encoder.Encode(lifecycleEvent{Event: "stopped"}); err != nil {
 		return fmt.Errorf("encode stopped event: %w", err)
@@ -73,6 +92,9 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags := flag.NewFlagSet("grovlet", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.StringVar(&cfg.runtimeDir, "runtime-dir", "", "directory for Grovlet runtime state")
+	flags.StringVar(&cfg.systemNATSListen, "system-nats-listen", "", "loopback address for an embedded System NATS server")
+	flags.StringVar(&cfg.systemNATSURL, "system-nats-url", "", "System NATS server URL")
+	flags.StringVar(&cfg.systemNATSSubject, "system-nats-subject", "", "System NATS transport endpoint subject")
 	if err := flags.Parse(args); err != nil {
 		return config{}, fmt.Errorf("parse flags: %w", err)
 	}
@@ -82,7 +104,75 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	if cfg.runtimeDir == "" {
 		return config{}, errRuntimeDirRequired
 	}
+	if cfg.systemNATSListen != "" && cfg.systemNATSURL != "" {
+		return config{}, errSystemNATSConflict
+	}
+	if cfg.systemNATSSubject != "" && cfg.systemNATSListen == "" && cfg.systemNATSURL == "" {
+		return config{}, errSystemNATSRequired
+	}
 	return cfg, nil
+}
+
+type systemNATSRuntime struct {
+	server    *systemnats.Server
+	transport *systemnats.Transport
+	url       string
+}
+
+func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error) {
+	runtime := &systemNATSRuntime{}
+	url := cfg.systemNATSURL
+	if cfg.systemNATSListen != "" {
+		host, portText, err := net.SplitHostPort(cfg.systemNATSListen)
+		if err != nil {
+			return nil, fmt.Errorf("parse System NATS listen address: %w", err)
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil {
+			return nil, fmt.Errorf("parse System NATS listen port: %w", err)
+		}
+		if port < 0 || port > 65535 {
+			return nil, fmt.Errorf("validate System NATS listen port: %w", syscall.EINVAL)
+		}
+		runtime.server, err = systemnats.StartServer(ctx, host, port)
+		if err != nil {
+			return nil, err
+		}
+		url = runtime.server.URL()
+	}
+	if url == "" {
+		return runtime, nil
+	}
+	runtime.url = url
+
+	transport, err := systemnats.Connect(ctx, url)
+	if err != nil {
+		runtime.stop()
+		return nil, err
+	}
+	runtime.transport = transport
+	if cfg.systemNATSSubject != "" {
+		if err := transport.Serve(
+			ctx,
+			cfg.systemNATSSubject,
+			func(_ context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
+				return grove.ResponseEnvelope{Payload: request.Payload}
+			},
+		); err != nil {
+			runtime.stop()
+			return nil, err
+		}
+	}
+	return runtime, nil
+}
+
+func (r *systemNATSRuntime) stop() {
+	if r.transport != nil {
+		r.transport.Close()
+	}
+	if r.server != nil {
+		r.server.Shutdown()
+	}
 }
 
 func prepareRuntimeDir(path string) error {

@@ -46,6 +46,9 @@ func ExampleNode() {
 func TestNode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
+	if _, err := grovetest.StartNode(grovletPath, "--runtime-dir=elsewhere"); !errors.Is(err, grovetest.ErrRuntimeDirArgument) {
+		t.Errorf("StartNode() runtime argument error = %v; want %v", err, grovetest.ErrRuntimeDirArgument)
+	}
 
 	node, err := grovetest.StartNode(grovletPath)
 	if err != nil {

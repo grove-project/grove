@@ -1,6 +1,6 @@
 # Task 009 — Embedded System NATS transport
 
-Status: TODO
+Status: DONE
 Depends on: 004, 008
 
 ## Goal

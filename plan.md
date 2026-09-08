@@ -68,29 +68,41 @@ access to NATS.
   **Outcome:** Chose one embedded standalone server, hidden request/reply
   transport, explicit subjects, and deferred clustering/identity/dispatch.
 
-- [ ] 2. Add the hidden System NATS runtime.
+- [x] 2. Add the hidden System NATS runtime.
   **Context:** Pin dependencies; implement context-bounded embedded server
   startup/shutdown, connection, subscription/flush, envelope request/reply,
   correlation validation, and typed diagnostics.
-  **Outcome:** Pending.
+  **Outcome:** Added pinned official NATS server/client dependencies and an
+  internal package with context-bounded embedded server readiness, connection,
+  flushed subscriptions, correlated envelope request/reply, typed failures,
+  and idempotent resource shutdown.
 
-- [ ] 3. Connect Grovlets and extend process configuration.
+- [x] 3. Connect Grovlets and extend process configuration.
   **Context:** Add optional listen, URL, and endpoint flags; start/connect/serve
   before ready; shut down cleanly; let grovetest pass safe additional args.
-  **Outcome:** Pending.
+  **Outcome:** Added optional System NATS listen/URL/subject flags, configuration
+  validation, server/client/endpoint startup before ready, actual random-port
+  URL publication in the ready event, and shutdown before stopped. StartNode
+  now preserves safe extra args across restarts and protects its runtime flag.
 
-- [ ] 4. Prove integration and real-process transport.
+- [x] 4. Prove integration and real-process transport.
   **Context:** Integration-test embedded request/reply and failures, then start
   two Grovlets, wait for both, exchange an invocation envelope through the
   embedded server into the peer process, verify payload/request ID, and clean
   up all processes and sockets.
-  **Outcome:** Pending.
+  **Outcome:** Added an internal request/reply integration workflow and a real
+  two-Grovlet E2E. The host embeds NATS on an OS-selected port, the peer connects
+  from its own process, both activate endpoints before readiness, and correlated
+  encoded payloads traverse the host and peer subjects without sleeps.
 
-- [ ] 5. Verify and close Task 009.
+- [x] 5. Verify and close Task 009.
   **Context:** Review `go doc`, dependency changes, format, vet, run repeated and
   race tests, run the full repository suite, then mark Task 009 DONE after every
   check succeeds.
-  **Outcome:** Pending.
+  **Outcome:** Reviewed public/internal `go doc` and dependency changes;
+  `gofmt -l` reports no files; `go vet ./...`, 50 repeated transport
+  integrations, 20 repeated two-process E2Es, `go test -race -count=1 ./...`,
+  and `go test -count=1 ./...` pass. Task 009 is marked DONE.
 
 ## Log
 
@@ -99,3 +111,7 @@ access to NATS.
 - 2026-09-08: Selected Task 009 and recorded the embedded-server topology,
   hidden System-plane API, readiness gates, explicit pre-identity subjects, and
   later remote-dispatch/bootstrap boundaries.
+- 2026-09-08: Replaced free-port probing with OS-selected binding and URL data
+  in the existing ready event, eliminating the only close-then-bind race.
+- 2026-09-08: Completed Task 009 after focused, repeated, race, vet, and full
+  suite verification; no scope deviations or architectural issues found.
