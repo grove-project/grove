@@ -1,6 +1,6 @@
 # Task 004 — Local multi-Grovlet cluster harness
 
-Status: TODO
+Status: DONE
 Depends on: 003
 
 ## Goal

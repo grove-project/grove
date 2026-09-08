@@ -1,7 +1,8 @@
 // Package grovetest builds and controls real Grovlet processes in Go tests.
 //
-// The package owns one isolated runtime directory per Node. It does not model
-// clusters, membership, services, or network faults.
+// The package owns one isolated runtime directory per Node and can compose
+// nodes into a local Cluster. It does not model membership, services, or
+// network faults.
 package grovetest
 
 import (
@@ -96,6 +97,8 @@ func groveModuleDir() (string, error) {
 // process is running.
 type Node struct {
 	binaryPath string
+	id         string
+	port       int
 	tempDir    string
 	logs       lockedBuffer
 	process    *nodeProcess
@@ -105,17 +108,23 @@ type Node struct {
 // StartNode starts binaryPath as a Grovlet with a new isolated runtime
 // directory. Call Cleanup when the test finishes.
 func StartNode(binaryPath string) (*Node, error) {
+	node, err := newNode(binaryPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := node.start(); err != nil {
+		_ = node.Cleanup()
+		return nil, err
+	}
+	return node, nil
+}
+
+func newNode(binaryPath string) (*Node, error) {
 	tempDir, err := os.MkdirTemp("", "grovetest-node-")
 	if err != nil {
 		return nil, &ProcessError{Operation: "create node runtime directory", Err: err}
 	}
-
-	node := &Node{binaryPath: binaryPath, tempDir: tempDir}
-	if err := node.start(); err != nil {
-		_ = os.RemoveAll(tempDir)
-		return nil, err
-	}
-	return node, nil
+	return &Node{binaryPath: binaryPath, tempDir: tempDir}, nil
 }
 
 func (n *Node) start() error {
@@ -170,6 +179,9 @@ func (n *Node) WaitReady(ctx context.Context) error {
 	case protocolErr := <-process.stdout.protocolErrors:
 		return n.failure("wait for readiness", protocolErr)
 	case <-process.done:
+		if process.err != nil {
+			return n.failure("wait for readiness", process.err)
+		}
 		if channelClosed(process.stdout.ready) {
 			return nil
 		}
@@ -263,6 +275,19 @@ func (n *Node) Restart() error {
 // lifetimes.
 func (n *Node) Logs() string {
 	return n.logs.String()
+}
+
+// ID returns the Node's cluster-local harness identity. A Node created by
+// StartNode outside a Cluster has no ID and returns an empty string.
+func (n *Node) ID() string {
+	return n.id
+}
+
+// Port returns the loopback TCP port reserved for this Node by its Cluster.
+// The lifecycle-only Grovlet does not bind this port yet. A Node created by
+// StartNode outside a Cluster returns zero.
+func (n *Node) Port() int {
+	return n.port
 }
 
 // TempDir returns the isolated runtime directory reused by the Node across
