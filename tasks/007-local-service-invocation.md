@@ -1,6 +1,6 @@
 # Task 007 — Local service invocation
 
-Status: TODO
+Status: DONE
 Depends on: 006
 
 ## Goal

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/grove-project/grove"
 )
 
 var (
@@ -210,10 +212,25 @@ type Order struct {
 type Orders struct {
 	mu        sync.RWMutex
 	inventory *Inventory
+	client    *grove.Client
 	payment   *Payment
 	shipping  *Shipping
 	orders    map[string]Order
 	orderIDs  []string
+}
+
+// NewGroveOrders creates an Orders service that invokes Inventory through
+// Grove. It panics if client, payment, or shipping is nil.
+func NewGroveOrders(client *grove.Client, payment *Payment, shipping *Shipping) *Orders {
+	if client == nil || payment == nil || shipping == nil {
+		panic("groveshop: Grove Orders dependencies must be non-nil")
+	}
+	return &Orders{
+		client:   client,
+		payment:  payment,
+		shipping: shipping,
+		orders:   make(map[string]Order),
+	}
 }
 
 // NewOrders creates an Orders service backed by the supplied concrete
@@ -255,11 +272,24 @@ func (s *Orders) Create(ctx context.Context, req CreateOrderRequest) (Order, err
 	}
 	advance(&order, OrderCreated)
 
-	reservation, err := s.inventory.Reserve(ctx, ReserveRequest{
+	reserveRequest := ReserveRequest{
 		OrderID:  req.OrderID,
 		SKU:      req.SKU,
 		Quantity: req.Quantity,
-	})
+	}
+	var reservation Reservation
+	var err error
+	if s.client != nil {
+		reservation, err = grove.Call[ReserveRequest, Reservation](
+			ctx,
+			s.client,
+			ServiceInventory,
+			MethodReserve,
+			reserveRequest,
+		)
+	} else {
+		reservation, err = s.inventory.Reserve(ctx, reserveRequest)
+	}
 	if err != nil {
 		return Order{}, fmt.Errorf("reserve inventory: %w", err)
 	}
