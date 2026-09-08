@@ -62,6 +62,38 @@ The registry must:
 ## Service ownership
 Registration says **what this process can execute**. Placement and routing say **where a call should execute**. Do not conflate the local method registry with cluster-wide placement state.
 
+## Placement validation
+A Grove service may optionally provide developer-defined placement validation through the SDK. The validator answers one question on a specific Grovlet: **can this service run correctly on this node?**
+
+No placement validator means the service is eligible to run on every Grove node.
+
+The validator is evaluated locally by each Grovlet because eligibility may depend on node-local environmental truth that the control plane cannot reliably infer from static metadata. Examples include reachability to a customer-LAN endpoint, presence of a local Unix socket or device, access to a site-local service, or another runtime capability required by the service.
+
+Conceptual shape:
+
+```go
+grove.Service(
+    ServiceEdgeAdapter,
+    edgeAdapter.Run,
+    grove.PlacementValidator(func(ctx context.Context) error {
+        return requireTCPReachable(ctx, "192.168.10.20:443")
+    }),
+)
+```
+
+The exact API shape may evolve, but the semantics are fixed:
+- placement validation is optional;
+- absent validator = eligible everywhere;
+- success = this Grovlet is eligible to host the service;
+- failure = this Grovlet must not host the service;
+- validation runs on the candidate Grovlet, not centrally;
+- validation should be read-only, bounded, safe to repeat, and should not perform environment setup;
+- eligibility is a hard constraint, not a scheduling preference.
+
+Placement validation and scheduling are separate concepts. Validation determines the eligible node set. Scheduling chooses among eligible nodes according to locality, capacity, affinity, or other policy.
+
+A service must never be started on a Grovlet whose placement validation does not pass.
+
 ## Business types
 Grove does not own application request/response types. They remain normal Go structs in the application package.
 
