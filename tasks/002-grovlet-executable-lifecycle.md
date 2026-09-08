@@ -1,6 +1,6 @@
 # Task 002 — Grovlet executable lifecycle
 
-Status: TODO
+Status: DONE
 Depends on: 001
 
 ## Goal

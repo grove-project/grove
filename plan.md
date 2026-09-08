@@ -18,8 +18,8 @@ The accepted Grovlet process model makes this process the node supervisor, but
 worker supervision, node identity, membership, services, and transport remain
 future tasks.
 
-An unrelated `.idea/` directory is untracked and belongs to the user. Do not
-modify or commit it.
+An unrelated `.idea/` directory was present at task start and belongs to the
+user. Do not modify or commit it.
 
 ### Key Files
 
@@ -55,35 +55,42 @@ modify or commit it.
   **Outcome:** Limited the change to executable lifecycle behavior and chose a
   minimal JSON event protocol without worker, node, service, or cluster state.
 
-- [ ] 2. Validate and prepare the runtime directory.
+- [x] 2. Validate and prepare the runtime directory.
   **Context:** Parse `--runtime-dir` with an isolated `flag.FlagSet`, require a
   non-empty value, create missing directories, and return typed startup errors
   for invalid paths.
-  **Acceptance:** Unit tests prove required-flag validation, directory creation,
-  and typed failure when the selected path cannot be used as a directory.
+  **Outcome:** `cmd/grovlet/main.go` now requires `--runtime-dir`, creates it
+  with owner-only permissions, rejects positional arguments, and returns a
+  `runtimeDirError` for unusable paths. `TestParseConfig` and
+  `TestPrepareRuntimeDir` pass.
 
-- [ ] 3. Run until graceful shutdown.
+- [x] 3. Run until graceful shutdown.
   **Context:** Emit the ready event only after startup succeeds, block on the
   provided context, emit the stopped event after cancellation, and have `main`
   translate SIGTERM into that cancellation.
-  **Acceptance:** A unit test observes readiness, proves the command remains
-  active, cancels it, and observes clean shutdown without fixed sleeps.
+  **Outcome:** `run` emits newline-delimited JSON lifecycle events and blocks on
+  its context; `main` derives that context from SIGTERM. `TestRun` uses
+  `testing/synctest` to verify readiness, continued liveness, shutdown, and
+  output-error propagation without sleeps.
 
-- [ ] 4. Prove the real process lifecycle.
+- [x] 4. Prove the real process lifecycle.
   **Context:** Build the actual `grovlet` binary once for this test package,
   launch it with a temporary runtime directory, decode readiness, send SIGTERM,
   and require the stopped event plus exit status zero. Separately run it with an
   invalid runtime path and require a non-zero exit with useful diagnostics.
-  **Acceptance:** Integration tests use direct `os/exec`, bounded waits, isolated
-  temporary paths, child cleanup, and captured diagnostics on failure.
+  **Outcome:** `TestGrovletProcess` builds one real binary, verifies the complete
+  SIGTERM lifecycle, and verifies invalid-path startup failure. It uses bounded
+  contexts, temporary paths, deferred child cleanup, and stderr diagnostics;
+  the focused integration run passes.
 
-- [ ] 5. Verify and close Task 002.
+- [x] 5. Verify and close Task 002.
   **Context:** Review package documentation and tests, format the repository,
   run focused tests and all earlier tests, and mark only Task 002 DONE after all
   checks pass.
-  **Acceptance:** The binary builds; `gofmt -l`, `go vet ./...`,
-  `go test -race ./...`, and `go test ./...` pass; the working tree contains no
-  unintended changes.
+  **Outcome:** Package docs and tests were reviewed; the binary builds;
+  `gofmt -l` reports no files; `go vet ./...`, `go test -race -count=1 ./...`,
+  ten consecutive real-process test runs, and `go test -count=1 ./...` pass.
+  Task 002 is marked DONE and the unrelated `.idea/` content was not included.
 
 ## Log
 
@@ -91,3 +98,7 @@ modify or commit it.
   `go vet ./...`, `go test ./...`, and race-enabled tests passed.
 - 2026-09-08: Selected Task 002 and recorded the JSON lifecycle protocol,
   runtime-directory behavior, signal path, and adjacent-task boundaries.
+- 2026-09-08: Runtime-directory, lifecycle, and real-process tests pass; no
+  fixed sleeps or reusable Task 003 harness APIs were introduced.
+- 2026-09-08: Completed Task 002 after format, vet, race, repeated integration,
+  and full-suite verification; no deviations or architectural issues found.
