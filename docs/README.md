@@ -12,9 +12,9 @@ func (s *Inventory) Reserve(ctx context.Context, req ReserveRequest) (ReserveRes
 }
 ```
 
-Register the distributed boundary explicitly and keep the business package directly testable.
+Register distributed boundaries explicitly and keep business packages directly testable.
 
-→ **[Grove SDK](../sdk/)** — services, invocation, serialization, and the canonical Shop example.
+→ **[SDK](sdk/)** — programming model, testing, capabilities, and links to the normative SDK contract.
 
 ## Work with Grove
 
@@ -46,19 +46,16 @@ Action        rollback to production-42
 Result        recovered
 ```
 
-→ **[Operations](operations/)** — health, observability, changes, diagnosis, and recovery.
+→ **[Operations](operations/)** — health, observability, deployments, diagnosis, and recovery.
 
 ## Understand Grove
 
-**[Vision](vision/vision.md)** explains why Grove exists and the product principles behind the experience.
-
-**[Architecture](architecture/system-architecture.md)** explains how Grove implements the runtime.
-
-**[ADRs](adr/README.md)** capture important architectural decisions and their trade-offs.
-
-**[Roadmap](roadmap/roadmap.md)** shows where the project is going.
-
-**[MVP demo](mvp-demo/README.md)** turns the core experience into one end-to-end scenario.
+- **[Vision](vision/vision.md)** — why Grove exists and its product principles.
+- **[Positioning](vision/positioning-and-differentiation.md)** — Grove vs Service Weaver and Nomad.
+- **[Architecture](architecture/system-architecture.md)** — how the runtime works.
+- **[ADRs](adr/README.md)** — consequential architectural decisions and trade-offs.
+- **[Roadmap](roadmap/roadmap.md)** — where the project is going.
+- **[Grove Shop demo](../demo/README.md)** — the canonical end-to-end example.
 
 ## Documentation rule
 
