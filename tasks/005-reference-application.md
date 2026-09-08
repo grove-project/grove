@@ -1,6 +1,6 @@
 # Task 005 — Grove Shop reference application
 
-Status: TODO
+Status: DONE
 Depends on: 001
 
 ## Goal

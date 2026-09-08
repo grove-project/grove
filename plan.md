@@ -54,27 +54,36 @@ concrete, directly navigable business implementations and the progression
   **Outcome:** Chose one small standalone Go package with concrete services,
   deterministic values, in-memory inspection, and no Grove runtime imports.
 
-- [ ] 2. Implement deterministic component methods.
+- [x] 2. Implement deterministic component methods.
   **Context:** Add Inventory reservation, Payment charging, and Shipping
   arrangement request/result types, validation, and stable outputs.
-  **Outcome:** Pending.
+  **Outcome:** Added ordinary Inventory, Payment, and Shipping types with
+  request/result models, context handling, exported validation errors, and
+  repeatable result IDs derived from the application-owned order ID.
 
-- [ ] 3. Implement the Orders workflow and Web facade.
+- [x] 3. Implement the Orders workflow and Web facade.
   **Context:** Coordinate all three concrete components, record the canonical
   progression, retain successful order snapshots, reject duplicate IDs, and
   expose create/get/list calls suitable for a later HTTP layer.
-  **Outcome:** Pending.
+  **Outcome:** Added concrete service composition, the complete five-stage
+  workflow, duplicate detection, isolated retained snapshots in creation order,
+  and thin Web create/get/list methods without HTTP or Grove dependencies.
 
-- [ ] 4. Prove the standalone application contract.
+- [x] 4. Prove the standalone application contract.
   **Context:** Unit-test the successful flow, every deterministic component,
   preserved component errors, order inspection, snapshot isolation, and a
   representative runnable Web-to-order example.
-  **Outcome:** Pending.
+  **Outcome:** Added direct deterministic component tests, successful workflow
+  and inspection coverage, duplicate/missing-order behavior, component error
+  propagation, constructor invariants, snapshot isolation, and a runnable
+  ordinary-Go example.
 
-- [ ] 5. Verify and close Task 005.
+- [x] 5. Verify and close Task 005.
   **Context:** Review `go doc`, format, vet, run repeated and race tests, run the
   full repository suite, then mark Task 005 DONE after every check succeeds.
-  **Outcome:** Pending.
+  **Outcome:** Reviewed the complete `go doc` surface; `gofmt -l` reports no
+  files; `go vet ./...`, 25 repeated domain runs, `go test -race -count=1
+  ./...`, and `go test -count=1 ./...` pass. Task 005 is marked DONE.
 
 ## Log
 
@@ -82,3 +91,5 @@ concrete, directly navigable business implementations and the progression
   full-suite checks passing.
 - 2026-09-08: Selected Task 005 and recorded the concrete service composition,
   deterministic model, Web facade, persistence boundary, and Task 006 cutoff.
+- 2026-09-08: Completed Task 005 after focused, repeated, race, vet, and full
+  suite verification; no scope deviations or architectural issues found.
