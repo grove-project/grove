@@ -3,7 +3,7 @@ Grove — System Architecture
 Status: Concept / evolving design  
 Purpose: Canonical high-level architecture for Grove. Detailed behavior belongs in the linked architecture and component documents.
 
-1\. Overview
+1. Overview
 
 Grove is a lightweight application runtime and cluster architecture designed around a simple goal: make a multi-service application behave as one self-contained system from local development through production.
 
@@ -11,7 +11,7 @@ A Grove application is shipped as a single versioned binary containing the appli
 
 The central principle is: what you test locally is what you ship.
 
-2\. Architectural Goals
+2. Architectural Goals
 
 • Keep deployment and operations substantially simpler than a general-purpose Kubernetes stack.  
 • Preserve strong process isolation where failure containment matters while allowing tightly related application services to communicate efficiently.  
@@ -20,7 +20,7 @@ The central principle is: what you test locally is what you ship.
 • Provide production-grade cluster coordination, durability, failure detection, and recovery without requiring an external control-plane stack.  
 • Keep the runtime extensible so additional infrastructure capabilities can become native Grove services.
 
-3\. Runtime Model
+3. Runtime Model
 
 Each machine participating in a Grove cluster is a Grove node. A node runs the Grove binary and contains a node supervisor called the Grovlet.
 
@@ -30,7 +30,7 @@ A worker is the process boundary for application execution. Application services
 
 The default design should avoid creating multiple workers without a reason. A single worker can consume the available CPU cores. Additional workers are useful when Grove needs isolation boundaries, independent lifecycle or versioning, resource separation, or failure containment.
 
-4\. Cluster Control Plane
+4. Cluster Control Plane
 
 Grove uses an embedded NATS deployment as the system communication and coordination substrate.
 
@@ -42,7 +42,7 @@ The control plane determines cluster leadership from the consensus-backed system
 
 The control plane is responsible for reconciliation: compare desired cluster state with observed state and make placement, lifecycle, recovery, and upgrade decisions.
 
-5\. Local Supervision and Failure Detection
+5. Local Supervision and Failure Detection
 
 Cluster-level coordination must not be the only mechanism protecting a node.
 
@@ -55,7 +55,7 @@ This creates two failure-detection tiers:
 • Local supervision — fast detection and enforcement by the Grovlet.  
 • Cluster supervision — distributed health, ownership, placement, and recovery through the control plane.
 
-6\. Messaging Planes
+6. Messaging Planes
 
 Grove conceptually separates system traffic from application data traffic.
 
@@ -65,7 +65,7 @@ These are logical planes. They may initially share the same NATS server process 
 
 This keeps the default deployment small without coupling the architecture permanently to a single physical NATS instance.
 
-7\. Networking and Ingress
+7. Networking and Ingress
 
 Ingress is a dedicated Grove runtime component. Any suitable node may expose an ingress endpoint, avoiding dependence on a single special ingress node.
 
@@ -79,17 +79,32 @@ Because ingress runs outside the worker process, it cannot directly invoke appli
 
 Grove should maintain enough topology information to route between nodes even when the physical network is not a fully connected mesh. Where direct connectivity is unavailable, nodes may relay traffic through reachable peers and prefer the shortest viable path.
 
-8\. Placement and Locality
+8. Placement and Locality
 
 Placement is not merely a CPU scheduling problem. Grove treats locality as a first-class optimization target.
 
+Before scheduling preferences are considered, Grove establishes a hard eligibility set for each service. A service may optionally provide placement-validation logic through the SDK. Every Grovlet evaluates that logic locally against its own environment. Only Grovlets that pass validation may host the service. If no validator is provided, every Grove node is eligible by default.
+
+Placement validation expresses real runtime capability rather than scheduler preference. It can test requirements such as reachability to a customer-LAN endpoint, presence of a local Unix socket or physical device, availability of a required accelerator, or another node-local dependency. Validators should be bounded, read-only, repeatable, and safe to execute whenever Grove needs to refresh eligibility.
+
+The scheduling flow is therefore:
+
+  service desired state  
+      → candidate Grovlets  
+      → local placement validation  
+      → eligible node set  
+      → scheduling / locality scoring  
+      → selected placement
+
+The architectural invariant is: a service must never be started on a Grovlet that does not satisfy its placement validation.
+
 The control plane should prefer to place services that communicate heavily together in the same worker when safe, then on the same node, and only then across nodes. Storage replicas and data ownership should similarly be biased toward the services that consume the data.
 
-Conceptually, Grove has placement tiers and storage tiers. The control plane can continuously optimize these based on topology, resource availability, communication patterns, durability requirements, and failure domains.
+Conceptually, Grove has placement tiers and storage tiers. The control plane can continuously optimize these based on topology, resource availability, communication patterns, durability requirements, and failure domains, but only within the service's current eligible node set.
 
-Correctness and required redundancy always take priority over locality optimization.
+Correctness, hard placement eligibility, and required redundancy always take priority over locality optimization.
 
-9\. Storage and Durability
+9. Storage and Durability
 
 Production Grove requires persistent high-availability storage rather than relying only on local process state.
 
@@ -99,7 +114,7 @@ Consensus-backed metadata and replicated data are separate concerns. System NATS
 
 The SDK may expose durability or commit semantics to applications where application-level control is valuable, rather than hiding every storage tradeoff behind one fixed policy.
 
-10\. Lifecycle and Upgrades
+10. Lifecycle and Upgrades
 
 The single-artifact model is central to Grove lifecycle management. A Grove release packages the runtime and the application services that belong to that version.
 
@@ -109,7 +124,7 @@ This gives upgrades a strong compatibility boundary and prevents accidental mixe
 
 The control plane coordinates rollout, placement, health validation, replacement, and rollback while respecting those version boundaries.
 
-11\. Debugging and Operations
+11. Debugging and Operations
 
 Debugging is a runtime capability rather than an external afterthought.
 
@@ -117,13 +132,13 @@ Grove integrates with Delve so debugging can be enabled or attached at runtime w
 
 This enables the same operational model during local development, end-to-end testing, customer deployments, and production troubleshooting.
 
-12\. Extensibility
+12. Extensibility
 
 Grove should make runtime infrastructure services pluggable. The core provides lifecycle, placement, communication, storage primitives, cluster state, and observability. Additional capabilities can build on those primitives.
 
 For example, a durable-execution engine comparable in purpose to Temporal could eventually be implemented as a Grove-native runtime service without requiring every application deployment to assemble another external infrastructure stack.
 
-13\. Architecture Boundaries
+13. Architecture Boundaries
 
 The initial architecture intentionally separates several concepts:
 
@@ -131,14 +146,16 @@ The initial architecture intentionally separates several concepts:
 • System plane vs data plane — Grove coordination is separate from application traffic.  
 • Consensus metadata vs application data — cluster correctness does not imply one universal storage engine.  
 • Local failure detection vs distributed failure detection — local enforcement must remain fast even during cluster communication problems.  
+• Placement eligibility vs scheduling preference — developer-defined validation determines where a service can run; Grove policy decides where it should run among those eligible nodes.  
 • Logical isolation vs physical processes — separate planes do not automatically require separate server processes.
 
-14\. Current Component Map
+14. Current Component Map
 
 Grove binary  
   ├─ Grovlet  
   │   ├─ local worker supervision  
   │   ├─ local heartbeat / watchdog  
+  │   ├─ service placement validation  
   │   └─ node-side control-plane agent  
   │  
   ├─ Worker  
@@ -159,7 +176,7 @@ Grove binary
   │  
   └─ CLI / Debugger integration
 
-15\. Open Architecture Questions
+15. Open Architecture Questions
 
 The following areas are intentionally not considered final yet:
 
@@ -169,16 +186,17 @@ The following areas are intentionally not considered final yet:
 • Precise cluster-leader responsibilities versus distributed reconciliation responsibilities.  
 • Storage replication protocol and consistency levels beyond the initial NATS-backed implementation.  
 • Placement scoring and dynamic locality optimization algorithms.  
+• Placement-validation refresh cadence, timeout policy, and failure hysteresis.  
 • Stable ingress endpoint discovery in environments without an external load balancer.  
 • Authentication, authorization, workload identity, secrets, and transport security model.  
 • Upgrade state machine and rollback semantics.  
 • Observability architecture.
 
-16\. Documentation Model
+16. Documentation Model
 
 This document is the canonical system-level view. Detailed decisions should be expanded in the Process Model, Cluster Control Plane, Networking & Ingress, and Storage Architecture documents. Decisions with meaningful alternatives or long-term consequences should also receive an Architecture Decision Record (ADR).
 
-17\. Kubernetes Bridge and Incremental Migration  
+17. Kubernetes Bridge and Incremental Migration  
 Grove can run inside an existing Kubernetes cluster rather than requiring Kubernetes to be replaced before Grove can be adopted. A Grovlet may run as a Kubernetes Pod and use the Kubernetes API as an infrastructure adapter.
 
 In this mode, Kubernetes is a possible infrastructure substrate for Grove. The Kubernetes Bridge allows the Grovlet to provision additional Grovlet Pods/nodes, discover existing Pods, Services, and endpoints, observe Kubernetes health and topology, and translate relevant Kubernetes resources into Grove's service and topology model.
@@ -209,7 +227,7 @@ The architectural boundary is important: Kubernetes remains responsible for the 
 
 This provides a deliberate adoption path: install Grove into an existing Kubernetes cluster, integrate existing workloads, migrate services incrementally, and remove the Kubernetes dependency only when and if it no longer provides value.
 
-18\. Native Applications and WASM Extensions
+18. Native Applications and WASM Extensions
 
 Grove deliberately separates the primary application execution model from the extension model.
 
@@ -223,30 +241,32 @@ The Grove host controls which capabilities a plugin receives. Examples may inclu
 
 The architectural rule is:
 
-• Native Go services \= trusted, powerful application code.  
-• WASM plugins \= portable, sandboxed extension code.
+• Native Go services = trusted, powerful application code.  
+• WASM plugins = portable, sandboxed extension code.
 
 This distinction intentionally uses WebAssembly's restrictions where they are beneficial. For primary applications, those restrictions would reduce compatibility with normal Go programs, native libraries, Linux facilities, networking, and debugging. For plugins, the same restrictions provide isolation, portability, controlled capabilities, and cheap dynamic loading.
 
 WASM therefore complements rather than replaces Grove's native execution model. A future Grove implementation may support WASM as an optional workload type, but Grove-native application development should not require developers to compile their services to WASM.
 
-19\. Edge-Aware Cluster Topology  
+19. Edge-Aware Cluster Topology  
 Grove treats customer edge environments as first-class placement domains inside the same logical application cluster, not as a separate agent architecture. Services may be constrained or preferred to run in cloud, at a specific customer edge, or close to related services and data.
+
+The same binary can therefore contain both cloud-portable services and services whose runtime requirements only exist at a customer edge. Rather than requiring operators to encode every environmental fact as static node metadata, an edge-dependent service can provide placement validation that tests the actual requirement locally. For example, a service that integrates with a LAN device may validate that the device endpoint is reachable. Cloud Grovlets fail the validator, the relevant edge Grovlets pass, and only those passing nodes enter the scheduler's eligible set.
 
 An edge Grovlet initiates an outbound connection back to the cloud-side Grove fabric/control plane. Customer networks do not need to expose inbound Internet ports for Grove control, diagnostics, service communication, or debugging. The established outbound path carries the cluster relationship back to the rest of Grove while preserving the customer network boundary.
 
 Edge connectivity may be intermittent. Grove should distinguish cloud-disconnected from edge-unhealthy: edge-local services can remain healthy and, where their application contract permits, continue autonomous work, queue state/events, and reconcile after connectivity returns.
 
-The operational model must remain uniform across cloud and edge. Cluster status should expose edge connectivity, latency, last heartbeat, runtime/application version, service health, queued work, storage state, and autonomous/disconnected mode. Logs, traces, inspection, and DAP/Delve debugging should route through the existing Grove connection so operators do not need SSH, public debugger ports, or customer firewall changes.
+The operational model must remain uniform across cloud and edge. Cluster status should expose edge connectivity, latency, last heartbeat, runtime/application version, service health, placement eligibility and failed placement requirements, queued work, storage state, and autonomous/disconnected mode. Logs, traces, inspection, and DAP/Delve debugging should route through the existing Grove connection so operators do not need SSH, public debugger ports, or customer firewall changes.
 
-20\. Version Alignment Across Cloud and Edge  
+20. Version Alignment Across Cloud and Edge  
 Grove should actively converge all cloud and edge placement domains on the same application/runtime binary version. Version skew is a temporary upgrade condition, not the intended steady state. This keeps the distributed application a coherent compatibility unit and avoids making every internal service protocol support long-lived cross-version compatibility.
 
 Customer edge upgrades may require approval or maintenance windows, so Grove should separate staging from activation. A candidate release can be distributed, verified, booted side-by-side, and validated while the current version remains authoritative. Running two versions is allowed for validation and rollback readiness, but ordinary production traffic is owned by one coherent application version at a time; Grove does not depend on canary traffic splitting between application versions.
 
 The desired lifecycle is prove, approve, cut over, retain rollback, then garbage-collect. Grove validates the candidate, presents evidence to the customer/operator, performs a coordinated cutover after approval, retains the previous release and recovery metadata for a rollback window, and removes them only after explicit commit/retirement policy permits it. Upgrade progress itself must be durable and resumable across process, machine, or power failure.
 
-21\. Versioned State Migration and Self-Validating Releases  
+21. Versioned State Migration and Self-Validating Releases  
 A Grove release is a self-validating migratable artifact. In addition to application/runtime code, each release carries its version-specific E2E contract and, when persisted representation changes, the adjacent two-way migration adapter between the previous version and itself.
 
 Developers are required to implement only N ↔ N+1 state migration boundaries. Grove composes these adjacent adapters into a chain, allowing state to move between arbitrary retained versions without requiring every version to understand every historical schema. A downgrade may be lossy; Grove must report known/described loss, but semantic validity is determined by whether the target version can correctly operate on the migrated state.
@@ -255,9 +275,9 @@ Migration is executed and validated hop-by-hop. For each transition Grove migrat
 
 The target version's E2E suite is authoritative for that hop because correctness evolves with the application. A newer suite must not be used to judge an older version for functionality that did not yet exist. A migration that returns success is therefore not sufficient; the target release must prove that its migrated state is operationally valid.
 
-This makes the release conceptually: binary \+ adjacent N-1 ↔ N migration \+ version-specific E2E contract \+ version-specific SLA expectations.
+This makes the release conceptually: binary + adjacent N-1 ↔ N migration + version-specific E2E contract + version-specific SLA expectations.
 
-22\. Complexity Scaling Principle  
+22. Complexity Scaling Principle  
 Grove's value increases as the application graph grows. Without a coherent application lifecycle, more services multiply the combinations of placement, versions, routing, migrations, failure modes, edge/cloud boundaries, and rollback paths that operators must coordinate. Grove deliberately collapses this growing graph back into one manageable application lifecycle: deploy version N, validate version N, cut over to version N, or migrate/rollback to another coherent application version.
 
 The architectural objective is not merely to make individual services easier to run. It is to keep a large distributed application understandable and operable as one application as its component count and topology complexity increase.  
