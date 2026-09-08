@@ -189,4 +189,30 @@ Execution migration vs service migration
 Execution migration and whole-service migration remain distinct concepts. Durable Execution provides semantic migration: Grove can resume the logical operation elsewhere from durable state. Whole-service or process migration is broader and may involve in-memory state, open connections, local resources, devices, or a Firecracker snapshot. Those resources can still constrain transparent service migration even when individual durable executions are migratable.
 
 Capability design rule  
-A new capability should exist only when explicit adoption gives Grove meaningful semantic knowledge that changes runtime behavior, testing, diagnostics, optimization, or available operations. Properties that can be safely inferred from another capability should be derived automatically rather than exposed as additional configuration.  
+A new capability should exist only when explicit adoption gives Grove meaningful semantic knowledge that changes runtime behavior, testing, diagnostics, optimization, or available operations. Properties that can be safely inferred from another capability should be derived automatically rather than exposed as additional configuration.
+
+Service Placement Validation  
+A service may optionally provide placement-validation logic through the Grove SDK. Placement validation is executable eligibility logic owned by the application: it answers whether a specific Grovlet's local environment can actually host the service.
+
+If a service does not provide placement validation, it is eligible to run on every Grove node. Placement constraints are therefore opt-in; ordinary services require no placement configuration.
+
+Each Grovlet evaluates the validator locally before advertising itself as an eligible placement target for the service. Only nodes that pass validation may host the service. A failing validator is a hard eligibility constraint, not a scheduler preference.
+
+Conceptual example:
+
+  grove.Service(edgeAdapter.Run,
+      grove.Placement(func(ctx context.Context) error {
+          return grove.RequireTCPReachable(ctx, "192.168.1.10:443")
+      }),
+  )
+
+This allows the developer to express the real environmental requirement instead of duplicating it as manually maintained infrastructure metadata. Examples include reaching a customer-LAN endpoint, finding a required local Unix socket, accessing a device, verifying an accelerator, or validating another node-local dependency.
+
+Placement validation should be read-only, bounded, safe to execute repeatedly, and free of setup side effects. It describes capability; it does not provision the capability.
+
+The scheduler chooses among nodes that are already eligible. This creates a deliberate separation:
+
+  placement validation = where the service is capable of running  
+  scheduling policy = which eligible node Grove prefers
+
+Grove may re-evaluate placement validation as the environment changes. If a running node stops satisfying the service's validator, Grove should surface the failed requirement and treat that placement as no longer eligible, allowing reconciliation or migration to another eligible node according to the service's lifecycle and mobility semantics.
