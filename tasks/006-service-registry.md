@@ -1,6 +1,6 @@
 # Task 006 — Service registry
 
-Status: TODO
+Status: DONE
 Depends on: 005
 
 ## Goal

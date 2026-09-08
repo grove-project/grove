@@ -59,26 +59,37 @@ wire bytes, transport, placement, generated glue, or reflection.
   **Outcome:** Chose a root registry plus explicit application adapters, using
   opaque local values until serialization is introduced by its own task.
 
-- [ ] 2. Implement stable IDs and deterministic registry resolution.
+- [x] 2. Implement stable IDs and deterministic registry resolution.
   **Context:** Add the identifier types, handler type, zero-value registry,
   registration, resolution, synchronization, and typed errors.
-  **Outcome:** Pending.
+  **Outcome:** Added the root Grove SDK package with distinct ID types, opaque
+  local Handler values, a synchronized zero-value Registry, deterministic
+  Register/Resolve behavior, and typed errors preserving all sentinel causes.
 
-- [ ] 3. Register concrete Grove Shop handlers.
+- [x] 3. Register concrete Grove Shop handlers.
   **Context:** Define application-owned constants and handwritten adapters for
   Create, Reserve, Charge, and Arrange using concrete request/result types.
-  **Outcome:** Pending.
+  **Outcome:** Added application-owned service/method constants and explicit
+  handwritten adapters for Orders.Create, Inventory.Reserve, Payment.Charge,
+  and Shipping.Arrange. Each adapter validates its concrete request type and
+  directly calls its supplied business service.
 
-- [ ] 4. Prove registry and application adapter behavior.
+- [x] 4. Prove registry and application adapter behavior.
   **Context:** Test successful registration/resolution, duplicate preservation,
   nil handler rejection, distinct unknown-service/method errors, invalid
   adapter inputs, and deterministic execution of each concrete service.
-  **Outcome:** Pending.
+  **Outcome:** Added a runnable registry example and user-facing tests covering
+  zero-value registration, duplicate preservation, nil handlers, distinct
+  lookup failures, invalid adapter requests, and deterministic dispatch through
+  all four Grove Shop services.
 
-- [ ] 5. Verify and close Task 006.
+- [x] 5. Verify and close Task 006.
   **Context:** Review `go doc`, format, vet, run repeated and race tests, run the
   full repository suite, then mark Task 006 DONE after every check succeeds.
-  **Outcome:** Pending.
+  **Outcome:** Reviewed both complete `go doc` surfaces; `gofmt -l` reports no
+  files; `go vet ./...`, 50 repeated registry runs, 25 repeated Grove Shop
+  registration runs, `go test -race -count=1 ./...`, and `go test -count=1
+  ./...` pass. Task 006 is marked DONE.
 
 ## Log
 
@@ -87,3 +98,5 @@ wire bytes, transport, placement, generated glue, or reflection.
 - 2026-09-08: Selected Task 006 and recorded registry ownership, opaque local
   handler semantics, typed failures, explicit Grove Shop glue, and the
   serialization/invocation boundaries.
+- 2026-09-08: Completed Task 006 after focused, repeated, race, vet, and full
+  suite verification; no scope deviations or architectural issues found.
