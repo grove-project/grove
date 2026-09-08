@@ -1,108 +1,101 @@
-# Plan: Implement the invocation serialization envelope
+# Plan: Implement embedded System NATS transport
 
 ## Goal
 
-Complete Task 008 by putting Gob behind small Grove helpers, defining
-transport-independent request/response envelopes with request correlation and
-structured failure classes, and moving local invocation plus Grove Shop's
-handwritten handlers onto the accepted byte boundary without introducing NATS.
+Complete Task 009 by embedding a self-contained System NATS server, hiding NATS
+connections/subjects behind an internal Grove transport, enabling Grovlets to
+connect and serve transport endpoints, and proving a serialized invocation
+envelope crosses between two real Grovlet processes through NATS request/reply.
 
 ## Context
 
-Tasks 001 through 007 are complete. Task 006 intentionally used opaque local
-handler values until serialization had its own increment. Task 008 now owns the
-conversion to byte handlers and envelopes. Task 009 will carry these envelopes
-over System NATS; sockets, NATS concepts, destinations, membership, placement,
-retry, and compatibility negotiation remain outside this task.
+Tasks 001 through 008 are complete. Task 009 introduces messaging only. Task
+010 will route Grove Shop handlers remotely, Task 011 owns node identity and
+advertised endpoints, Task 012 owns multi-server NATS cluster bootstrap, and
+Task 013 introduces JetStream/KV. This increment needs one embedded standalone
+System NATS server, explicit transport subjects, and request/reply; it must not
+add discovery, placement, membership, persistence, retries, or application
+access to NATS.
 
 ### Key Files
 
-- `tasks/008-invocation-serialization-envelope.md` — required envelope fields,
-  failure classes, tests, and exclusions.
-- `sdk/SERIALIZATION.md` and `sdk/INVOCATION.md` — normative Gob helpers,
-  transport independence, typed call shape, and error requirements.
-- `serialization.go` — Encode/Decode and contextual codec errors.
-- `envelope.go` — request/response envelopes and structured error classes.
-- `invocation.go` — request creation, local envelope dispatch, response
-  correlation, error propagation, and typed decode.
-- `registry.go` — serialized local Handler contract.
-- `demo/groveshop/registration.go` — explicit decode/call/encode adapters.
-- matching `_test.go` files — round trips, malformed input, structured errors,
-  adapted registry behavior, and the existing local Grove Shop E2E.
-- `tasks/009-node-transport.md` — boundary for carrying encoded envelopes over
-  System NATS.
+- `tasks/009-node-transport.md` — required embedded server, Grovlet connection,
+  request/reply, E2E, and exclusions.
+- `sdk/INVOCATION.md` and `sdk/SERIALIZATION.md` — envelope and hidden transport
+  contracts.
+- `docs/adr/003-embedded-nats-control-plane.md` and
+  `docs/adr/004-system-data-nats-separation.md` — accepted NATS architecture.
+- `internal/systemnats/systemnats.go` — embedded server lifecycle and hidden
+  request/reply transport.
+- `internal/systemnats/systemnats_test.go` — in-process integration coverage.
+- `cmd/grovlet/main.go` — optional embedded server/connect/endpoint startup,
+  readiness ordering, and shutdown.
+- `cmd/grovlet/main_test.go` — configuration and real two-process envelope E2E.
+- `grovetest/grovetest.go` — reusable extra command arguments for process
+  topology tests.
+- `tasks/010-cross-node-service-invocation.md` through
+  `tasks/012-static-cluster-join.md` — remote dispatch, identity, and clustered
+  NATS boundaries.
 
 ### Decisions Made
 
-- Implement generic `Encode[T]` and `Decode[T]` with `encoding/gob` hidden
-  entirely inside the root Grove SDK package.
-- Return typed `CodecError` values with operation and wrapped cause so malformed
-  or unsupported values retain useful context without string assertions.
-- Define `RequestEnvelope` with RequestID, ServiceID, MethodID, and Payload;
-  define `ResponseEnvelope` with the same RequestID plus Payload or one
-  `ResponseError`.
-- Classify response failures as dispatch, handler, or serialization through an
-  exported `ErrorCode`. Keep a private cause on locally constructed errors so
-  `errors.Is` preserves exact local failures; Gob carries only stable code and
-  message across a future process boundary.
-- Change Registry Handler to `func(context.Context, []byte) ([]byte, error)` and
-  update all callers. This is the canonical explicit serialization boundary,
-  not a transport dependency.
-- Generate process-local monotonic request IDs for Call. Task 008 requires
-  correlation, not distributed identity or persistence.
-- Make Client's local route accept/return envelopes. Call checks response
-  correlation and decodes the application-owned response; the public generic
-  call site remains unchanged for future remote routing.
-- Rewrite each Grove Shop adapter as visible Decode -> concrete method -> Encode
-  glue, with no raw Gob usage, reflection-driven dispatch, or generated code.
+- Use the official `nats-server/v2/server` embedding API and `nats.go`
+  request/reply client. Pin current stable versions in `go.mod`.
+- Keep all NATS imports under `internal/systemnats` and `cmd/grovlet`; the
+  application-facing Grove SDK and Grove Shop never see NATS subjects or
+  connections.
+- Start an embedded server on an explicit loopback listen address when a
+  Grovlet receives `--system-nats-listen`. A host Grovlet connects to its own
+  server; peers use `--system-nats-url`.
+- Gate Grovlet readiness on server readiness, client connection, endpoint
+  subscription, and NATS flush. No sleeps or asynchronous readiness guesses.
+- Use explicit `_GROVE.system.invoke.*` subjects for this pre-identity stage.
+  They represent System-plane transport endpoints, not membership or placement.
+- Implement a transport callback over RequestEnvelope/ResponseEnvelope. The
+  Task 009 Grovlet endpoint echoes the serialized payload solely as a transport
+  probe; Task 010 will connect the callback to remote Registry dispatch.
+- Extend `grovetest.StartNode` with variadic command arguments while rejecting
+  attempts to override its owned `--runtime-dir`; restarts reuse the same args.
+- E2E topology: node A embeds System NATS, node B connects to A, both expose
+  explicit endpoints, and a hidden transport client requests node B through
+  node A. This exercises two real processes and real loopback TCP transport.
 
 ## Sub-Tasks
 
-- [x] 1. Select and bound Task 008.
-  **Context:** Read the task, serialization/invocation contracts, current Call,
-  Registry, Grove Shop adapters, and Task 009 boundary.
-  **Outcome:** Chose canonical byte handlers plus transport-neutral envelopes
-  and preserved local causes alongside wire-safe structured errors.
+- [x] 1. Select and bound Task 009.
+  **Context:** Read the task, SDK contracts, accepted NATS ADRs, Tasks 010-012,
+  current Grovlet/harness APIs, and official current NATS Go documentation.
+  **Outcome:** Chose one embedded standalone server, hidden request/reply
+  transport, explicit subjects, and deferred clustering/identity/dispatch.
 
-- [x] 2. Implement Gob helpers and envelope types.
-  **Context:** Add generic encoding/decoding, typed codec failures, request and
-  response structures, error codes, local cause retention, and correlation
-  mismatch handling.
-  **Outcome:** Added generic Gob-backed Encode/Decode, typed operation-aware
-  codec failures, correlated request/response envelopes, three stable error
-  classes, and locally unwrap-capable structured response errors.
+- [ ] 2. Add the hidden System NATS runtime.
+  **Context:** Pin dependencies; implement context-bounded embedded server
+  startup/shutdown, connection, subscription/flush, envelope request/reply,
+  correlation validation, and typed diagnostics.
+  **Outcome:** Pending.
 
-- [x] 3. Route local invocation through envelopes.
-  **Context:** Convert Handler and adapters to bytes; have Call encode its
-  request, create a request ID, dispatch locally, validate the response ID,
-  surface structured errors, and decode the typed response.
-  **Outcome:** Migrated Handler to bytes and Call to encode requests, allocate
-  monotonic IDs, dispatch an envelope locally, validate response correlation,
-  surface structured errors, and decode the typed result. All Grove Shop
-  adapters now show the canonical Decode -> concrete call -> Encode sequence.
+- [ ] 3. Connect Grovlets and extend process configuration.
+  **Context:** Add optional listen, URL, and endpoint flags; start/connect/serve
+  before ready; shut down cleanly; let grovetest pass safe additional args.
+  **Outcome:** Pending.
 
-- [x] 4. Prove serialization and regression behavior.
-  **Context:** Test payload and envelope round trips, malformed and incompatible
-  input, request ID preservation, each response error class, local cause
-  preservation, explicit Grove Shop adapters, and the existing local E2E.
-  **Outcome:** Added value and envelope round trips, request ID preservation,
-  unsupported encode, nil target, malformed/incompatible decode, dispatch,
-  handler and serialization classification, local cause preservation, explicit
-  adapter checks, and retained the one-Grovlet local flow.
+- [ ] 4. Prove integration and real-process transport.
+  **Context:** Integration-test embedded request/reply and failures, then start
+  two Grovlets, wait for both, exchange an invocation envelope through the
+  embedded server into the peer process, verify payload/request ID, and clean
+  up all processes and sockets.
+  **Outcome:** Pending.
 
-- [x] 5. Verify and close Task 008.
-  **Context:** Review `go doc`, format, vet, run repeated and race tests, run the
-  full repository suite, then mark Task 008 DONE after every check succeeds.
-  **Outcome:** Reviewed the complete `go doc` surfaces; `gofmt -l` reports no
-  files; `go vet ./...`, 50 repeated codec/envelope/call runs, 20 repeated
-  real-process local E2Es, 25 repeated Grove Shop adapter runs, `go test -race
-  -count=1 ./...`, and `go test -count=1 ./...` pass. Task 008 is marked DONE.
+- [ ] 5. Verify and close Task 009.
+  **Context:** Review `go doc`, dependency changes, format, vet, run repeated and
+  race tests, run the full repository suite, then mark Task 009 DONE after every
+  check succeeds.
+  **Outcome:** Pending.
 
 ## Log
 
-- 2026-09-08: Tasks 001 through 007 completed with all focused, race, vet, and
+- 2026-09-08: Tasks 001 through 008 completed with all focused, race, vet, and
   full-suite checks passing.
-- 2026-09-08: Selected Task 008 and recorded the canonical Handler migration,
-  envelope correlation, structured/local error model, and NATS boundary.
-- 2026-09-08: Completed Task 008 after focused, repeated, race, vet, and full
-  suite verification; no scope deviations or architectural issues found.
+- 2026-09-08: Selected Task 009 and recorded the embedded-server topology,
+  hidden System-plane API, readiness gates, explicit pre-identity subjects, and
+  later remote-dispatch/bootstrap boundaries.
