@@ -1,6 +1,6 @@
 # Task 011 — Node identity and advertised endpoint
 
-Status: TODO
+Status: DONE
 Depends on: 009
 
 ## Goal

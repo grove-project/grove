@@ -82,6 +82,26 @@ func TestParseConfig(t *testing.T) {
 	}, io.Discard); !errors.Is(err, errSystemNATSRequired) {
 		t.Errorf("endpoint without connection error = %v; want %v", err, errSystemNATSRequired)
 	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+	}, io.Discard); !errors.Is(err, errNodeIdentityPair) {
+		t.Errorf("incomplete identity error = %v; want %v", err, errNodeIdentityPair)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "bad node",
+		"--advertise-endpoint", "nats-subject://system/node",
+	}, io.Discard); !errors.Is(err, errNodeIDInvalid) {
+		t.Errorf("invalid node ID error = %v; want %v", err, errNodeIDInvalid)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+		"--advertise-endpoint", "relative-endpoint",
+	}, io.Discard); !errors.Is(err, errAdvertiseInvalid) {
+		t.Errorf("invalid advertised endpoint error = %v; want %v", err, errAdvertiseInvalid)
+	}
 }
 
 func TestPrepareRuntimeDir(t *testing.T) {
@@ -203,7 +223,7 @@ func TestGrovletSystemNATSTransport(t *testing.T) {
 	if err := host.WaitReady(ctx); err != nil {
 		t.Fatal(err)
 	}
-	serverURL := systemNATSURLFromLogs(t, host.Logs())
+	serverURL := readyEventFromLogs(t, host.Logs()).SystemNATSURL
 
 	peer, err := grovetest.StartNode(
 		grovletPath,
@@ -271,6 +291,8 @@ func TestGrovletCrossNodeServiceInvocation(t *testing.T) {
 
 	ordersNode, err := grovetest.StartNode(
 		grovletPath,
+		"--node-id", "orders-node",
+		"--advertise-endpoint", "nats-subject://system/orders-node",
 		"--system-nats-listen", "127.0.0.1:0",
 		"--system-nats-subject", ordersSubject,
 		"--grove-shop-orders-inventory-subject", inventorySubject,
@@ -286,10 +308,16 @@ func TestGrovletCrossNodeServiceInvocation(t *testing.T) {
 	if err := ordersNode.WaitReady(ctx); err != nil {
 		t.Fatal(err)
 	}
-	serverURL := systemNATSURLFromLogs(t, ordersNode.Logs())
+	ordersReady := readyEventFromLogs(t, ordersNode.Logs())
+	serverURL := ordersReady.SystemNATSURL
+	if ordersReady.NodeID != "orders-node" || ordersReady.AdvertisedEndpoint != "nats-subject://system/orders-node" {
+		t.Errorf("Orders readiness identity = (%q, %q); want orders-node endpoint", ordersReady.NodeID, ordersReady.AdvertisedEndpoint)
+	}
 
 	inventoryNode, err := grovetest.StartNode(
 		grovletPath,
+		"--node-id", "inventory-node",
+		"--advertise-endpoint", "nats-subject://system/inventory-node",
 		"--system-nats-url", serverURL,
 		"--system-nats-subject", inventorySubject,
 		"--grove-shop-inventory",
@@ -304,6 +332,13 @@ func TestGrovletCrossNodeServiceInvocation(t *testing.T) {
 	})
 	if err := inventoryNode.WaitReady(ctx); err != nil {
 		t.Fatal(err)
+	}
+	inventoryReady := readyEventFromLogs(t, inventoryNode.Logs())
+	if inventoryReady.NodeID != "inventory-node" || inventoryReady.AdvertisedEndpoint != "nats-subject://system/inventory-node" {
+		t.Errorf("Inventory readiness identity = (%q, %q); want inventory-node endpoint", inventoryReady.NodeID, inventoryReady.AdvertisedEndpoint)
+	}
+	if inventoryReady.NodeID == ordersReady.NodeID || inventoryReady.AdvertisedEndpoint == ordersReady.AdvertisedEndpoint {
+		t.Error("same-host Grovlets did not retain distinct identities and endpoints")
 	}
 
 	transport, err := systemnats.Connect(ctx, serverURL)
@@ -358,7 +393,7 @@ func TestGrovletCrossNodeServiceInvocation(t *testing.T) {
 	}
 }
 
-func systemNATSURLFromLogs(t *testing.T, logs string) string {
+func readyEventFromLogs(t *testing.T, logs string) lifecycleEvent {
 	t.Helper()
 	decoder := json.NewDecoder(strings.NewReader(logs))
 	for {
@@ -369,12 +404,12 @@ func systemNATSURLFromLogs(t *testing.T, logs string) string {
 			}
 			t.Fatal(err)
 		}
-		if event.Event == "ready" && event.SystemNATSURL != "" {
-			return event.SystemNATSURL
+		if event.Event == "ready" {
+			return event
 		}
 	}
-	t.Fatalf("Grovlet logs do not contain a ready System NATS URL: %q", logs)
-	return ""
+	t.Fatalf("Grovlet logs do not contain a ready event: %q", logs)
+	return lifecycleEvent{}
 }
 
 func TestMain(m *testing.M) {

@@ -46,26 +46,34 @@ or written into cluster state.
   **Outcome:** Chose explicit paired configuration and readiness metadata with
   no discovery, persistence, or membership semantics.
 
-- [ ] 2. Implement and validate identity configuration.
+- [x] 2. Implement and validate identity configuration.
   **Context:** Add flags, pairing rules, ID syntax, endpoint URL validation, and
   immutable runtime values.
-  **Outcome:** Pending.
+  **Outcome:** Added paired flags and validation for non-host-derived logical
+  IDs and absolute advertised endpoint URLs. Missing halves, invalid ID syntax,
+  and relative/malformed endpoints fail before runtime startup.
 
-- [ ] 3. Publish identity through readiness.
+- [x] 3. Publish identity through readiness.
   **Context:** Extend the existing NDJSON ready record without changing legacy
   output when identity is absent.
-  **Outcome:** Pending.
+  **Outcome:** Extended the compatible NDJSON ready event with optional node ID
+  and advertised endpoint fields sourced from immutable parsed configuration.
 
-- [ ] 4. Prove same-host distinction and addressability.
+- [x] 4. Prove same-host distinction and addressability.
   **Context:** Configure the two cross-node E2E Grovlets with distinct IDs and
   endpoints, verify their ready records, and retain the successful remote order
   flow as the addressability assertion.
-  **Outcome:** Pending.
+  **Outcome:** The real Orders/Inventory E2E now assigns distinct logical IDs
+  and NATS endpoint URIs, verifies both ready records, and completes the remote
+  order flow across their actual subjects on one host.
 
-- [ ] 5. Verify and close Task 011.
+- [x] 5. Verify and close Task 011.
   **Context:** Review docs, format, vet, repeat identity/cross-node tests, run
   race and full suites, then mark Task 011 DONE.
-  **Outcome:** Pending.
+  **Outcome:** Reviewed command documentation; `gofmt -l` reports no files;
+  `go vet ./...`, 50 repeated configuration tests, 25 repeated identity-aware
+  cross-node E2Es, `go test -race -count=1 ./...`, and `go test -count=1 ./...`
+  pass. Task 011 is marked DONE.
 
 ## Log
 
@@ -73,3 +81,5 @@ or written into cluster state.
   vet, and full-suite checks passing.
 - 2026-09-08: Selected Task 011 and recorded paired explicit configuration,
   readiness publication, same-host E2E reuse, and the membership boundary.
+- 2026-09-08: Completed Task 011 after focused, repeated, race, vet, and full
+  suite verification; no scope deviations or architectural issues found.

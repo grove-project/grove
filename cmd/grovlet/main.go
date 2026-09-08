@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -24,6 +25,9 @@ var (
 	errSystemNATSConflict = errors.New("system NATS listen address and URL are mutually exclusive")
 	errSystemNATSRequired = errors.New("system NATS endpoint requires a listen address or URL")
 	errGroveShopEndpoint  = errors.New("reference application service placement requires a System NATS endpoint")
+	errNodeIdentityPair   = errors.New("node ID and advertised endpoint must be configured together")
+	errNodeIDInvalid      = errors.New("node ID is invalid")
+	errAdvertiseInvalid   = errors.New("advertised endpoint is invalid")
 )
 
 type config struct {
@@ -33,11 +37,15 @@ type config struct {
 	systemNATSSubject         string
 	groveShopInventory        bool
 	groveShopInventorySubject string
+	nodeID                    string
+	advertisedEndpoint        string
 }
 
 type lifecycleEvent struct {
-	Event         string `json:"event"`
-	SystemNATSURL string `json:"system_nats_url,omitempty"`
+	Event              string `json:"event"`
+	NodeID             string `json:"node_id,omitempty"`
+	AdvertisedEndpoint string `json:"advertised_endpoint,omitempty"`
+	SystemNATSURL      string `json:"system_nats_url,omitempty"`
 }
 
 type runtimeDirError struct {
@@ -77,7 +85,12 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 
 	encoder := json.NewEncoder(stdout)
-	if err := encoder.Encode(lifecycleEvent{Event: "ready", SystemNATSURL: systemRuntime.url}); err != nil {
+	if err := encoder.Encode(lifecycleEvent{
+		Event:              "ready",
+		NodeID:             cfg.nodeID,
+		AdvertisedEndpoint: cfg.advertisedEndpoint,
+		SystemNATSURL:      systemRuntime.url,
+	}); err != nil {
 		systemRuntime.stop()
 		return fmt.Errorf("encode ready event: %w", err)
 	}
@@ -101,6 +114,8 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.StringVar(&cfg.systemNATSSubject, "system-nats-subject", "", "System NATS transport endpoint subject")
 	flags.BoolVar(&cfg.groveShopInventory, "grove-shop-inventory", false, "register Grove Shop Inventory on this Grovlet")
 	flags.StringVar(&cfg.groveShopInventorySubject, "grove-shop-orders-inventory-subject", "", "explicit Inventory endpoint for Grove Shop Orders")
+	flags.StringVar(&cfg.nodeID, "node-id", "", "stable process-lifetime Grove node ID")
+	flags.StringVar(&cfg.advertisedEndpoint, "advertise-endpoint", "", "advertised Grove transport endpoint URL")
 	if err := flags.Parse(args); err != nil {
 		return config{}, fmt.Errorf("parse flags: %w", err)
 	}
@@ -119,7 +134,34 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	if (cfg.groveShopInventory || cfg.groveShopInventorySubject != "") && cfg.systemNATSSubject == "" {
 		return config{}, errGroveShopEndpoint
 	}
+	if (cfg.nodeID == "") != (cfg.advertisedEndpoint == "") {
+		return config{}, errNodeIdentityPair
+	}
+	if cfg.nodeID != "" && !validNodeID(cfg.nodeID) {
+		return config{}, errNodeIDInvalid
+	}
+	if cfg.advertisedEndpoint != "" {
+		endpoint, err := url.Parse(cfg.advertisedEndpoint)
+		if err != nil || endpoint.Scheme == "" || endpoint.Host == "" {
+			return config{}, fmt.Errorf("validate advertised endpoint: %w", errors.Join(errAdvertiseInvalid, err))
+		}
+	}
 	return cfg, nil
+}
+
+func validNodeID(nodeID string) bool {
+	for i, character := range nodeID {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' {
+			continue
+		}
+		if i != 0 && (character == '.' || character == '_' || character == '-') {
+			continue
+		}
+		return false
+	}
+	return nodeID != ""
 }
 
 type systemNATSRuntime struct {
