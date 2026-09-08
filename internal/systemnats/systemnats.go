@@ -88,6 +88,9 @@ type ClusterConfig struct {
 	// SeedURLs are explicit NATS route URLs used to join an existing cluster.
 	// An empty slice starts a seed server.
 	SeedURLs []string
+	// JetStreamStoreDir enables JetStream and stores its state in this directory
+	// when non-empty.
+	JetStreamStoreDir string
 }
 
 // StartClusterServer starts an embedded System NATS cluster server and waits
@@ -113,9 +116,11 @@ func StartClusterServer(ctx context.Context, cfg ClusterConfig) (*Server, error)
 			Host: cfg.RouteHost,
 			Port: randomPort(cfg.RoutePort),
 		},
-		Routes: routes,
-		NoLog:  true,
-		NoSigs: true,
+		Routes:    routes,
+		JetStream: cfg.JetStreamStoreDir != "",
+		StoreDir:  cfg.JetStreamStoreDir,
+		NoLog:     true,
+		NoSigs:    true,
 	}, len(routes) != 0)
 }
 

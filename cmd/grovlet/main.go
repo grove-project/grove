@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -27,6 +28,7 @@ var (
 	errSystemNATSRouteListenRequired = errors.New("system NATS route listener requires an embedded client listener")
 	errSystemNATSSeedRouteRequired   = errors.New("system NATS seed requires a route listener")
 	errSystemNATSClusterIdentity     = errors.New("system NATS clustering requires node identity")
+	errSystemNATSMembershipCluster   = errors.New("system NATS membership requires a route listener and seed")
 	errGroveShopEndpoint             = errors.New("reference application service placement requires a System NATS endpoint")
 	errNodeIdentityPair              = errors.New("node ID and advertised endpoint must be configured together")
 	errNodeIDInvalid                 = errors.New("node ID is invalid")
@@ -38,6 +40,7 @@ type config struct {
 	systemNATSListen          string
 	systemNATSRouteListen     string
 	systemNATSSeed            string
+	systemNATSMembership      bool
 	systemNATSURL             string
 	systemNATSSubject         string
 	groveShopInventory        bool
@@ -119,6 +122,7 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.StringVar(&cfg.systemNATSListen, "system-nats-listen", "", "loopback address for an embedded System NATS server")
 	flags.StringVar(&cfg.systemNATSRouteListen, "system-nats-route-listen", "", "address for the embedded System NATS route listener")
 	flags.StringVar(&cfg.systemNATSSeed, "system-nats-seed", "", "explicit System NATS seed route URL")
+	flags.BoolVar(&cfg.systemNATSMembership, "system-nats-membership", false, "register and observe replicated Grove membership")
 	flags.StringVar(&cfg.systemNATSURL, "system-nats-url", "", "System NATS server URL")
 	flags.StringVar(&cfg.systemNATSSubject, "system-nats-subject", "", "System NATS transport endpoint subject")
 	flags.BoolVar(&cfg.groveShopInventory, "grove-shop-inventory", false, "register Grove Shop Inventory on this Grovlet")
@@ -151,6 +155,9 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 				errors.Join(systemnats.ErrSeedURLInvalid, err),
 			)
 		}
+	}
+	if cfg.systemNATSMembership && (cfg.systemNATSRouteListen == "" || cfg.systemNATSSeed == "") {
+		return config{}, errSystemNATSMembershipCluster
 	}
 	if cfg.systemNATSSubject != "" && cfg.systemNATSListen == "" && cfg.systemNATSURL == "" {
 		return config{}, errSystemNATSRequired
@@ -192,10 +199,12 @@ func validNodeID(nodeID string) bool {
 }
 
 type systemNATSRuntime struct {
-	server    *systemnats.Server
-	transport *systemnats.Transport
-	url       string
-	routeURL  string
+	server           *systemnats.Server
+	transport        *systemnats.Transport
+	url              string
+	routeURL         string
+	membershipCancel context.CancelFunc
+	membershipDone   chan struct{}
 }
 
 func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error) {
@@ -222,6 +231,9 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 			}
 			if cfg.systemNATSSeed != "" {
 				clusterConfig.SeedURLs = []string{cfg.systemNATSSeed}
+			}
+			if cfg.systemNATSMembership {
+				clusterConfig.JetStreamStoreDir = filepath.Join(cfg.runtimeDir, "system-nats")
 			}
 			runtime.server, err = systemnats.StartClusterServer(ctx, clusterConfig)
 		}
@@ -288,6 +300,21 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 			return nil, err
 		}
 	}
+	if cfg.systemNATSMembership {
+		membership, err := systemnats.NewMembership(systemnats.MembershipRecord{
+			NodeID:             cfg.nodeID,
+			AdvertisedEndpoint: cfg.advertisedEndpoint,
+		})
+		if err != nil {
+			runtime.stop()
+			return nil, err
+		}
+		if err := transport.ServeMembership(ctx, cfg.nodeID, membership); err != nil {
+			runtime.stop()
+			return nil, err
+		}
+		runtime.startMembership(ctx, membership)
+	}
 	return runtime, nil
 }
 
@@ -306,7 +333,21 @@ func parseListenAddress(address string) (string, int, error) {
 	return host, port, nil
 }
 
+func (r *systemNATSRuntime) startMembership(ctx context.Context, membership *systemnats.Membership) {
+	membershipCtx, cancel := context.WithCancel(ctx)
+	r.membershipCancel = cancel
+	r.membershipDone = make(chan struct{})
+	go func() {
+		defer close(r.membershipDone)
+		_ = membership.Run(membershipCtx, r.transport)
+	}()
+}
+
 func (r *systemNATSRuntime) stop() {
+	if r.membershipCancel != nil {
+		r.membershipCancel()
+		<-r.membershipDone
+	}
 	if r.transport != nil {
 		r.transport.Close()
 	}

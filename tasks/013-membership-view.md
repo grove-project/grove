@@ -1,6 +1,6 @@
 # Task 013 — Grove membership in JetStream/KV
 
-Status: TODO
+Status: DONE
 Depends on: 012
 
 ## Goal

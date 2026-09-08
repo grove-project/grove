@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -72,6 +75,7 @@ func TestParseConfig(t *testing.T) {
 		"--system-nats-listen", "127.0.0.1:0",
 		"--system-nats-route-listen", "127.0.0.1:0",
 		"--system-nats-seed", "nats-route://127.0.0.1:6222",
+		"--system-nats-membership",
 	}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -81,6 +85,9 @@ func TestParseConfig(t *testing.T) {
 	}
 	if clusterCfg.systemNATSSeed != "nats-route://127.0.0.1:6222" {
 		t.Errorf("System NATS seed = %q; want nats-route://127.0.0.1:6222", clusterCfg.systemNATSSeed)
+	}
+	if !clusterCfg.systemNATSMembership {
+		t.Error("System NATS membership is disabled; want enabled")
 	}
 
 	if _, err := parseConfig(nil, io.Discard); !errors.Is(err, errRuntimeDirRequired) {
@@ -111,6 +118,14 @@ func TestParseConfig(t *testing.T) {
 		"--system-nats-seed", "nats-route://127.0.0.1:6222",
 	}, io.Discard); !errors.Is(err, errSystemNATSSeedRouteRequired) {
 		t.Errorf("seed without route listener error = %v; want %v", err, errSystemNATSSeedRouteRequired)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-route-listen", "127.0.0.1:0",
+		"--system-nats-membership",
+	}, io.Discard); !errors.Is(err, errSystemNATSMembershipCluster) {
+		t.Errorf("membership without seed error = %v; want %v", err, errSystemNATSMembershipCluster)
 	}
 	if _, err := parseConfig([]string{
 		"--runtime-dir", runtimeDir,
@@ -482,6 +497,155 @@ func clusterLogs(nodes []*grovetest.Node) string {
 		}
 	}
 	return logs.String()
+}
+
+// Every Grovlet reports the same logical membership after its local watcher
+// converges on the replicated JetStream/KV bucket.
+func TestGrovletMembershipConverges(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	nodeIDs := []string{"node-1", "node-2", "node-3"}
+	endpoints := []string{
+		"nats-subject://system/node-1",
+		"nats-subject://system/node-2",
+		"nats-subject://system/node-3",
+	}
+	routePorts := reserveGrovletRoutePorts(t, len(nodeIDs))
+	nodes := make([]*grovetest.Node, 0, len(nodeIDs))
+
+	for i, nodeID := range nodeIDs {
+		seedIndex := 0
+		if i == 0 {
+			seedIndex = 1
+		}
+		node, err := grovetest.StartNode(
+			grovletPath,
+			"--node-id", nodeID,
+			"--advertise-endpoint", endpoints[i],
+			"--system-nats-listen", "127.0.0.1:0",
+			"--system-nats-route-listen", fmt.Sprintf("127.0.0.1:%d", routePorts[i]),
+			"--system-nats-seed", fmt.Sprintf("nats-route://127.0.0.1:%d", routePorts[seedIndex]),
+			"--system-nats-membership",
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nodes = append(nodes, node)
+		t.Cleanup(func() {
+			if err := node.Cleanup(); err != nil {
+				t.Errorf("cleanup %s: %v", nodeID, err)
+			}
+		})
+	}
+
+	readyEvents := make([]lifecycleEvent, len(nodes))
+	for i, node := range nodes {
+		if err := node.WaitReady(ctx); err != nil {
+			t.Fatalf("wait for %s: %v\n%s", nodeIDs[i], err, clusterLogs(nodes))
+		}
+		readyEvents[i] = readyEventFromLogs(t, node.Logs())
+	}
+
+	transports := make([]*systemnats.Transport, 0, len(nodes))
+	for i, ready := range readyEvents {
+		transport, err := systemnats.Connect(ctx, ready.SystemNATSURL)
+		if err != nil {
+			t.Fatalf("connect to %s: %v\n%s", nodeIDs[i], err, clusterLogs(nodes))
+		}
+		transports = append(transports, transport)
+		t.Cleanup(transport.Close)
+	}
+
+	want := []systemnats.MembershipRecord{
+		{NodeID: nodeIDs[0], AdvertisedEndpoint: endpoints[0]},
+		{NodeID: nodeIDs[1], AdvertisedEndpoint: endpoints[1]},
+		{NodeID: nodeIDs[2], AdvertisedEndpoint: endpoints[2]},
+	}
+	views, err := waitForGrovletMembership(ctx, transports, nodeIDs, want)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, clusterLogs(nodes))
+	}
+	for i, view := range views {
+		if view.Error != "" || !slices.Equal(view.Members, want) {
+			t.Errorf("%s membership = %#v; want %#v", nodeIDs[i], view, want)
+		}
+	}
+
+	for i := len(nodes) - 1; i >= 0; i-- {
+		if err := nodes[i].Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func reserveGrovletRoutePorts(t *testing.T, count int) []int {
+	t.Helper()
+	listeners := make([]net.Listener, 0, count)
+	defer func() {
+		for _, listener := range listeners {
+			if err := listener.Close(); err != nil {
+				t.Errorf("close route-port reservation: %v", err)
+			}
+		}
+	}()
+	ports := make([]int, 0, count)
+	for range count {
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listeners = append(listeners, listener)
+		_, portText, err := net.SplitHostPort(listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ports = append(ports, port)
+	}
+	return ports
+}
+
+func waitForGrovletMembership(
+	ctx context.Context,
+	transports []*systemnats.Transport,
+	nodeIDs []string,
+	want []systemnats.MembershipRecord,
+) ([]systemnats.MembershipView, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	views := make([]systemnats.MembershipView, len(nodeIDs))
+	var lastErr error
+	for {
+		converged := true
+		for i, nodeID := range nodeIDs {
+			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			view, err := transports[i].RequestMembership(requestCtx, nodeID)
+			cancel()
+			if err != nil {
+				lastErr = err
+				converged = false
+				continue
+			}
+			views[i] = view
+			if !view.Ready || !slices.Equal(view.Members, want) {
+				converged = false
+			}
+		}
+		if converged {
+			return views, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("grovlet membership did not converge: views=%#v: %w", views, errors.Join(lastErr, err))
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("grovlet membership did not converge: views=%#v: %w", views, errors.Join(lastErr, ctx.Err()))
+		}
+	}
 }
 
 // Orders and Inventory keep one Grove call path when placed in separate real
