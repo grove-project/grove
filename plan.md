@@ -1,85 +1,99 @@
-# Plan: Implement node identity and advertised endpoints
+# Plan: Bootstrap a shared System NATS cluster
 
 ## Goal
 
-Complete Task 011 by giving each configured Grovlet an explicit validated node
-ID and advertised transport endpoint, keeping that identity stable for the
-process lifetime, publishing it in readiness, and proving same-host Grovlets
-remain distinct and addressable without introducing discovery or membership.
+Complete Task 012 by allowing explicitly identified Grovlets to start embedded
+NATS route listeners, join through a configured seed route, and announce
+readiness only after the route is established. Prove three real Grovlet
+processes exchange control-plane messages through distinct embedded servers in
+one System NATS fabric without introducing Grove membership or consensus.
 
 ## Context
 
-Tasks 001 through 010 are complete. Task 011 owns process-lifetime identity
-configuration and readiness only. Task 012 owns cluster bootstrap and Task 013
-owns authoritative membership. Identity must therefore remain explicit input;
-it is not inferred from hostname, persisted as machine identity, discovered,
-or written into cluster state.
+Tasks 001 through 011 are complete. Task 012 owns only NATS server-cluster
+bootstrap. Task 013 will enable JetStream/KV and define authoritative Grove
+membership, so NATS route connectivity must not be presented as logical node
+membership or persisted as Grove control state.
 
 ### Key Files
 
-- `tasks/011-node-identity-and-endpoint.md` — identity, validation, readiness,
-  and E2E scope.
-- `cmd/grovlet/main.go` — flags, validation, runtime identity, and ready event.
-- `cmd/grovlet/main_test.go` — validation and same-host addressability proof.
-- `tasks/012-static-cluster-join.md` — boundary for seed-based shared fabric.
+- `tasks/012-static-cluster-join.md` — explicit seed bootstrap and three-process
+  E2E requirements.
+- `tasks/013-membership-view.md` — boundary for JetStream/KV and logical Grove
+  membership.
+- `internal/systemnats/systemnats.go` — embedded server lifecycle and hidden
+  NATS transport.
+- `internal/systemnats/systemnats_test.go` — server-cluster and cross-route
+  transport contract tests.
+- `cmd/grovlet/main.go` — process flags, startup validation, and readiness
+  metadata.
+- `cmd/grovlet/main_test.go` — real-process bootstrap E2E and configuration
+  validation.
 
 ### Decisions Made
 
-- Add paired optional `--node-id` and `--advertise-endpoint` flags. If either is
-  supplied both are required; legacy lifecycle-only tests may omit both.
-- Accept node IDs containing letters, digits, dot, underscore, or hyphen, with
-  an alphanumeric first character. This is explicit logical identity and never
-  derives from the host.
-- Require advertised endpoints to be absolute URLs with a scheme and host.
-  Grove does not infer or probe them in this task.
-- Add NodeID and AdvertisedEndpoint to the machine-readable ready event. Values
-  remain unchanged until that process exits; restart may reuse the same inputs.
-- Extend the real cross-node Grove Shop E2E with distinct IDs and endpoint URLs,
-  assert both readiness records, and retain its successful routing proof as
-  evidence that the nodes remain addressable on one host.
+- Keep the existing standalone `StartServer` entry point and add a clustered
+  server entry point configured with a node name, client listener, route
+  listener, and explicit seed route URLs.
+- Use NATS server routes and NATS's own cluster behavior. Do not add a Grove
+  discovery, election, membership, or consensus protocol.
+- A clustered Grovlet embeds its own NATS server and connects its runtime
+  transport to that local server. Joiners receive a seed's route URL, not its
+  client URL.
+- Allow port zero for both client and route listeners so the embedded server
+  selects ports without a test-side reservation race. Publish both resulting
+  URLs in the ready event.
+- Require Task 011 identity when clustered startup is configured so the NATS
+  server name is stable and independent of host identity.
+- A joiner does not report ready until its embedded server has at least one
+  established NATS route. Bounded condition waits carry startup context errors;
+  no fixed sleeps are used.
+- Prove one shared plane by connecting a test client to the seed's client URL
+  and requesting unique endpoint subjects hosted by all three Grovlets.
 
 ## Sub-Tasks
 
-- [x] 1. Select and bound Task 011.
-  **Context:** Read Task 011, current Grovlet transport configuration/readiness,
-  the invocation contract, and Task 012.
-  **Outcome:** Chose explicit paired configuration and readiness metadata with
-  no discovery, persistence, or membership semantics.
+- [x] 1. Select and bound Task 012.
+  **Context:** Read Task 012, Task 013, accepted NATS ADRs, SDK transport
+  boundaries, the current embedded server/runtime, and the pinned NATS API.
+  **Outcome:** Chose explicit NATS route seeding with independently embedded
+  servers, route-gated readiness, and no JetStream/KV or Grove membership.
 
-- [x] 2. Implement and validate identity configuration.
-  **Context:** Add flags, pairing rules, ID syntax, endpoint URL validation, and
-  immutable runtime values.
-  **Outcome:** Added paired flags and validation for non-host-derived logical
-  IDs and absolute advertised endpoint URLs. Missing halves, invalid ID syntax,
-  and relative/malformed endpoints fail before runtime startup.
+- [ ] 2. Extend the embedded System NATS server for routed clustering.
+  **Context:** Add configuration for node name, client/route listeners, and seed
+  URLs; expose the selected route URL; and wait for at least one route when a
+  join seed is configured while preserving standalone startup.
+  **Acceptance:** Package tests start independently embedded servers, join them
+  through a seed, and exchange a Grove envelope across the NATS route.
 
-- [x] 3. Publish identity through readiness.
-  **Context:** Extend the existing NDJSON ready record without changing legacy
-  output when identity is absent.
-  **Outcome:** Extended the compatible NDJSON ready event with optional node ID
-  and advertised endpoint fields sourced from immutable parsed configuration.
+- [ ] 3. Configure clustered Grovlet startup and readiness.
+  **Context:** Add route-listen and seed flags, reject incomplete or conflicting
+  combinations, start the clustered embedded server using the explicit node ID,
+  and include the route URL in the machine-readable ready event.
+  **Acceptance:** Configuration tests cover valid bootstrap plus invalid seed,
+  listener, external-URL, and missing-identity combinations; prior lifecycle
+  output stays compatible.
 
-- [x] 4. Prove same-host distinction and addressability.
-  **Context:** Configure the two cross-node E2E Grovlets with distinct IDs and
-  endpoints, verify their ready records, and retain the successful remote order
-  flow as the addressability assertion.
-  **Outcome:** The real Orders/Inventory E2E now assigns distinct logical IDs
-  and NATS endpoint URIs, verifies both ready records, and completes the remote
-  order flow across their actual subjects on one host.
+- [ ] 4. Prove a three-Grovlet shared System NATS plane.
+  **Context:** Start one seed and two joiners as real OS processes with unique
+  runtime directories, identities, client listeners, route listeners, and
+  endpoint subjects. Use each joiner's explicit seed configuration and request
+  every subject through only the seed's client endpoint.
+  **Acceptance:** The E2E uses bounded waits, emits process logs on timeout,
+  verifies three distinct client/route URLs, and receives correlated responses
+  from all three Grovlets.
 
-- [x] 5. Verify and close Task 011.
-  **Context:** Review docs, format, vet, repeat identity/cross-node tests, run
-  race and full suites, then mark Task 011 DONE.
-  **Outcome:** Reviewed command documentation; `gofmt -l` reports no files;
-  `go vet ./...`, 50 repeated configuration tests, 25 repeated identity-aware
-  cross-node E2Es, `go test -race -count=1 ./...`, and `go test -count=1 ./...`
-  pass. Task 011 is marked DONE.
+- [ ] 5. Verify and close Task 012.
+  **Context:** Review exported docs, format, vet, repeat focused package and E2E
+  tests, run race and full suites, then mark Task 012 DONE.
+  **Acceptance:** `gofmt -l` is empty; `go vet ./...`, focused repeated tests,
+  `go test -race -count=1 ./...`, and `go test -count=1 ./...` pass without
+  weakening prior coverage.
 
 ## Log
 
-- 2026-09-08: Tasks 001 through 010 completed with all focused, repeated, race,
+- 2026-09-08: Tasks 001 through 011 completed with focused, repeated, race,
   vet, and full-suite checks passing.
-- 2026-09-08: Selected Task 011 and recorded paired explicit configuration,
-  readiness publication, same-host E2E reuse, and the membership boundary.
-- 2026-09-08: Completed Task 011 after focused, repeated, race, vet, and full
-  suite verification; no scope deviations or architectural issues found.
+- 2026-09-08: Selected Task 012 and recorded NATS route seeding,
+  independently embedded servers, route-gated readiness, and the Task 013
+  membership boundary.
