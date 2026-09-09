@@ -1,6 +1,6 @@
 # Task 014 — NATS heartbeats and node health
 
-Status: TODO
+Status: DONE
 Depends on: 013
 
 ## Goal

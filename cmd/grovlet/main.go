@@ -205,6 +205,8 @@ type systemNATSRuntime struct {
 	routeURL         string
 	membershipCancel context.CancelFunc
 	membershipDone   chan struct{}
+	healthCancel     context.CancelFunc
+	healthDone       chan struct{}
 }
 
 func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error) {
@@ -314,6 +316,16 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 			return nil, err
 		}
 		runtime.startMembership(ctx, membership)
+		health, err := systemnats.NewHealth(cfg.nodeID, membership, systemnats.HealthConfig{})
+		if err != nil {
+			runtime.stop()
+			return nil, err
+		}
+		if err := transport.ServeClusterView(ctx, cfg.nodeID, health); err != nil {
+			runtime.stop()
+			return nil, err
+		}
+		runtime.startHealth(ctx, health)
 	}
 	return runtime, nil
 }
@@ -343,7 +355,21 @@ func (r *systemNATSRuntime) startMembership(ctx context.Context, membership *sys
 	}()
 }
 
+func (r *systemNATSRuntime) startHealth(ctx context.Context, health *systemnats.Health) {
+	healthCtx, cancel := context.WithCancel(ctx)
+	r.healthCancel = cancel
+	r.healthDone = make(chan struct{})
+	go func() {
+		defer close(r.healthDone)
+		_ = health.Run(healthCtx, r.transport)
+	}()
+}
+
 func (r *systemNATSRuntime) stop() {
+	if r.healthCancel != nil {
+		r.healthCancel()
+		<-r.healthDone
+	}
 	if r.membershipCancel != nil {
 		r.membershipCancel()
 		<-r.membershipDone

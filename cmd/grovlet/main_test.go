@@ -502,18 +502,51 @@ func clusterLogs(nodes []*grovetest.Node) string {
 // Every Grovlet reports the same logical membership after its local watcher
 // converges on the replicated JetStream/KV bucket.
 func TestGrovletMembershipConverges(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	nodeIDs := []string{"node-1", "node-2", "node-3"}
-	endpoints := []string{
-		"nats-subject://system/node-1",
-		"nats-subject://system/node-2",
-		"nats-subject://system/node-3",
-	}
-	routePorts := reserveGrovletRoutePorts(t, len(nodeIDs))
-	nodes := make([]*grovetest.Node, 0, len(nodeIDs))
+	cluster := startMembershipGrovlets(t, ctx)
 
-	for i, nodeID := range nodeIDs {
+	want := []systemnats.MembershipRecord{
+		{NodeID: cluster.nodeIDs[0], AdvertisedEndpoint: cluster.endpoints[0]},
+		{NodeID: cluster.nodeIDs[1], AdvertisedEndpoint: cluster.endpoints[1]},
+		{NodeID: cluster.nodeIDs[2], AdvertisedEndpoint: cluster.endpoints[2]},
+	}
+	views, err := waitForGrovletMembership(ctx, cluster.transports, cluster.nodeIDs, want)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	for i, view := range views {
+		if view.Error != "" || !slices.Equal(view.Members, want) {
+			t.Errorf("%s membership = %#v; want %#v", cluster.nodeIDs[i], view, want)
+		}
+	}
+
+	for i := len(cluster.nodes) - 1; i >= 0; i-- {
+		if err := cluster.nodes[i].Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type membershipGrovlets struct {
+	nodeIDs    []string
+	endpoints  []string
+	nodes      []*grovetest.Node
+	transports []*systemnats.Transport
+}
+
+func startMembershipGrovlets(t *testing.T, ctx context.Context) membershipGrovlets {
+	t.Helper()
+	cluster := membershipGrovlets{
+		nodeIDs: []string{"node-1", "node-2", "node-3"},
+		endpoints: []string{
+			"nats-subject://system/node-1",
+			"nats-subject://system/node-2",
+			"nats-subject://system/node-3",
+		},
+	}
+	routePorts := reserveGrovletRoutePorts(t, len(cluster.nodeIDs))
+	for i, nodeID := range cluster.nodeIDs {
 		seedIndex := 0
 		if i == 0 {
 			seedIndex = 1
@@ -521,7 +554,7 @@ func TestGrovletMembershipConverges(t *testing.T) {
 		node, err := grovetest.StartNode(
 			grovletPath,
 			"--node-id", nodeID,
-			"--advertise-endpoint", endpoints[i],
+			"--advertise-endpoint", cluster.endpoints[i],
 			"--system-nats-listen", "127.0.0.1:0",
 			"--system-nats-route-listen", fmt.Sprintf("127.0.0.1:%d", routePorts[i]),
 			"--system-nats-seed", fmt.Sprintf("nats-route://127.0.0.1:%d", routePorts[seedIndex]),
@@ -530,52 +563,26 @@ func TestGrovletMembershipConverges(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		nodes = append(nodes, node)
+		cluster.nodes = append(cluster.nodes, node)
 		t.Cleanup(func() {
 			if err := node.Cleanup(); err != nil {
 				t.Errorf("cleanup %s: %v", nodeID, err)
 			}
 		})
 	}
-
-	readyEvents := make([]lifecycleEvent, len(nodes))
-	for i, node := range nodes {
+	for i, node := range cluster.nodes {
 		if err := node.WaitReady(ctx); err != nil {
-			t.Fatalf("wait for %s: %v\n%s", nodeIDs[i], err, clusterLogs(nodes))
+			t.Fatalf("wait for %s: %v\n%s", cluster.nodeIDs[i], err, clusterLogs(cluster.nodes))
 		}
-		readyEvents[i] = readyEventFromLogs(t, node.Logs())
-	}
-
-	transports := make([]*systemnats.Transport, 0, len(nodes))
-	for i, ready := range readyEvents {
+		ready := readyEventFromLogs(t, node.Logs())
 		transport, err := systemnats.Connect(ctx, ready.SystemNATSURL)
 		if err != nil {
-			t.Fatalf("connect to %s: %v\n%s", nodeIDs[i], err, clusterLogs(nodes))
+			t.Fatalf("connect to %s: %v\n%s", cluster.nodeIDs[i], err, clusterLogs(cluster.nodes))
 		}
-		transports = append(transports, transport)
+		cluster.transports = append(cluster.transports, transport)
 		t.Cleanup(transport.Close)
 	}
-
-	want := []systemnats.MembershipRecord{
-		{NodeID: nodeIDs[0], AdvertisedEndpoint: endpoints[0]},
-		{NodeID: nodeIDs[1], AdvertisedEndpoint: endpoints[1]},
-		{NodeID: nodeIDs[2], AdvertisedEndpoint: endpoints[2]},
-	}
-	views, err := waitForGrovletMembership(ctx, transports, nodeIDs, want)
-	if err != nil {
-		t.Fatalf("%v\n%s", err, clusterLogs(nodes))
-	}
-	for i, view := range views {
-		if view.Error != "" || !slices.Equal(view.Members, want) {
-			t.Errorf("%s membership = %#v; want %#v", nodeIDs[i], view, want)
-		}
-	}
-
-	for i := len(nodes) - 1; i >= 0; i-- {
-		if err := nodes[i].Stop(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
+	return cluster
 }
 
 func reserveGrovletRoutePorts(t *testing.T, count int) []int {
@@ -644,6 +651,103 @@ func waitForGrovletMembership(
 		case <-ticker.C:
 		case <-ctx.Done():
 			return nil, fmt.Errorf("grovlet membership did not converge: views=%#v: %w", views, errors.Join(lastErr, ctx.Err()))
+		}
+	}
+}
+
+// Both surviving Grovlets retain the killed node's membership record and
+// independently transition its heartbeat-derived health to unavailable.
+func TestGrovletNodeHealthConverges(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	cluster := startMembershipGrovlets(t, ctx)
+	allNodes := []int{0, 1, 2}
+	healthyViews, err := waitForGrovletHealth(ctx, cluster, allNodes, func(view systemnats.ClusterView) bool {
+		if !view.Ready || len(view.Nodes) != 3 {
+			return false
+		}
+		for _, node := range view.Nodes {
+			if node.Health != systemnats.HealthHealthy || node.LastSeen == "" {
+				return false
+			}
+		}
+		return true
+	})
+	if err != nil {
+		t.Fatalf("wait for healthy cluster: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	for i, view := range healthyViews {
+		if view.Nodes[0].NodeID != "node-1" || view.Nodes[1].NodeID != "node-2" || view.Nodes[2].NodeID != "node-3" {
+			t.Errorf("%s healthy view order = %#v", cluster.nodeIDs[i], view.Nodes)
+		}
+	}
+
+	if err := cluster.nodes[1].Kill(ctx); err != nil {
+		t.Fatal(err)
+	}
+	survivors := []int{0, 2}
+	unavailableViews, err := waitForGrovletHealth(ctx, cluster, survivors, func(view systemnats.ClusterView) bool {
+		return view.Ready &&
+			len(view.Nodes) == 3 &&
+			view.Nodes[0].NodeID == "node-1" &&
+			view.Nodes[0].Health == systemnats.HealthHealthy &&
+			view.Nodes[1].NodeID == "node-2" &&
+			view.Nodes[1].Health == systemnats.HealthUnavailable &&
+			view.Nodes[2].NodeID == "node-3" &&
+			view.Nodes[2].Health == systemnats.HealthHealthy
+	})
+	if err != nil {
+		t.Fatalf("wait for unavailable node: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	for i, view := range unavailableViews {
+		if view.Nodes[1].AdvertisedEndpoint != cluster.endpoints[1] || view.Nodes[1].LastSeen == "" {
+			t.Errorf("%s unavailable node = %#v; want retained node-2 identity and last seen", cluster.nodeIDs[survivors[i]], view.Nodes[1])
+		}
+	}
+
+	for _, i := range []int{2, 0} {
+		if err := cluster.nodes[i].Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func waitForGrovletHealth(
+	ctx context.Context,
+	cluster membershipGrovlets,
+	observers []int,
+	condition func(systemnats.ClusterView) bool,
+) ([]systemnats.ClusterView, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	views := make([]systemnats.ClusterView, len(observers))
+	var lastErr error
+	for {
+		converged := true
+		for i, observer := range observers {
+			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			view, err := cluster.transports[observer].RequestClusterView(requestCtx, cluster.nodeIDs[observer])
+			cancel()
+			if err != nil {
+				lastErr = err
+				converged = false
+				continue
+			}
+			views[i] = view
+			if !condition(view) {
+				converged = false
+			}
+		}
+		if converged {
+			return views, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("grovlet health did not converge: views=%#v: %w", views, errors.Join(lastErr, err))
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("grovlet health did not converge: views=%#v: %w", views, errors.Join(lastErr, ctx.Err()))
 		}
 	}
 }

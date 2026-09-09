@@ -58,41 +58,49 @@ later tasks own recovery, so health changes must not trigger service movement.
   derived health, a separate cluster-view endpoint, and no KV heartbeat writes,
   placement, recovery, or parallel consensus.
 
-- [ ] 2. Implement heartbeat tracking and cluster views.
+- [x] 2. Implement heartbeat tracking and cluster views.
   **Context:** Define heartbeat payloads, healthy/unavailable states, last-seen
   tracking, periodic publish/evaluation, deterministic membership-scoped
   snapshots, and context-driven shutdown.
-  **Acceptance:** Package tests prove initial healthy convergence, live
-  last-seen updates, timeout transition, sorted output, and clean cancellation.
+  **Outcome:** Added node-addressed JSON heartbeats, receiver-time last-seen
+  tracking, membership-scoped sorted views, healthy/unavailable derivation,
+  immediate and periodic publication, and context-driven subscription cleanup.
+  Package tests repeatedly prove healthy convergence and timeout transition.
 
-- [ ] 3. Expose the machine-readable cluster-view API.
+- [x] 3. Expose the machine-readable cluster-view API.
   **Context:** Add per-node JSON System NATS serve/request operations that
   report initializing, healthy, and unavailable states without changing the
   membership KV schema or endpoint.
-  **Acceptance:** API tests query a specific observer and decode the complete
-  deterministic cluster view.
+  **Outcome:** Added per-node JSON cluster-view serve/request operations. Tests
+  distinguish the initial empty view and decode sorted identity, endpoint,
+  health, and receiver-side last-seen fields.
 
-- [ ] 4. Wire health into membership-enabled Grovlets.
+- [x] 4. Wire health into membership-enabled Grovlets.
   **Context:** Construct health from the existing membership observer, serve its
   endpoint before launch, and order cancellation/join ahead of membership,
   transport, and embedded-server shutdown.
-  **Acceptance:** Existing membership and route-only E2Es remain green and
-  graceful shutdown leaves no health goroutine behind.
+  **Outcome:** Membership-enabled Grovlets now serve and run health after
+  starting their membership observer. Shutdown cancels and joins health before
+  membership, transport, and embedded NATS; prior membership/route E2Es pass.
 
-- [ ] 5. Prove killed-node health convergence.
+- [x] 5. Prove killed-node health convergence.
   **Context:** Start three real mutually seeded Grovlets, condition-wait until
   all report healthy, kill the middle process, then query both survivors until
   each reports that membership record unavailable while reporting themselves
   healthy.
-  **Acceptance:** The E2E uses no fixed sleeps and dumps all process logs on any
-  bounded-wait failure.
+  **Outcome:** Added a real three-process E2E that waits for all-healthy views,
+  kills node 2, and condition-waits until both survivors retain its membership
+  record with unavailable health while remaining healthy themselves. Failures
+  include every process log.
 
-- [ ] 6. Verify and close Task 014.
+- [x] 6. Verify and close Task 014.
   **Context:** Review exported docs and state boundaries, format, vet, repeat
   focused health/E2E tests, run race and full suites, then mark Task 014 DONE.
-  **Acceptance:** `gofmt -l` is empty; `go vet ./...`, focused repeated tests,
-  `go test -race -count=1 ./...`, and `go test -count=1 ./...` pass without
-  weakening prior coverage.
+  **Outcome:** Reviewed exported health/API documentation and the complete
+  diff; `gofmt -l .` and `git diff --check` are clean. `go vet ./...`, 20
+  repeated heartbeat transition tests, five repeated real-process
+  membership/kill E2E pairs, `go test -race -count=1 ./...`, and
+  `go test -count=1 ./...` pass. Task 014 is marked DONE.
 
 ## Log
 
@@ -101,3 +109,9 @@ later tasks own recovery, so health changes must not trigger service movement.
 - 2026-09-08: Selected Task 014 and recorded ephemeral receiver-time
   heartbeats, membership-scoped derived health, cluster-view API, and the
   placement/recovery boundary.
+- 2026-09-08: Added heartbeat exchange, last-seen tracking, derived sorted
+  cluster views, and the per-node JSON API with repeated package coverage.
+- 2026-09-08: Wired health lifecycle into Grovlet and passed the focused
+  three-process kill/convergence E2E plus earlier membership E2E.
+- 2026-09-08: Completed Task 014 after repeated, vet, race, formatting, and full
+  suite verification; no scope deviations or architectural issues found.
