@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"syscall"
+	"time"
 
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/demo/groveshop"
@@ -77,7 +78,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
 	defer stop()
 
-	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
+	args := os.Args[1:]
+	runCommand := run
+	if len(args) != 0 && args[0] == "worker" {
+		args = args[1:]
+		runCommand = runWorker
+	}
+	if err := runCommand(ctx, args, os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "grovlet: %v\n", err)
 		os.Exit(1)
 	}
@@ -219,6 +226,7 @@ type systemNATSRuntime struct {
 	placementDone    chan struct{}
 	healthCancel     context.CancelFunc
 	healthDone       chan struct{}
+	components       *componentManager
 }
 
 func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error) {
@@ -305,12 +313,25 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 			return nil, err
 		}
 		runtime.startHealth(ctx, health)
+
+		runtime.components = newComponentManager(
+			groveShopComponentSpecs(cfg),
+			newWorkerStarter(url, cfg.nodeID),
+		)
+		if err := transport.ServeComponents(ctx, cfg.nodeID, runtime.components); err != nil {
+			runtime.stop()
+			return nil, err
+		}
+		if err := runtime.components.startAll(ctx); err != nil {
+			runtime.stop()
+			return nil, err
+		}
 	}
 	if cfg.systemNATSSubject != "" {
 		handler := systemnats.Handler(func(_ context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
 			return grove.ResponseEnvelope{Payload: request.Payload}
 		})
-		if cfg.groveShopOrders || cfg.groveShopInventory || cfg.groveShopInventorySubject != "" {
+		if !cfg.systemNATSMembership && (cfg.groveShopInventory || cfg.groveShopInventorySubject != "") {
 			registry := &grove.Registry{}
 			if cfg.groveShopInventory {
 				if err := groveshop.RegisterInventory(registry, &groveshop.Inventory{}); err != nil {
@@ -318,13 +339,9 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 					return nil, fmt.Errorf("register Grove Shop Inventory: %w", err)
 				}
 			}
-			if cfg.groveShopOrders || cfg.groveShopInventorySubject != "" {
+			if cfg.groveShopInventorySubject != "" {
 				var inventoryClient *grove.Client
-				if cfg.groveShopOrders {
-					inventoryClient, err = transport.PlacementClient(placement)
-				} else {
-					inventoryClient, err = transport.RoutedClient(cfg.groveShopInventorySubject)
-				}
+				inventoryClient, err = transport.RoutedClient(cfg.groveShopInventorySubject)
 				if err != nil {
 					runtime.stop()
 					return nil, err
@@ -366,17 +383,38 @@ func groveShopPlacements(cfg config) []systemnats.PlacementRecord {
 		placements = append(placements, systemnats.PlacementRecord{
 			ServiceID:         groveshop.ServiceOrders,
 			NodeID:            cfg.nodeID,
-			InvocationSubject: cfg.systemNATSSubject,
+			InvocationSubject: componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceOrders),
 		})
 	}
 	if cfg.groveShopInventory {
 		placements = append(placements, systemnats.PlacementRecord{
 			ServiceID:         groveshop.ServiceInventory,
 			NodeID:            cfg.nodeID,
-			InvocationSubject: cfg.systemNATSSubject,
+			InvocationSubject: componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceInventory),
 		})
 	}
 	return placements
+}
+
+func groveShopComponentSpecs(cfg config) []componentSpec {
+	components := make([]componentSpec, 0, 2)
+	if cfg.groveShopOrders {
+		components = append(components, componentSpec{
+			serviceID: groveshop.ServiceOrders,
+			name:      "Orders",
+			kind:      workerOrders,
+			subject:   componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceOrders),
+		})
+	}
+	if cfg.groveShopInventory {
+		components = append(components, componentSpec{
+			serviceID: groveshop.ServiceInventory,
+			name:      "Inventory",
+			kind:      workerInventory,
+			subject:   componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceInventory),
+		})
+	}
+	return components
 }
 
 func parseListenAddress(address string) (string, int, error) {
@@ -425,6 +463,11 @@ func (r *systemNATSRuntime) startHealth(ctx context.Context, health *systemnats.
 }
 
 func (r *systemNATSRuntime) stop() {
+	if r.components != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = r.components.stopAll(stopCtx)
+		cancel()
+	}
 	if r.healthCancel != nil {
 		r.healthCancel()
 		<-r.healthDone

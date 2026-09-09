@@ -305,6 +305,15 @@ func (t *Transport) PlacementClient(placement *Placement) (*grove.Client, error)
 	return grove.NewRoutedClient(placementRouter{transport: t, placement: placement})
 }
 
+// ObservedPlacementClient creates a Grove Client that resolves services from
+// nodeID's machine-readable placement endpoint before each call.
+func (t *Transport) ObservedPlacementClient(nodeID string) (*grove.Client, error) {
+	if nodeID == "" {
+		return nil, &Error{Operation: "create observed-placement Grove client", Err: ErrPlacementRequired}
+	}
+	return grove.NewRoutedClient(observedPlacementRouter{transport: t, nodeID: nodeID})
+}
+
 type placementRouter struct {
 	transport *Transport
 	placement *Placement
@@ -323,4 +332,32 @@ func (r placementRouter) Route(
 		return grove.ResponseEnvelope{}, fmt.Errorf("request: %w: %w", grove.ErrTransportFailure, err)
 	}
 	return response, nil
+}
+
+type observedPlacementRouter struct {
+	transport *Transport
+	nodeID    string
+}
+
+func (r observedPlacementRouter) Route(
+	ctx context.Context,
+	request grove.RequestEnvelope,
+) (grove.ResponseEnvelope, error) {
+	view, err := r.transport.RequestPlacement(ctx, r.nodeID)
+	if err != nil {
+		return grove.ResponseEnvelope{}, err
+	}
+	if !view.Ready {
+		return grove.ResponseEnvelope{}, &Error{Operation: "resolve Grove placement", Err: ErrPlacementUnavailable}
+	}
+	for _, record := range view.Placements {
+		if record.ServiceID == request.ServiceID {
+			response, err := r.transport.Request(ctx, record.InvocationSubject, request)
+			if err != nil {
+				return grove.ResponseEnvelope{}, fmt.Errorf("request: %w: %w", grove.ErrTransportFailure, err)
+			}
+			return response, nil
+		}
+	}
+	return grove.ResponseEnvelope{}, &Error{Operation: "resolve Grove placement", Err: ErrServiceNotPlaced}
 }

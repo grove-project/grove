@@ -80,41 +80,51 @@ the task.
   parent-death cleanup, and no recovery, persistence, upgrade, or ownership
   behavior.
 
-- [ ] 2. Expose component lifecycle state and commands.
+- [x] 2. Expose component lifecycle state and commands.
   **Context:** Define component states/status/view, a controller contract, and
   per-node System NATS snapshot/start/stop request-reply operations with JSON
   responses and explicit errors.
-  **Acceptance:** Package tests prove stable JSON views, command dispatch,
-  controller failures, and nil-controller validation.
+  **Outcome:** Added component state/status/view contracts plus per-node JSON
+  snapshot and start/stop endpoints. Package tests prove command dispatch,
+  returned state, remote controller failures, stable subjects, and nil
+  controller rejection.
 
-- [ ] 3. Implement Grovlet worker supervision.
+- [x] 3. Implement Grovlet worker supervision.
   **Context:** Add a concurrency-safe component manager with injectable process
   startup for unit tests, all required transitions, unexpected-exit failure
   reporting, restart from stopped/failed, and bounded graceful shutdown.
-  **Acceptance:** Unit tests deterministically exercise every state and invalid
-  transition without fixed sleeps or leaked goroutines/processes.
+  **Outcome:** Added a concurrency-safe manager with injectable process startup,
+  deterministic sorted views, explicit transitions, unexpected-exit failure
+  capture, restart from stopped/failed, and ordered shutdown. Repeated unit
+  tests exercise all five states and invalid transitions.
 
-- [ ] 4. Move placed Grove Shop services into workers.
+- [x] 4. Move placed Grove Shop services into workers.
   **Context:** Add internal worker mode, explicit Orders/Inventory registration,
   placement-view routing for Orders, service-specific placement subjects,
   parent-death cancellation, and Grovlet startup/shutdown integration.
-  **Acceptance:** Existing placement and cross-node tests remain green; placed
-  application handlers execute in child processes rather than the supervisor.
+  **Outcome:** Added internal worker mode to the Grovlet artifact. Orders and
+  Inventory now register and serve in child processes on service-specific
+  subjects; Orders queries its parent placement view for Inventory routing.
+  Parent-owned pipe EOF stops orphaned workers, and prior placement/cross-node
+  tests pass.
 
-- [ ] 5. Prove stop and restart end to end.
+- [x] 5. Prove stop and restart end to end.
   **Context:** Start the three-Grovlet Orders/Inventory placement, wait for
   healthy component views, stop Inventory, wait for stopped, start it again,
   wait for healthy, and execute a successful order.
-  **Acceptance:** The real-process test uses only bounded condition waits,
-  verifies placement is unchanged across stop/restart, and dumps all Grovlet
-  logs on failure.
+  **Outcome:** Added a real three-Grovlet E2E that waits for healthy Inventory,
+  stops it remotely, waits for stopped, verifies placement is unchanged,
+  restarts it, waits for healthy, and completes the Orders flow. All waits are
+  bounded and failures include cluster logs.
 
-- [ ] 6. Verify and close Task 016.
+- [x] 6. Verify and close Task 016.
   **Context:** Review docs and task boundaries, format, vet, repeat focused
   manager/E2E tests, run race and full suites, then mark Task 016 DONE.
-  **Acceptance:** `gofmt -l` is empty; `git diff --check`, `go vet ./...`,
-  focused repeated tests, `go test -race -count=1 ./...`, and
-  `go test -count=1 ./...` pass without weakening prior coverage.
+  **Outcome:** Reviewed exported docs and task boundaries; `gofmt -l .` and
+  `git diff --check` are clean. `go vet ./...`, ten repeated manager tests,
+  three repeated worker lifecycle E2Es, focused race tests,
+  `go test -race -count=1 ./...`, and `go test -count=1 ./...` pass. Task 016 is
+  marked DONE.
 
 ## Log
 
@@ -122,3 +132,8 @@ the task.
   vet, and full-suite checks passing.
 - 2026-09-09: Selected Task 016 and retained the accepted Grovlet/worker process
   boundary while excluding all automatic recovery and durable lifecycle state.
+- 2026-09-09: Added component state/control APIs, real worker supervision,
+  service-specific routing, and parent-death cleanup.
+- 2026-09-09: Passed repeated real-process stop/restart flows plus vet, race,
+  formatting, and the complete historical test suite; no scope deviations or
+  architectural issues found.

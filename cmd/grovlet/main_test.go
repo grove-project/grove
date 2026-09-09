@@ -806,12 +806,12 @@ func TestGrovletServicePlacementConvergesAndRoutes(t *testing.T) {
 		{
 			ServiceID:         groveshop.ServiceOrders,
 			NodeID:            cluster.nodeIDs[0],
-			InvocationSubject: ordersSubject,
+			InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders),
 		},
 		{
 			ServiceID:         groveshop.ServiceInventory,
 			NodeID:            cluster.nodeIDs[1],
-			InvocationSubject: inventorySubject,
+			InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory),
 		},
 	}
 	views, err := waitForGrovletPlacement(ctx, cluster, want)
@@ -824,7 +824,7 @@ func TestGrovletServicePlacementConvergesAndRoutes(t *testing.T) {
 		}
 	}
 
-	client, err := cluster.transports[2].RoutedClient(ordersSubject)
+	client, err := cluster.transports[2].RoutedClient(want[0].InvocationSubject)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -893,6 +893,106 @@ func waitForGrovletPlacement(
 		case <-ticker.C:
 		case <-ctx.Done():
 			return nil, fmt.Errorf("grovlet placement did not converge: views=%#v: %w", views, errors.Join(lastErr, ctx.Err()))
+		}
+	}
+}
+
+// A Grovlet stops and restarts its hosted Inventory worker while replicated
+// placement remains stable and the cross-node Orders flow becomes healthy
+// again.
+func TestGrovletComponentLifecycle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	const (
+		ordersSubject    = "_GROVE.system.lifecycle.node-1"
+		inventorySubject = "_GROVE.system.lifecycle.node-2"
+		observerSubject  = "_GROVE.system.lifecycle.node-3"
+	)
+	cluster := startMembershipGrovlets(
+		t,
+		ctx,
+		[]string{"--system-nats-subject", ordersSubject, "--grove-shop-orders"},
+		[]string{"--system-nats-subject", inventorySubject, "--grove-shop-inventory"},
+		[]string{"--system-nats-subject", observerSubject},
+	)
+	wantPlacement := []systemnats.PlacementRecord{
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders)},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory)},
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, wantPlacement); err != nil {
+		t.Fatalf("%v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletComponentState(ctx, cluster.transports[1], "node-2", groveshop.ServiceInventory, systemnats.ComponentHealthy); err != nil {
+		t.Fatalf("wait for healthy Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := cluster.transports[0].RequestStopComponent(ctx, "node-2", groveshop.ServiceInventory); err != nil {
+		t.Fatalf("stop Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletComponentState(ctx, cluster.transports[1], "node-2", groveshop.ServiceInventory, systemnats.ComponentStopped); err != nil {
+		t.Fatalf("wait for stopped Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, wantPlacement); err != nil {
+		t.Fatalf("placement changed after stop: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := cluster.transports[2].RequestStartComponent(ctx, "node-2", groveshop.ServiceInventory); err != nil {
+		t.Fatalf("restart Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletComponentState(ctx, cluster.transports[1], "node-2", groveshop.ServiceInventory, systemnats.ComponentHealthy); err != nil {
+		t.Fatalf("wait for restarted Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+
+	client, err := cluster.transports[2].RoutedClient(wantPlacement[0].InvocationSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](ctx, client, groveshop.ServiceOrders, groveshop.MethodCreateOrder, groveshop.CreateOrderRequest{
+		OrderID: "order-restarted", SKU: "coffee-beans", Quantity: 1, AmountCents: 1200, ShippingAddress: "16 Grove Lane",
+	})
+	if err != nil {
+		t.Fatalf("order after restart: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if created.Status != groveshop.OrderCompleted {
+		t.Errorf("order after restart status = %q; want %q", created.Status, groveshop.OrderCompleted)
+	}
+	for i := len(cluster.nodes) - 1; i >= 0; i-- {
+		if err := cluster.nodes[i].Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func waitForGrovletComponentState(
+	ctx context.Context,
+	transport *systemnats.Transport,
+	nodeID string,
+	serviceID grove.ServiceID,
+	want systemnats.ComponentState,
+) (systemnats.ComponentStatus, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	var lastView systemnats.ComponentView
+	var lastErr error
+	for {
+		requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+		view, err := transport.RequestComponents(requestCtx, nodeID)
+		cancel()
+		if err == nil {
+			lastView = view
+			for _, component := range view.Components {
+				if component.ServiceID == serviceID && component.State == want {
+					return component, nil
+				}
+			}
+		} else {
+			lastErr = err
+		}
+		if err := ctx.Err(); err != nil {
+			return systemnats.ComponentStatus{}, fmt.Errorf("component did not reach %s: view=%#v: %w", want, lastView, errors.Join(lastErr, err))
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return systemnats.ComponentStatus{}, fmt.Errorf("component did not reach %s: view=%#v: %w", want, lastView, errors.Join(lastErr, ctx.Err()))
 		}
 	}
 }

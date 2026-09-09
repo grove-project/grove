@@ -1,6 +1,6 @@
 # Task 016 — Managed component lifecycle
 
-Status: TODO
+Status: DONE
 Depends on: 015
 
 ## Goal
