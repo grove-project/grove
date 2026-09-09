@@ -23,6 +23,13 @@ Service placement requirements are developer-defined through the SDK when needed
 
 Placement validation may use immutable Grovlet facts derived from embedded configuration (for example `node.zone`) and live node-local environmental checks (for example endpoint reachability). Grove does not infer authoritative node class/zone from network heuristics.
 
+## Stable bootstrap ABI
+Self-hosted rollout must not depend on compatibility between application-facing SDK APIs. Grove therefore defines a tiny bootstrap ABI below the normal SDK/runtime contract. Read `docs/architecture/bootstrap-and-binary-handoff.md` before implementing rollout/handoff work.
+
+The bootstrap ABI is intentionally stable across SDK/runtime generations and is responsible only for artifact/process replacement concerns: identity, compatibility negotiation, candidate launch, minimum mesh join/bootstrap information, readiness, ownership handoff, failure, and rollback.
+
+Forward upgrade and rollback are both required. A current and candidate runtime must negotiate a common bootstrap protocol/capability set before ownership handoff. Normal evolving SDK/runtime structs must not become the bootstrap wire contract. If the bootstrap ABI itself evolves, Grove requires an overlap generation that speaks both old and new protocol versions.
+
 ## Immutable configuration and artifact model
 - The Grove binary contains a reserved embedded configuration section.
 - Cluster/customer/environment/site/node-class values are embedded into that section.
@@ -44,6 +51,7 @@ Placement validation may use immutable Grovlet facts derived from embedded confi
 - Runtime configuration is immutable; configuration changes are deployments.
 - The current Grove cluster bootstraps successor artifacts through the existing Grove mesh.
 - Binary handoff is side-by-side: old process remains authoritative until the successor joins and proves healthy.
+- Bootstrap compatibility is independent of application SDK compatibility and must work in both upgrade and rollback directions.
 - Distributed E2E = multiple real Grovlet processes on one host using real transport.
 - All acceptance via Go testing framework and dedicated `grovetest` harness.
 - No fixed sleeps; use condition waits with bounded timeouts and diagnostics.
@@ -68,6 +76,7 @@ Per target node:
 current Grovlet
    -> obtain successor artifact
    -> verify artifact + embedded config
+   -> negotiate stable bootstrap ABI/capabilities
    -> check cluster/node-class compatibility
    -> persist candidate
    -> start candidate beside current process
@@ -79,7 +88,7 @@ current Grovlet
 
 If any pre-handoff step fails, the candidate is rejected/stopped and the old process remains authoritative. Normal handoff preserves configured node class (`cloud-v1 -> cloud-v2`, `edge-v1 -> edge-v2`). Reclassifying a machine is explicit reprovisioning, not an incidental rollout.
 
-The CLI should expose phases such as `pending`, `transferring`, `verifying`, `starting`, `joining`, `handoff`, `healthy`, and `failed`, with actionable per-node failure reasons.
+The CLI should expose phases such as `pending`, `transferring`, `verifying`, `starting`, `joining`, `handoff`, `healthy`, and `failed`, with actionable per-node failure reasons including bootstrap incompatibility.
 
 ## Reference app
 Use one deterministic reference app throughout the MVP: **Grove Shop** with `Web`, `Orders`, `Inventory`, `Payment`, and `Shipping`.
@@ -90,7 +99,7 @@ The demo must prove embedded configuration. A good config produces a healthy dep
 
 Placement-validation semantics must be covered permanently with deterministic per-node conditions: unrestricted, passing, failing, mixed eligibility, and refusal to start on an ineligible Grovlet.
 
-Read detailed contracts before demo-facing work under `demo/` plus `docs/developer-experience/deployment.md` and `docs/cli/rollouts.md`.
+Read detailed contracts before demo-facing work under `demo/` plus `docs/developer-experience/deployment.md`, `docs/cli/rollouts.md`, and `docs/architecture/bootstrap-and-binary-handoff.md`.
 
 ## Phases
 A. Foundation (001-005): repository, Grovlet, process/cluster harness, Grove Shop.
@@ -98,7 +107,7 @@ B. Runtime + SDK (006-010): registry, local invocation, Gob envelope, System NAT
 C. Cluster awareness and placement (011-015): identity, bootstrap, JetStream/KV membership, heartbeats, local eligibility validation, explicit placement.
 D. Recovery/persistence (016-020): eligibility-enforcing lifecycle, failure detection/recovery, desired state, restart recovery.
 E. Developer workflow (021-024): minimal CLI, CLI E2E, immutable deployment artifact, embedded customer/cluster/node configuration.
-F. Self-hosted rollouts (025-028): configured artifact/rollout identity, side-by-side successor execution using the existing Grove mesh, health-gated ownership handoff, automatic rollback/retention of previous artifact. Candidate placement obeys the same eligibility rules.
+F. Self-hosted rollouts (025-028): configured artifact/rollout identity, stable bootstrap ABI negotiation, side-by-side successor execution using the existing Grove mesh, health-gated ownership handoff, automatic rollback/retention of previous artifact. Candidate placement obeys the same eligibility rules.
 G. Resilience/MVP proof (029-031): `grove test`, resilience injection, final Grove Shop lifecycle E2E.
 
 ## Outside MVP
@@ -109,10 +118,10 @@ General-purpose scheduling/scoring, affinity/anti-affinity, and dynamic relocati
 Debugger/DAP integration is a natural MVP v2 demo extension and must not expand MVP v1 scope.
 
 ## Execution prompt
-> Read AGENTS.md, IMPLEMENTATION_PLAN.md, the relevant `sdk/*.md`, `demo/*.md`, deployment/rollout docs, and tasks/NNN-*.md. Implement only that task. Run all required tests. Do not proceed to the next task. Report changes, tests/results, deviations, and architectural issues.
+> Read AGENTS.md, IMPLEMENTATION_PLAN.md, the relevant `sdk/*.md`, `demo/*.md`, deployment/rollout docs, `docs/architecture/bootstrap-and-binary-handoff.md`, and tasks/NNN-*.md. Implement only that task. Run all required tests. Do not proceed to the next task. Report changes, tests/results, deviations, and architectural issues.
 
 ## Status
 Each task starts `Status: TODO`; change to `DONE` only after all acceptance criteria pass.
 
 ## Task index
-001 repository skeleton; 002 Grovlet lifecycle; 003 process harness; 004 local multi-Grovlet harness; 005 Grove Shop reference app; 006 service registry; 007 local invocation; 008 serialization envelope; 009 embedded System NATS transport; 010 cross-node invocation; 011 node identity; 012 NATS cluster bootstrap; 013 JetStream/KV membership; 014 NATS heartbeats/health; 015 placement validation + explicit placement; 016 eligibility-enforcing lifecycle; 017 node-failure E2E; 018 service recovery; 019 desired state; 020 restart recovery; 021 CLI; 022 CLI E2E; 023 deployment artifact; 024 immutable embedded customer/cluster/node config; 025 configured artifact + rollout identity; 026 N/N+1 side-by-side successor execution; 027 health-gated binary/ownership handoff; 028 rollback; 029 `grove test`; 030 resilience scenario; 031 final Grove Shop MVP E2E.
+001 repository skeleton; 002 Grovlet lifecycle; 003 process harness; 004 local multi-Grovlet harness; 005 Grove Shop reference app; 006 service registry; 007 local invocation; 008 serialization envelope; 009 embedded System NATS transport; 010 cross-node invocation; 011 node identity; 012 NATS cluster bootstrap; 013 JetStream/KV membership; 014 NATS heartbeats/health; 015 placement validation + explicit placement; 016 eligibility-enforcing lifecycle; 017 node-failure E2E; 018 service recovery; 019 desired state; 020 restart recovery; 021 CLI; 022 CLI E2E; 023 deployment artifact; 024 immutable embedded customer/cluster/node config; 025 configured artifact + rollout identity; 026 N/N+1 side-by-side successor execution + bootstrap negotiation; 027 health-gated binary/ownership handoff; 028 rollback including reverse bootstrap compatibility; 029 `grove test`; 030 resilience scenario; 031 final Grove Shop MVP E2E.
