@@ -1,6 +1,6 @@
 # Task 017 — Node failure detection E2E
 
-Status: TODO
+Status: DONE
 Depends on: 014, 016
 
 ## Goal

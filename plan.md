@@ -40,18 +40,20 @@ failure E2E only. Task 018 owns placement mutation and recovery.
   **Outcome:** Chose a test-only composition of existing production behavior
   with two survivor observations and an explicit no-recovery assertion.
 
-- [ ] 2. Add the abrupt node-loss E2E.
+- [x] 2. Add the abrupt node-loss E2E.
   **Context:** Start three real placed Grovlets, prove an initial order, kill
   Inventory's Grovlet, condition-wait on both survivor health views, verify the
   retained placement identifies Inventory as affected, and prove calls fail.
-  **Acceptance:** No fixed sleeps; every timeout includes all process logs; no
-  replacement placement or component appears.
+  **Outcome:** Added a real three-process scenario proving the initial flow,
+  SIGKILLing Inventory's node, waiting on both survivors, correlating retained
+  placement to the unavailable node, and receiving a transport-classified call
+  failure without replacement.
 
-- [ ] 3. Verify and close Task 017.
+- [x] 3. Verify and close Task 017.
   **Context:** Repeat the failure E2E, run formatting, vet, race, and full suites,
   then mark Task 017 DONE.
-  **Acceptance:** All focused and historical checks pass without weakening
-  earlier tests or introducing recovery behavior.
+  **Outcome:** Three repeated failure scenarios, formatting, diff checks, vet,
+  the complete race suite, and `go test -count=1 ./...` pass. Task 017 is DONE.
 
 ## Log
 
@@ -59,3 +61,5 @@ failure E2E only. Task 018 owns placement mutation and recovery.
   vet, and full-suite checks passing.
 - 2026-09-09: Selected Task 017 as permanent abrupt-loss regression coverage;
   Task 018 remains the first recovery increment.
+- 2026-09-09: Completed Task 017 with repeated abrupt-loss coverage and all
+  historical race/full tests passing; no recovery behavior was introduced.

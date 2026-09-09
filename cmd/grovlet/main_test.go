@@ -997,6 +997,67 @@ func waitForGrovletComponentState(
 	}
 }
 
+// Both survivors correlate abrupt Inventory-node loss with the authoritative
+// placement that remains affected, without moving or restarting the service.
+func TestGrovletNodeFailureIdentifiesAffectedPlacement(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	const ordersSubject = "_GROVE.system.failure.node-1"
+	const inventorySubject = "_GROVE.system.failure.node-2"
+	cluster := startMembershipGrovlets(
+		t, ctx,
+		[]string{"--system-nats-subject", ordersSubject, "--grove-shop-orders"},
+		[]string{"--system-nats-subject", inventorySubject, "--grove-shop-inventory"},
+		[]string{"--system-nats-subject", "_GROVE.system.failure.node-3"},
+	)
+	wantPlacement := []systemnats.PlacementRecord{
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders)},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory)},
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, wantPlacement); err != nil {
+		t.Fatalf("%v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	client, err := cluster.transports[2].RoutedClient(wantPlacement[0].InvocationSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := groveshop.CreateOrderRequest{OrderID: "before-failure", SKU: "coffee", Quantity: 1, AmountCents: 900, ShippingAddress: "17 Grove Lane"}
+	if _, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](ctx, client, groveshop.ServiceOrders, groveshop.MethodCreateOrder, request); err != nil {
+		t.Fatalf("initial order: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if err := cluster.nodes[1].Kill(ctx); err != nil {
+		t.Fatal(err)
+	}
+	survivors := []int{0, 2}
+	if _, err := waitForGrovletHealth(ctx, cluster, survivors, func(view systemnats.ClusterView) bool {
+		return view.Ready && len(view.Nodes) == 3 && view.Nodes[1].NodeID == "node-2" && view.Nodes[1].Health == systemnats.HealthUnavailable
+	}); err != nil {
+		t.Fatalf("wait for failed hosting node: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	for _, survivor := range survivors {
+		view, err := cluster.transports[survivor].RequestPlacement(ctx, cluster.nodeIDs[survivor])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !view.Ready || !slices.Equal(view.Placements, wantPlacement) || view.Placements[1].NodeID != "node-2" {
+			t.Errorf("%s affected placement = %#v; want Inventory retained on unavailable node-2", cluster.nodeIDs[survivor], view)
+		}
+	}
+	failureCtx, cancelFailure := context.WithTimeout(ctx, time.Second)
+	defer cancelFailure()
+	request.OrderID = "after-failure"
+	_, err = grove.Call[groveshop.CreateOrderRequest, groveshop.Order](failureCtx, client, groveshop.ServiceOrders, groveshop.MethodCreateOrder, request)
+	var responseErr *grove.ResponseError
+	if !errors.As(err, &responseErr) || responseErr.Code != grove.ErrorTransport {
+		t.Errorf("order after hosting-node loss error = %v; want transport ResponseError", err)
+	}
+	for _, survivor := range []int{2, 0} {
+		if err := cluster.nodes[survivor].Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // Orders and Inventory keep one Grove call path when placed in separate real
 // Grovlet processes.
 func TestGrovletCrossNodeServiceInvocation(t *testing.T) {
