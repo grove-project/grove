@@ -124,6 +124,11 @@ func (p *fakeComponentProcess) Stop(ctx context.Context) error {
 	}
 }
 
+func (p *fakeComponentProcess) Kill(context.Context) error {
+	p.exit(errors.New("killed"))
+	return nil
+}
+
 func (p *fakeComponentProcess) Done() <-chan struct{} { return p.done }
 
 func (p *fakeComponentProcess) Err() error {

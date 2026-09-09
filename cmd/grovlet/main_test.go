@@ -922,6 +922,44 @@ func waitForGrovletPlacementObservers(
 	}
 }
 
+func waitForGrovletDesired(
+	ctx context.Context,
+	cluster membershipGrovlets,
+	want []systemnats.DesiredDeployment,
+) ([]systemnats.DesiredView, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	views := make([]systemnats.DesiredView, len(cluster.nodeIDs))
+	var lastErr error
+	for {
+		converged := true
+		for i, nodeID := range cluster.nodeIDs {
+			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			view, err := cluster.transports[i].RequestDesired(requestCtx, nodeID)
+			cancel()
+			if err != nil {
+				lastErr = err
+				converged = false
+				continue
+			}
+			views[i] = view
+			if !view.Ready || !slices.EqualFunc(view.Deployments, want, func(a, b systemnats.DesiredDeployment) bool {
+				return a.ApplicationID == b.ApplicationID && a.Version == b.Version && slices.Equal(a.Components, b.Components)
+			}) {
+				converged = false
+			}
+		}
+		if converged {
+			return views, nil
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("grovlet desired state did not converge: views=%#v: %w", views, errors.Join(lastErr, ctx.Err()))
+		}
+	}
+}
+
 // A Grovlet stops and restarts its hosted Inventory worker while replicated
 // placement remains stable and the cross-node Orders flow becomes healthy
 // again.
@@ -1162,6 +1200,107 @@ func TestGrovletRecoversServiceAfterHostingNodeFailure(t *testing.T) {
 	for _, survivor := range []int{0, 2} {
 		if err := cluster.nodes[survivor].Stop(ctx); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+// Desired deployment intent remains separate from observed worker state and
+// starts a new Inventory worker generation after abrupt component loss.
+func TestGrovletDesiredStateRestartsKilledComponent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	defer cancel()
+	const (
+		ordersSubject    = "_GROVE.system.desired.node-1"
+		inventorySubject = "_GROVE.system.desired.node-2"
+	)
+	cluster := startMembershipGrovlets(
+		t, ctx,
+		[]string{"--system-nats-subject", ordersSubject, "--grove-shop-orders", "--system-nats-recovery"},
+		[]string{"--system-nats-subject", inventorySubject, "--grove-shop-inventory", "--system-nats-recovery"},
+		[]string{"--system-nats-subject", "_GROVE.system.desired.node-3", "--system-nats-recovery"},
+	)
+	placement := []systemnats.PlacementRecord{
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders)},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory)},
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, placement); err != nil {
+		t.Fatalf("wait for placement: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletDesired(ctx, cluster, nil); err != nil {
+		t.Fatalf("wait for empty desired state: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	desired := systemnats.DesiredDeployment{
+		ApplicationID: "grove-shop",
+		Version:       "current",
+		Components: []systemnats.DesiredComponent{
+			{ServiceID: groveshop.ServiceOrders, NodeID: "node-1"},
+			{ServiceID: groveshop.ServiceInventory, NodeID: "node-2"},
+		},
+	}
+	if err := cluster.transports[2].PutDesired(ctx, "node-1", desired); err != nil {
+		t.Fatalf("write desired deployment: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletDesired(ctx, cluster, []systemnats.DesiredDeployment{desired}); err != nil {
+		t.Fatalf("wait for desired deployment: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	initial, err := waitForGrovletComponentState(ctx, cluster.transports[1], "node-2", groveshop.ServiceInventory, systemnats.ComponentHealthy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cluster.transports[0].RequestKillComponent(ctx, "node-2", groveshop.ServiceInventory); err != nil {
+		t.Fatalf("kill Inventory worker: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	restarted, err := waitForGrovletComponentGeneration(ctx, cluster.transports[1], "node-2", groveshop.ServiceInventory, initial.Generation)
+	if err != nil {
+		t.Fatalf("wait for reconciled Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if restarted.Generation <= initial.Generation {
+		t.Errorf("restarted generation = %d; want greater than %d", restarted.Generation, initial.Generation)
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, placement); err != nil {
+		t.Fatalf("wait for placement after reconciliation: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	client, err := cluster.transports[2].RoutedClient(componentInvocationSubject(ordersSubject, groveshop.ServiceOrders))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](ctx, client, groveshop.ServiceOrders, groveshop.MethodCreateOrder, groveshop.CreateOrderRequest{
+		OrderID: "after-desired-reconcile", SKU: "coffee", Quantity: 1, AmountCents: 900, ShippingAddress: "19 Grove Lane",
+	})
+	if err != nil || created.Status != groveshop.OrderCompleted {
+		t.Fatalf("order after desired reconciliation = %#v, %v\n%s", created, err, clusterLogs(cluster.nodes))
+	}
+	for i := len(cluster.nodes) - 1; i >= 0; i-- {
+		if err := cluster.nodes[i].Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func waitForGrovletComponentGeneration(
+	ctx context.Context,
+	transport *systemnats.Transport,
+	nodeID string,
+	serviceID grove.ServiceID,
+	after uint64,
+) (systemnats.ComponentStatus, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	var last systemnats.ComponentView
+	for {
+		view, err := transport.RequestComponents(ctx, nodeID)
+		if err == nil {
+			last = view
+			for _, component := range view.Components {
+				if component.ServiceID == serviceID && component.State == systemnats.ComponentHealthy && component.Generation > after {
+					return component, nil
+				}
+			}
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return systemnats.ComponentStatus{}, fmt.Errorf("component generation did not advance: view=%#v: %w", last, ctx.Err())
 		}
 	}
 }

@@ -44,25 +44,34 @@ Task 025 owns simultaneous N/N+1 version records.
 
 ## Sub-Tasks
 
-- [ ] 1. Add replicated desired deployment state.
+- [x] 1. Add replicated desired deployment state.
   **Context:** Define and validate the minimum model, create the three-replica
   file-backed KV bucket, maintain sorted watcher views, and expose read/write
   request endpoints.
+  **Outcome:** Added validated, sorted application/version/component records,
+  three-replica KV observation, and System NATS read/write endpoints.
 
-- [ ] 2. Represent and inject worker loss.
+- [x] 2. Represent and inject worker loss.
   **Context:** Add observed worker generation and an explicit component kill
   command without changing normal start/stop semantics.
+  **Outcome:** Component views now report worker generation, and the control
+  endpoint can abruptly kill a worker while retaining failed observed state.
 
-- [ ] 3. Reconcile desired local components.
+- [x] 3. Reconcile desired local components.
   **Context:** Compute deterministic start decisions from desired assignments
   and observed component states, then run a bounded local reconciliation loop
   on desired-state-enabled Grovlets.
+  **Outcome:** Added deterministic local start decisions and a bounded loop
+  that creates a new worker generation for stopped or failed assigned services.
 
-- [ ] 4. Prove convergence and close Task 019.
+- [x] 4. Prove convergence and close Task 019.
   **Context:** Write Grove Shop desired state through the control API, observe
   it from all three Grovlets, kill Inventory's worker, wait for a later healthy
   generation, and verify Orders still completes. Repeat and run formatting,
   vet, race, and full suites before marking Task 019 DONE.
+  **Outcome:** Replicated desired-state integration coverage and repeated real
+  process reconciliation pass; vet, the full race suite, and uncached full
+  suite pass. Task 019 is DONE.
 
 ## Log
 
@@ -70,3 +79,5 @@ Task 025 owns simultaneous N/N+1 version records.
   vet, and full-suite checks passing.
 - 2026-09-09: Selected a single-current-version desired record and local worker
   reconciliation, preserving Tasks 020 and 025 boundaries.
+- 2026-09-09: Completed Task 019 with authoritative desired state, observable
+  worker generations, and automated reconstruction after worker loss.

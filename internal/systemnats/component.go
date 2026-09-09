@@ -47,6 +47,8 @@ type ComponentStatus struct {
 	Name string `json:"name"`
 	// InvocationSubject is this Grovlet's endpoint for the component.
 	InvocationSubject string `json:"invocation_subject"`
+	// Generation increments whenever this Grovlet starts a new worker.
+	Generation uint64 `json:"generation"`
 	// State is the component's current locally observed lifecycle state.
 	State ComponentState `json:"state"`
 	// Error describes the latest startup or unexpected-exit failure.
@@ -67,6 +69,8 @@ type ComponentController interface {
 	StartComponent(context.Context, grove.ServiceID) error
 	// StopComponent explicitly stops a locally hosted service.
 	StopComponent(context.Context, grove.ServiceID) error
+	// KillComponent abruptly terminates a locally hosted service worker.
+	KillComponent(context.Context, grove.ServiceID) error
 }
 
 type componentCommand struct {
@@ -108,6 +112,8 @@ func (t *Transport) ServeComponents(ctx context.Context, nodeID string, controll
 			err = controller.StartComponent(ctx, command.ServiceID)
 		case "stop":
 			err = controller.StopComponent(ctx, command.ServiceID)
+		case "kill":
+			err = controller.KillComponent(ctx, command.ServiceID)
 		default:
 			err = ErrComponentCommandFailed
 		}
@@ -155,6 +161,11 @@ func (t *Transport) RequestStartComponent(ctx context.Context, nodeID string, se
 // RequestStopComponent asks nodeID to stop its hosted serviceID component.
 func (t *Transport) RequestStopComponent(ctx context.Context, nodeID string, serviceID grove.ServiceID) (ComponentView, error) {
 	return t.requestComponentCommand(ctx, nodeID, componentCommand{Operation: "stop", ServiceID: serviceID})
+}
+
+// RequestKillComponent asks nodeID to abruptly terminate its hosted serviceID worker.
+func (t *Transport) RequestKillComponent(ctx context.Context, nodeID string, serviceID grove.ServiceID) (ComponentView, error) {
+	return t.requestComponentCommand(ctx, nodeID, componentCommand{Operation: "kill", ServiceID: serviceID})
 }
 
 func (t *Transport) requestComponentCommand(ctx context.Context, nodeID string, command componentCommand) (ComponentView, error) {

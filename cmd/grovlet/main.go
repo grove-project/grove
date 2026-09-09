@@ -233,8 +233,12 @@ type systemNATSRuntime struct {
 	healthCancel     context.CancelFunc
 	healthDone       chan struct{}
 	components       *componentManager
+	desiredCancel    context.CancelFunc
+	desiredDone      chan struct{}
 	recoveryCancel   context.CancelFunc
 	recoveryDone     chan struct{}
+	reconcileCancel  context.CancelFunc
+	reconcileDone    chan struct{}
 }
 
 func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error) {
@@ -311,6 +315,13 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 		}
 		runtime.startPlacement(ctx, placement)
 
+		desired := systemnats.NewDesired()
+		if err := transport.ServeDesired(ctx, cfg.nodeID, desired); err != nil {
+			runtime.stop()
+			return nil, err
+		}
+		runtime.startDesired(ctx, desired)
+
 		health, err := systemnats.NewHealth(cfg.nodeID, membership, systemnats.HealthConfig{})
 		if err != nil {
 			runtime.stop()
@@ -340,6 +351,7 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 		}
 		if cfg.systemNATSRecovery {
 			runtime.startRecovery(ctx, newServiceRecovery(cfg.nodeID, health, placement, runtime.components, transport))
+			runtime.startReconciler(ctx, &desiredReconciler{nodeID: cfg.nodeID, desired: desired, components: runtime.components})
 		}
 	}
 	if cfg.systemNATSSubject != "" {
@@ -505,6 +517,16 @@ func (r *systemNATSRuntime) startHealth(ctx context.Context, health *systemnats.
 	}()
 }
 
+func (r *systemNATSRuntime) startDesired(ctx context.Context, desired *systemnats.Desired) {
+	desiredCtx, cancel := context.WithCancel(ctx)
+	r.desiredCancel = cancel
+	r.desiredDone = make(chan struct{})
+	go func() {
+		defer close(r.desiredDone)
+		_ = desired.Run(desiredCtx, r.transport)
+	}()
+}
+
 func (r *systemNATSRuntime) startRecovery(ctx context.Context, recovery *serviceRecovery) {
 	recoveryCtx, cancel := context.WithCancel(ctx)
 	r.recoveryCancel = cancel
@@ -515,7 +537,21 @@ func (r *systemNATSRuntime) startRecovery(ctx context.Context, recovery *service
 	}()
 }
 
+func (r *systemNATSRuntime) startReconciler(ctx context.Context, reconciler *desiredReconciler) {
+	reconcileCtx, cancel := context.WithCancel(ctx)
+	r.reconcileCancel = cancel
+	r.reconcileDone = make(chan struct{})
+	go func() {
+		defer close(r.reconcileDone)
+		_ = reconciler.Run(reconcileCtx)
+	}()
+}
+
 func (r *systemNATSRuntime) stop() {
+	if r.reconcileCancel != nil {
+		r.reconcileCancel()
+		<-r.reconcileDone
+	}
 	if r.recoveryCancel != nil {
 		r.recoveryCancel()
 		<-r.recoveryDone
@@ -532,6 +568,10 @@ func (r *systemNATSRuntime) stop() {
 	if r.placementCancel != nil {
 		r.placementCancel()
 		<-r.placementDone
+	}
+	if r.desiredCancel != nil {
+		r.desiredCancel()
+		<-r.desiredDone
 	}
 	if r.membershipCancel != nil {
 		r.membershipCancel()

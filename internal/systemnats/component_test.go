@@ -41,6 +41,17 @@ func TestComponentEndpointsControlHostedState(t *testing.T) {
 	if view.Components[0].State != systemnats.ComponentHealthy {
 		t.Errorf("started component view = %#v; want healthy", view)
 	}
+	view, err = transport.RequestKillComponent(ctx, "node-a", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.Components[0].State != systemnats.ComponentFailed {
+		t.Errorf("killed component view = %#v; want failed", view)
+	}
+	view, err = transport.RequestStartComponent(ctx, "node-a", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
 	view, err = transport.RequestStopComponent(ctx, "node-a", 2)
 	if err != nil {
 		t.Fatal(err)
@@ -84,5 +95,13 @@ func (c *fakeComponentController) StopComponent(_ context.Context, serviceID gro
 		return errors.New("not hosted")
 	}
 	c.state = systemnats.ComponentStopped
+	return nil
+}
+
+func (c *fakeComponentController) KillComponent(_ context.Context, serviceID grove.ServiceID) error {
+	if serviceID != 2 {
+		return errors.New("not hosted")
+	}
+	c.state = systemnats.ComponentFailed
 	return nil
 }

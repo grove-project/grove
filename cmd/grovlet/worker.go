@@ -140,6 +140,19 @@ func (p *workerProcess) Stop(ctx context.Context) error {
 	}
 }
 
+func (p *workerProcess) Kill(ctx context.Context) error {
+	_ = p.keepalive.Close()
+	if err := p.cmd.Process.Kill(); err != nil {
+		return err
+	}
+	select {
+	case <-p.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 func (p *workerProcess) Done() <-chan struct{} {
 	return p.done
 }

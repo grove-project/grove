@@ -1,6 +1,6 @@
 # Task 019 — Desired deployment state in JetStream/KV
 
-Status: TODO
+Status: DONE
 Depends on: 018
 
 ## Goal

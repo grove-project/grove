@@ -25,6 +25,7 @@ type componentSpec struct {
 
 type componentProcess interface {
 	Stop(context.Context) error
+	Kill(context.Context) error
 	Done() <-chan struct{}
 	Err() error
 }
@@ -98,6 +99,7 @@ func (m *componentManager) SnapshotComponents() systemnats.ComponentView {
 			ServiceID:         component.spec.serviceID,
 			Name:              component.spec.name,
 			InvocationSubject: component.spec.subject,
+			Generation:        component.generation,
 			State:             component.state,
 			Error:             component.err,
 		})
@@ -181,4 +183,30 @@ func (m *componentManager) StopComponent(ctx context.Context, serviceID grove.Se
 	component.state = systemnats.ComponentStopped
 	component.err = ""
 	return nil
+}
+
+func (m *componentManager) KillComponent(ctx context.Context, serviceID grove.ServiceID) error {
+	component, ok := m.components[serviceID]
+	if !ok {
+		return errComponentNotHosted
+	}
+	component.mu.Lock()
+	if component.state != systemnats.ComponentHealthy {
+		component.mu.Unlock()
+		return errComponentTransition
+	}
+	component.state = systemnats.ComponentStopping
+	process := component.process
+	component.mu.Unlock()
+
+	err := process.Kill(ctx)
+	component.mu.Lock()
+	defer component.mu.Unlock()
+	component.process = nil
+	component.state = systemnats.ComponentFailed
+	component.err = "worker killed"
+	if err != nil {
+		component.err = err.Error()
+	}
+	return err
 }
