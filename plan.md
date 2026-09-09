@@ -1,65 +1,77 @@
-# Plan: Diagnose abrupt hosting-node loss
+# Plan: Recover services after hosting-node failure
 
 ## Goal
 
-Complete Task 017 with permanent real-process coverage for abrupt loss of the
-Grovlet hosting Grove Shop Inventory. Prove both survivors detect the node as
-unavailable, retain authoritative Inventory placement pointing at the failed
-node for diagnosis, and expose call failure without recovering the service.
+Complete Task 018 by detecting when a placed Grove Shop service loses its
+hosting Grovlet, deterministically starting the service on a healthy survivor,
+and replacing the authoritative JetStream/KV placement so Orders resumes its
+normal Grove call path.
 
 ## Context
 
-Tasks 001 through 016 are complete. Health is an ephemeral per-observer view,
-placement is authoritative replicated KV state, and hosted services run in
-Grovlet-supervised workers. Task 017 composes those existing capabilities in a
-failure E2E only. Task 018 owns placement mutation and recovery.
+Tasks 001 through 017 are complete. Membership and placement are replicated KV
+views, health is observer-derived from System NATS heartbeats, and Grovlets can
+start and stop supervised service workers through System NATS commands. Task
+018 composes those capabilities into stateless recovery; Task 019 owns general
+desired deployment state and reconciliation.
 
 ### Key Files
 
-- `tasks/017-node-failure-detection-e2e.md` — abrupt-loss acceptance contract.
-- `tasks/018-service-recovery-after-node-failure.md` — hard recovery boundary.
-- `cmd/grovlet/main_test.go` — real multi-Grovlet health, placement, component,
-  and application-flow tests plus bounded wait helpers.
+- `tasks/018-service-recovery-after-node-failure.md` — recovery acceptance
+  contract and scope boundary.
+- `internal/systemnats/placement.go` — replicated placement records and the new
+  compare-and-swap ownership change.
+- `internal/systemnats/component.go` — component capabilities exposed to a
+  recovery coordinator.
+- `cmd/grovlet/component.go` — local worker catalog and lifecycle control.
+- `cmd/grovlet/recovery.go` — deterministic health-to-placement recovery loop.
+- `cmd/grovlet/main_test.go` — real multi-process recovery scenario.
 
 ### Decisions Made
 
-- Reuse the canonical Orders-on-node-1 and Inventory-on-node-2 topology with
-  node 3 as a second survivor/observer.
-- Establish a successful order before failure, SIGKILL node 2, then require
-  both survivors to report node 2 unavailable.
-- Treat the unchanged Inventory placement record targeting node 2 as the
-  structured diagnostic link between failed node and affected service.
-- Verify a new order fails after the kill. Do not move placement, start a
-  replacement worker, retry, or add any recovery policy.
+- Enable recovery explicitly for Task 018 clusters. This preserves Task 017's
+  permanent diagnosis-without-recovery behavior and avoids introducing Task
+  019's general desired-state semantics early.
+- Every recovery-enabled Grovlet knows the two currently executable Grove Shop
+  component specifications, but starts only components explicitly assigned at
+  boot. Component views expose each component's node-local invocation subject.
+- Derive coordination and replacement from the sorted healthy-node view: the
+  first healthy node acts, and the first healthy node is the replacement. This
+  is deterministic and adds no separate leader election or scheduling system.
+- Start the replacement worker, then compare-and-swap the old placement record
+  in JetStream/KV. If the placement changed concurrently, stop the unplaced
+  worker and accept the authoritative winner.
+- Recover only placements whose current node is unavailable. Do not add desired
+  deployments, component-crash reconciliation, persistence, retries hidden in
+  the SDK, or advanced placement policy.
 
 ## Sub-Tasks
 
-- [x] 1. Select and bound Task 017.
-  **Context:** Read Tasks 017 and 018 and inspect existing health, placement,
-  worker lifecycle, application flow, and diagnostic helpers.
-  **Outcome:** Chose a test-only composition of existing production behavior
-  with two survivor observations and an explicit no-recovery assertion.
+- [ ] 1. Add authoritative placement replacement.
+  **Context:** Add a validated JetStream/KV compare-and-swap operation and prove
+  all placement watchers observe the new record while stale writers cannot
+  overwrite it.
 
-- [x] 2. Add the abrupt node-loss E2E.
-  **Context:** Start three real placed Grovlets, prove an initial order, kill
-  Inventory's Grovlet, condition-wait on both survivor health views, verify the
-  retained placement identifies Inventory as affected, and prove calls fail.
-  **Outcome:** Added a real three-process scenario proving the initial flow,
-  SIGKILLing Inventory's node, waiting on both survivors, correlating retained
-  placement to the unavailable node, and receiving a transport-classified call
-  failure without replacement.
+- [ ] 2. Expose dormant recovery capabilities.
+  **Context:** Include invocation subjects in component views, let a manager
+  start selected catalog entries, and configure recovery-enabled Grovlets with
+  the Grove Shop Orders and Inventory worker catalog while preserving explicit
+  initial placement.
 
-- [x] 3. Verify and close Task 017.
-  **Context:** Repeat the failure E2E, run formatting, vet, race, and full suites,
-  then mark Task 017 DONE.
-  **Outcome:** Three repeated failure scenarios, formatting, diff checks, vet,
-  the complete race suite, and `go test -count=1 ./...` pass. Task 017 is DONE.
+- [ ] 3. Reconcile unavailable placements.
+  **Context:** Add a bounded System NATS recovery loop that waits for ready
+  health and placement views, selects one deterministic coordinator and target,
+  starts the target component, and commits the placement change through KV.
+
+- [ ] 4. Prove real-process recovery and close Task 018.
+  **Context:** Start three recovery-enabled Grovlets, complete an order, kill
+  Inventory's node, condition-wait for unavailability and replacement placement,
+  then complete another order. Repeat the scenario and run formatting, vet,
+  race, and full suites before marking Task 018 DONE.
 
 ## Log
 
-- 2026-09-09: Tasks 001 through 016 completed with focused, repeated, race,
+- 2026-09-09: Tasks 001 through 017 completed with focused, repeated, race,
   vet, and full-suite checks passing.
-- 2026-09-09: Selected Task 017 as permanent abrupt-loss regression coverage;
-  Task 018 remains the first recovery increment.
-- 2026-09-09: Completed Task 017 with repeated abrupt-loss coverage and all
-  historical race/full tests passing; no recovery behavior was introduced.
+- 2026-09-09: Selected opt-in, deterministic stateless recovery so Task 017
+  remains stable and Task 019's desired-state model stays out of scope.
