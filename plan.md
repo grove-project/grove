@@ -1,124 +1,124 @@
-# Plan: Route Grove Shop through replicated service placement
+# Plan: Supervise hosted Grove Shop components
 
 ## Goal
 
-Complete Task 015 by recording explicit service-to-Grovlet assignments in a
-three-replica System NATS JetStream/KV bucket, maintaining the same watched
-placement view on every Grovlet, and resolving the Grove Shop Orders to
-Inventory call from that view. Prove the records and cross-node flow with
-three real Grovlet processes without adding scheduling, lifecycle
-reconciliation, ownership, or recovery.
+Complete Task 016 by moving hosted Grove Shop execution behind a
+Grovlet-owned worker-process lifecycle, reporting starting, healthy, stopping,
+stopped, and failed component states, and accepting explicit start/stop
+commands. Prove Inventory can be stopped and restarted while its authoritative
+placement remains unchanged and the Orders flow succeeds again, without adding
+automatic recovery or durable lifecycle state.
 
 ## Context
 
-Tasks 001 through 014 are complete. Task 013 established the replicated
-JetStream/KV membership pattern and Task 014 layered ephemeral health on top.
-Task 015 adds authoritative placement metadata but does not react to health;
-Tasks 016 through 018 own managed component lifecycle and recovery.
+Tasks 001 through 015 are complete. Task 015 stores authoritative service
+placement in JetStream/KV and routes Orders to Inventory through the watched
+placement view. Task 016 adds local execution supervision for those placed
+services. Placement remains authoritative cluster metadata; component state is
+an observed, process-local read model. Task 017 will cover abrupt Grovlet loss,
+and Task 018 will introduce cluster-driven recovery.
 
-The Task 015 text still names the pre-reference-app Workflow and Greeter
-services. The accepted `IMPLEMENTATION_PLAN.md`, `sdk/EXAMPLE.md`, Task 010,
-and `demo/` contracts replaced that example with Grove Shop. This task uses
-the equivalent canonical split: Orders on node A and Inventory on node B.
+ADR-002 requires application code to execute outside the Grovlet supervisor.
+The Grovlet executable will therefore launch an internal worker mode rather
+than merely toggling handlers inside the control-plane process. One worker per
+independently controlled component is justified by this task's independent
+start/stop requirement; worker consolidation and optimization remain outside
+the task.
 
 ### Key Files
 
-- `tasks/015-explicit-service-placement.md` — placement state, observation,
-  routing, and real-process acceptance requirements.
-- `sdk/SERVICE_MODEL.md` and `sdk/INVOCATION.md` — registration/placement
-  separation and the unchanged explicit Grove call path.
-- `demo/ARCHITECTURE.md` and `demo/IMPLEMENTATION_GUIDE.md` — canonical Grove
-  Shop component topology and incremental task boundary.
-- `internal/systemnats/membership.go` — established replicated KV observer
-  pattern for durable cluster metadata.
-- `internal/systemnats/placement.go` — planned authoritative placement model,
-  observer, read API, and placement-backed router.
-- `cmd/grovlet/main.go` — explicit local Grove Shop assignments and placement
-  observer lifecycle.
-- `cmd/grovlet/main_test.go` — three-process placement and cross-node flow E2E.
+- `tasks/016-managed-component-lifecycle.md` — state and start/stop/restart E2E
+  requirements.
+- `tasks/017-node-failure-detection-e2e.md` and
+  `tasks/018-service-recovery-after-node-failure.md` — boundaries excluding
+  failure recovery from this increment.
+- `docs/adr/002-grovlet-worker-process-boundary.md` — accepted supervisor and
+  application-worker isolation decision.
+- `sdk/SERVICE_MODEL.md` and `sdk/INVOCATION.md` — explicit worker registration
+  and unchanged Grove call semantics.
+- `internal/systemnats/component.go` — planned machine-readable component view
+  and start/stop command transport.
+- `cmd/grovlet/component.go` — planned local process supervisor and component
+  state machine.
+- `cmd/grovlet/worker.go` — planned internal worker mode for concrete Grove Shop
+  registration and dispatch.
+- `cmd/grovlet/main.go` — supervisor construction, worker startup, and ordered
+  shutdown.
+- `cmd/grovlet/main_test.go` — real-process stop/restart/application-flow E2E.
 
 ### Decisions Made
 
-- Store one JSON record per service under `services.<service-id>` in a
-  file-backed `GROVE_PLACEMENT` bucket with three replicas and history one.
-- Keep the minimum routing-complete record: stable service ID, selected node
-  ID, and that node's System NATS invocation subject. Registration remains a
-  separate local capability as required by the SDK contract.
-- Treat the Grovlet's existing explicit Grove Shop flags as placement input.
-  Add a direct Orders flag; when membership is enabled, locally hosted Orders
-  and Inventory records are written to authoritative placement state.
-- Start an empty placement observer on every membership-enabled Grovlet so
-  nodes without application services still expose the same watched view.
-- Resolve each call from the latest watcher-derived placement snapshot. Missing
-  or initializing placement fails explicitly; no retry, fallback, failover, or
-  health-based relocation is introduced.
-- Preserve Task 010's explicit Inventory-subject mode for non-cluster tests and
-  compatibility. Task 015's Orders mode uses the placement-backed router.
-- Expose a per-node JSON placement-view subject rather than merging placement
-  into the Task 014 health view. Later structured status work can compose these
-  read models without changing their authoritative sources.
+- Represent each hosted service as one independently supervised worker process
+  because Task 016 requires component-specific stop and restart. Do not add a
+  general worker packing policy.
+- Launch the same Grovlet artifact in an internal worker mode. The worker owns
+  the concrete Grove Shop registry and System NATS invocation subscription;
+  the parent Grovlet retains membership, health, placement, and lifecycle APIs.
+- Derive a service-specific invocation subject from the configured node subject
+  and service ID so independently controlled workers never compete for the same
+  NATS request subscription.
+- Have Orders workers resolve Inventory by querying their parent Grovlet's
+  watched placement endpoint before each Grove call. This keeps routing driven
+  by Task 015 state without making workers JetStream control-plane members.
+- Keep component state local and ephemeral. Transitions are starting to
+  healthy, healthy to stopping to stopped, and any startup or unexpected exit
+  to failed. Start is permitted from stopped or failed; no automatic restart.
+- Expose per-node JSON snapshot and start/stop command subjects on System NATS.
+  Commands are explicit test/control operations and do not mutate placement.
+- Give each worker a parent-owned pipe. EOF cancels the worker if its Grovlet
+  exits abruptly, preventing orphaned application execution before Task 017.
+- Stop and join workers before health, placement, membership, transport, and
+  embedded NATS shutdown.
 
 ## Sub-Tasks
 
-- [x] 1. Select and bound Task 015.
-  **Context:** Read Task 015, Task 016, accepted SDK/demo contracts, current
-  membership, transport, Grovlet wiring, and existing cross-node E2E.
-  **Outcome:** Chose canonical Orders/Inventory placement, a routing-complete
-  KV record, watched per-node views, explicit assignment flags, and no
-  scheduling, lifecycle management, recovery, ownership arbitration, or
-  health-triggered mutation.
+- [x] 1. Select and bound Task 016.
+  **Context:** Read Task 016 through Task 018, the worker-boundary and failure
+  ADRs, current registry/routing code, process harness, and placement wiring.
+  **Outcome:** Chose real worker-process supervision, ephemeral local component
+  state, explicit System NATS lifecycle commands, service-specific subjects,
+  parent-death cleanup, and no recovery, persistence, upgrade, or ownership
+  behavior.
 
-- [x] 2. Implement authoritative placement state and routing.
-  **Context:** Add the placement record/view types, validation, replicated KV
-  writer/watcher, deterministic snapshot and lookup, per-node JSON API, and a
-  Grove Router that selects the invocation subject from placement.
-  **Outcome:** Added validated service/node/subject records, a three-replica
-  file-backed KV bucket, retrying watchers, sorted snapshots and lookup, a
-  per-node JSON query endpoint, and a placement-backed Grove Router. Package
-  tests prove raw KV state, replica count, three-observer convergence, explicit
-  missing/unready errors, and routed invocation.
+- [ ] 2. Expose component lifecycle state and commands.
+  **Context:** Define component states/status/view, a controller contract, and
+  per-node System NATS snapshot/start/stop request-reply operations with JSON
+  responses and explicit errors.
+  **Acceptance:** Package tests prove stable JSON views, command dispatch,
+  controller failures, and nil-controller validation.
 
-- [x] 3. Wire explicit Grove Shop assignments into Grovlet.
-  **Context:** Add an Orders placement flag, build local Orders/Inventory
-  placement records for membership-enabled nodes, start/serve placement on
-  every clustered node, construct Orders with a placement-backed client, and
-  cancel/join placement before membership and transport shutdown.
-  **Outcome:** Added the clustered `--grove-shop-orders` assignment, translated
-  local Orders/Inventory hosting into placement records, started a placement
-  observer/API on every membership-enabled Grovlet, and constructed Orders
-  with the placement-backed client. Shutdown joins health, placement, and
-  membership in dependency order. Config and prior cluster tests pass.
+- [ ] 3. Implement Grovlet worker supervision.
+  **Context:** Add a concurrency-safe component manager with injectable process
+  startup for unit tests, all required transitions, unexpected-exit failure
+  reporting, restart from stopped/failed, and bounded graceful shutdown.
+  **Acceptance:** Unit tests deterministically exercise every state and invalid
+  transition without fixed sleeps or leaked goroutines/processes.
 
-- [x] 4. Prove replicated placement and routed execution end to end.
-  **Context:** Start three real mutually seeded Grovlets with Orders assigned to
-  node A, Inventory assigned to node B, and node C as an observer. Condition-
-  wait on each node's placement view, then invoke Orders and verify Inventory's
-  cross-node result.
-  **Outcome:** Added a three-process E2E that assigns Orders to node 1,
-  Inventory to node 2, and leaves node 3 observation-only. It condition-waits
-  for identical placement views on all three, then invokes Orders from node 3
-  and verifies the cross-node reservation and completed order. Timeout failures
-  include every process log.
+- [ ] 4. Move placed Grove Shop services into workers.
+  **Context:** Add internal worker mode, explicit Orders/Inventory registration,
+  placement-view routing for Orders, service-specific placement subjects,
+  parent-death cancellation, and Grovlet startup/shutdown integration.
+  **Acceptance:** Existing placement and cross-node tests remain green; placed
+  application handlers execute in child processes rather than the supervisor.
 
-- [x] 5. Verify and close Task 015.
-  **Context:** Review exported docs and state boundaries, format, vet, repeat
-  focused placement/E2E tests, run race and full suites, then mark Task 015
-  DONE.
-  **Outcome:** Reviewed exported docs and the complete diff; `gofmt -l .` and
-  `git diff --check` are clean. `go vet ./...`, five repeated placement package
-  scenarios, three repeated real-process placement flows,
-  `go test -race -count=1 ./...`, and `go test -count=1 ./...` pass. Task 015 is
-  marked DONE.
+- [ ] 5. Prove stop and restart end to end.
+  **Context:** Start the three-Grovlet Orders/Inventory placement, wait for
+  healthy component views, stop Inventory, wait for stopped, start it again,
+  wait for healthy, and execute a successful order.
+  **Acceptance:** The real-process test uses only bounded condition waits,
+  verifies placement is unchanged across stop/restart, and dumps all Grovlet
+  logs on failure.
+
+- [ ] 6. Verify and close Task 016.
+  **Context:** Review docs and task boundaries, format, vet, repeat focused
+  manager/E2E tests, run race and full suites, then mark Task 016 DONE.
+  **Acceptance:** `gofmt -l` is empty; `git diff --check`, `go vet ./...`,
+  focused repeated tests, `go test -race -count=1 ./...`, and
+  `go test -count=1 ./...` pass without weakening prior coverage.
 
 ## Log
 
-- 2026-09-09: Tasks 001 through 014 completed with focused, repeated, race,
+- 2026-09-09: Tasks 001 through 015 completed with focused, repeated, race,
   vet, and full-suite checks passing.
-- 2026-09-09: Selected Task 015 and mapped its stale Workflow/Greeter names to
-  the accepted Grove Shop Orders/Inventory reference flow.
-- 2026-09-09: Added replicated placement records, watcher-derived views, the
-  machine-readable API, and a placement-backed Grove invocation router.
-- 2026-09-09: Wired explicit Orders/Inventory assignments into Grovlet and
-  passed repeated three-process placement convergence and application flows.
-- 2026-09-09: Completed Task 015 after vet, race, formatting, repeated focused,
-  and full-suite verification; no architectural issues found.
+- 2026-09-09: Selected Task 016 and retained the accepted Grovlet/worker process
+  boundary while excluding all automatic recovery and durable lifecycle state.
