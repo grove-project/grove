@@ -76,6 +76,8 @@ func TestParseConfig(t *testing.T) {
 		"--system-nats-route-listen", "127.0.0.1:0",
 		"--system-nats-seed", "nats-route://127.0.0.1:6222",
 		"--system-nats-membership",
+		"--system-nats-subject", "_GROVE.system.invoke.node-a",
+		"--grove-shop-orders",
 	}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -88,6 +90,9 @@ func TestParseConfig(t *testing.T) {
 	}
 	if !clusterCfg.systemNATSMembership {
 		t.Error("System NATS membership is disabled; want enabled")
+	}
+	if !clusterCfg.groveShopOrders {
+		t.Error("Grove Shop Orders placement is disabled; want enabled")
 	}
 
 	if _, err := parseConfig(nil, io.Discard); !errors.Is(err, errRuntimeDirRequired) {
@@ -105,6 +110,28 @@ func TestParseConfig(t *testing.T) {
 		"--system-nats-subject", "_GROVE.system.invoke.node-a",
 	}, io.Discard); !errors.Is(err, errSystemNATSRequired) {
 		t.Errorf("endpoint without connection error = %v; want %v", err, errSystemNATSRequired)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-url", "nats://127.0.0.1:4222",
+		"--system-nats-subject", "_GROVE.system.invoke.node-a",
+		"--grove-shop-orders",
+	}, io.Discard); !errors.Is(err, errGroveShopPlacementCluster) {
+		t.Errorf("Orders without placement cluster error = %v; want %v", err, errGroveShopPlacementCluster)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+		"--advertise-endpoint", "nats-subject://system/node-a",
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-route-listen", "127.0.0.1:0",
+		"--system-nats-seed", "nats-route://127.0.0.1:6222",
+		"--system-nats-membership",
+		"--system-nats-subject", "_GROVE.system.invoke.node-a",
+		"--grove-shop-orders",
+		"--grove-shop-orders-inventory-subject", "_GROVE.system.invoke.node-b",
+	}, io.Discard); !errors.Is(err, errGroveShopOrdersConflict) {
+		t.Errorf("Orders destination conflict error = %v; want %v", err, errGroveShopOrdersConflict)
 	}
 	if _, err := parseConfig([]string{
 		"--runtime-dir", runtimeDir,
@@ -535,7 +562,7 @@ type membershipGrovlets struct {
 	transports []*systemnats.Transport
 }
 
-func startMembershipGrovlets(t *testing.T, ctx context.Context) membershipGrovlets {
+func startMembershipGrovlets(t *testing.T, ctx context.Context, nodeArgs ...[]string) membershipGrovlets {
 	t.Helper()
 	cluster := membershipGrovlets{
 		nodeIDs: []string{"node-1", "node-2", "node-3"},
@@ -546,20 +573,26 @@ func startMembershipGrovlets(t *testing.T, ctx context.Context) membershipGrovle
 		},
 	}
 	routePorts := reserveGrovletRoutePorts(t, len(cluster.nodeIDs))
+	if len(nodeArgs) != 0 && len(nodeArgs) != len(cluster.nodeIDs) {
+		t.Fatalf("node argument sets = %d; want 0 or %d", len(nodeArgs), len(cluster.nodeIDs))
+	}
 	for i, nodeID := range cluster.nodeIDs {
 		seedIndex := 0
 		if i == 0 {
 			seedIndex = 1
 		}
-		node, err := grovetest.StartNode(
-			grovletPath,
+		args := []string{
 			"--node-id", nodeID,
 			"--advertise-endpoint", cluster.endpoints[i],
 			"--system-nats-listen", "127.0.0.1:0",
 			"--system-nats-route-listen", fmt.Sprintf("127.0.0.1:%d", routePorts[i]),
 			"--system-nats-seed", fmt.Sprintf("nats-route://127.0.0.1:%d", routePorts[seedIndex]),
 			"--system-nats-membership",
-		)
+		}
+		if len(nodeArgs) != 0 {
+			args = append(args, nodeArgs[i]...)
+		}
+		node, err := grovetest.StartNode(grovletPath, args...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -748,6 +781,118 @@ func waitForGrovletHealth(
 		case <-ticker.C:
 		case <-ctx.Done():
 			return nil, fmt.Errorf("grovlet health did not converge: views=%#v: %w", views, errors.Join(lastErr, ctx.Err()))
+		}
+	}
+}
+
+// Every Grovlet observes Orders on node 1 and Inventory on node 2 before the
+// Orders implementation resolves its Inventory call from replicated placement.
+func TestGrovletServicePlacementConvergesAndRoutes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	const (
+		ordersSubject    = "_GROVE.system.invoke.node-1"
+		inventorySubject = "_GROVE.system.invoke.node-2"
+		observerSubject  = "_GROVE.system.invoke.node-3"
+	)
+	cluster := startMembershipGrovlets(
+		t,
+		ctx,
+		[]string{"--system-nats-subject", ordersSubject, "--grove-shop-orders"},
+		[]string{"--system-nats-subject", inventorySubject, "--grove-shop-inventory"},
+		[]string{"--system-nats-subject", observerSubject},
+	)
+	want := []systemnats.PlacementRecord{
+		{
+			ServiceID:         groveshop.ServiceOrders,
+			NodeID:            cluster.nodeIDs[0],
+			InvocationSubject: ordersSubject,
+		},
+		{
+			ServiceID:         groveshop.ServiceInventory,
+			NodeID:            cluster.nodeIDs[1],
+			InvocationSubject: inventorySubject,
+		},
+	}
+	views, err := waitForGrovletPlacement(ctx, cluster, want)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	for i, view := range views {
+		if view.Error != "" || !slices.Equal(view.Placements, want) {
+			t.Errorf("%s placement = %#v; want %#v", cluster.nodeIDs[i], view, want)
+		}
+	}
+
+	client, err := cluster.transports[2].RoutedClient(ordersSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](
+		ctx,
+		client,
+		groveshop.ServiceOrders,
+		groveshop.MethodCreateOrder,
+		groveshop.CreateOrderRequest{
+			OrderID:         "order-placement",
+			SKU:             "coffee-beans",
+			Quantity:        2,
+			AmountCents:     2400,
+			ShippingAddress: "15 Grove Lane",
+		},
+	)
+	if err != nil {
+		t.Fatalf("placement-routed order: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if created.Status != groveshop.OrderCompleted {
+		t.Errorf("placement-routed order status = %q; want %q", created.Status, groveshop.OrderCompleted)
+	}
+	if created.Reservation.ID != "reservation-order-placement" {
+		t.Errorf("placement-routed reservation ID = %q; want reservation-order-placement", created.Reservation.ID)
+	}
+
+	for i := len(cluster.nodes) - 1; i >= 0; i-- {
+		if err := cluster.nodes[i].Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func waitForGrovletPlacement(
+	ctx context.Context,
+	cluster membershipGrovlets,
+	want []systemnats.PlacementRecord,
+) ([]systemnats.PlacementView, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	views := make([]systemnats.PlacementView, len(cluster.nodeIDs))
+	var lastErr error
+	for {
+		converged := true
+		for i, nodeID := range cluster.nodeIDs {
+			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			view, err := cluster.transports[i].RequestPlacement(requestCtx, nodeID)
+			cancel()
+			if err != nil {
+				lastErr = err
+				converged = false
+				continue
+			}
+			views[i] = view
+			if !view.Ready || !slices.Equal(view.Placements, want) {
+				converged = false
+			}
+		}
+		if converged {
+			return views, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("grovlet placement did not converge: views=%#v: %w", views, errors.Join(lastErr, err))
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("grovlet placement did not converge: views=%#v: %w", views, errors.Join(lastErr, ctx.Err()))
 		}
 	}
 }

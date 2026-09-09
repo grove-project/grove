@@ -68,39 +68,47 @@ the equivalent canonical split: Orders on node A and Inventory on node B.
   scheduling, lifecycle management, recovery, ownership arbitration, or
   health-triggered mutation.
 
-- [ ] 2. Implement authoritative placement state and routing.
+- [x] 2. Implement authoritative placement state and routing.
   **Context:** Add the placement record/view types, validation, replicated KV
   writer/watcher, deterministic snapshot and lookup, per-node JSON API, and a
   Grove Router that selects the invocation subject from placement.
-  **Acceptance:** Package tests prove three-replica KV configuration, identical
-  sorted views on three observers, invalid-input behavior, and a call routed
-  through the selected placement.
+  **Outcome:** Added validated service/node/subject records, a three-replica
+  file-backed KV bucket, retrying watchers, sorted snapshots and lookup, a
+  per-node JSON query endpoint, and a placement-backed Grove Router. Package
+  tests prove raw KV state, replica count, three-observer convergence, explicit
+  missing/unready errors, and routed invocation.
 
-- [ ] 3. Wire explicit Grove Shop assignments into Grovlet.
+- [x] 3. Wire explicit Grove Shop assignments into Grovlet.
   **Context:** Add an Orders placement flag, build local Orders/Inventory
   placement records for membership-enabled nodes, start/serve placement on
   every clustered node, construct Orders with a placement-backed client, and
   cancel/join placement before membership and transport shutdown.
-  **Acceptance:** Config tests cover the new valid and invalid combinations;
-  existing explicit-subject invocation and earlier cluster behavior remain
-  unchanged.
+  **Outcome:** Added the clustered `--grove-shop-orders` assignment, translated
+  local Orders/Inventory hosting into placement records, started a placement
+  observer/API on every membership-enabled Grovlet, and constructed Orders
+  with the placement-backed client. Shutdown joins health, placement, and
+  membership in dependency order. Config and prior cluster tests pass.
 
-- [ ] 4. Prove replicated placement and routed execution end to end.
+- [x] 4. Prove replicated placement and routed execution end to end.
   **Context:** Start three real mutually seeded Grovlets with Orders assigned to
   node A, Inventory assigned to node B, and node C as an observer. Condition-
   wait on each node's placement view, then invoke Orders and verify Inventory's
   cross-node result.
-  **Acceptance:** Every node reports the same two records before the successful
-  order flow; waits are bounded without fixed sleeps and failures dump all
-  process logs.
+  **Outcome:** Added a three-process E2E that assigns Orders to node 1,
+  Inventory to node 2, and leaves node 3 observation-only. It condition-waits
+  for identical placement views on all three, then invokes Orders from node 3
+  and verifies the cross-node reservation and completed order. Timeout failures
+  include every process log.
 
-- [ ] 5. Verify and close Task 015.
+- [x] 5. Verify and close Task 015.
   **Context:** Review exported docs and state boundaries, format, vet, repeat
   focused placement/E2E tests, run race and full suites, then mark Task 015
   DONE.
-  **Acceptance:** `gofmt -l` is empty; `git diff --check`, `go vet ./...`,
-  focused repeated tests, `go test -race -count=1 ./...`, and
-  `go test -count=1 ./...` pass without weakening prior coverage.
+  **Outcome:** Reviewed exported docs and the complete diff; `gofmt -l .` and
+  `git diff --check` are clean. `go vet ./...`, five repeated placement package
+  scenarios, three repeated real-process placement flows,
+  `go test -race -count=1 ./...`, and `go test -count=1 ./...` pass. Task 015 is
+  marked DONE.
 
 ## Log
 
@@ -108,3 +116,9 @@ the equivalent canonical split: Orders on node A and Inventory on node B.
   vet, and full-suite checks passing.
 - 2026-09-09: Selected Task 015 and mapped its stale Workflow/Greeter names to
   the accepted Grove Shop Orders/Inventory reference flow.
+- 2026-09-09: Added replicated placement records, watcher-derived views, the
+  machine-readable API, and a placement-backed Grove invocation router.
+- 2026-09-09: Wired explicit Orders/Inventory assignments into Grovlet and
+  passed repeated three-process placement convergence and application flows.
+- 2026-09-09: Completed Task 015 after vet, race, formatting, repeated focused,
+  and full-suite verification; no architectural issues found.

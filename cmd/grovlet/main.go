@@ -30,6 +30,8 @@ var (
 	errSystemNATSClusterIdentity     = errors.New("system NATS clustering requires node identity")
 	errSystemNATSMembershipCluster   = errors.New("system NATS membership requires a route listener and seed")
 	errGroveShopEndpoint             = errors.New("reference application service placement requires a System NATS endpoint")
+	errGroveShopPlacementCluster     = errors.New("orders placement requires System NATS membership")
+	errGroveShopOrdersConflict       = errors.New("orders placement and explicit Inventory destination are mutually exclusive")
 	errNodeIdentityPair              = errors.New("node ID and advertised endpoint must be configured together")
 	errNodeIDInvalid                 = errors.New("node ID is invalid")
 	errAdvertiseInvalid              = errors.New("advertised endpoint is invalid")
@@ -43,6 +45,7 @@ type config struct {
 	systemNATSMembership      bool
 	systemNATSURL             string
 	systemNATSSubject         string
+	groveShopOrders           bool
 	groveShopInventory        bool
 	groveShopInventorySubject string
 	nodeID                    string
@@ -125,7 +128,8 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.BoolVar(&cfg.systemNATSMembership, "system-nats-membership", false, "register and observe replicated Grove membership")
 	flags.StringVar(&cfg.systemNATSURL, "system-nats-url", "", "System NATS server URL")
 	flags.StringVar(&cfg.systemNATSSubject, "system-nats-subject", "", "System NATS transport endpoint subject")
-	flags.BoolVar(&cfg.groveShopInventory, "grove-shop-inventory", false, "register Grove Shop Inventory on this Grovlet")
+	flags.BoolVar(&cfg.groveShopOrders, "grove-shop-orders", false, "place Grove Shop Orders on this Grovlet")
+	flags.BoolVar(&cfg.groveShopInventory, "grove-shop-inventory", false, "host Grove Shop Inventory on this Grovlet")
 	flags.StringVar(&cfg.groveShopInventorySubject, "grove-shop-orders-inventory-subject", "", "explicit Inventory endpoint for Grove Shop Orders")
 	flags.StringVar(&cfg.nodeID, "node-id", "", "stable process-lifetime Grove node ID")
 	flags.StringVar(&cfg.advertisedEndpoint, "advertise-endpoint", "", "advertised Grove transport endpoint URL")
@@ -162,8 +166,14 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	if cfg.systemNATSSubject != "" && cfg.systemNATSListen == "" && cfg.systemNATSURL == "" {
 		return config{}, errSystemNATSRequired
 	}
-	if (cfg.groveShopInventory || cfg.groveShopInventorySubject != "") && cfg.systemNATSSubject == "" {
+	if (cfg.groveShopOrders || cfg.groveShopInventory || cfg.groveShopInventorySubject != "") && cfg.systemNATSSubject == "" {
 		return config{}, errGroveShopEndpoint
+	}
+	if cfg.groveShopOrders && !cfg.systemNATSMembership {
+		return config{}, errGroveShopPlacementCluster
+	}
+	if cfg.groveShopOrders && cfg.groveShopInventorySubject != "" {
+		return config{}, errGroveShopOrdersConflict
 	}
 	if (cfg.nodeID == "") != (cfg.advertisedEndpoint == "") {
 		return config{}, errNodeIdentityPair
@@ -205,6 +215,8 @@ type systemNATSRuntime struct {
 	routeURL         string
 	membershipCancel context.CancelFunc
 	membershipDone   chan struct{}
+	placementCancel  context.CancelFunc
+	placementDone    chan struct{}
 	healthCancel     context.CancelFunc
 	healthDone       chan struct{}
 }
@@ -256,11 +268,49 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 		return nil, err
 	}
 	runtime.transport = transport
+	var placement *systemnats.Placement
+	if cfg.systemNATSMembership {
+		membership, err := systemnats.NewMembership(systemnats.MembershipRecord{
+			NodeID:             cfg.nodeID,
+			AdvertisedEndpoint: cfg.advertisedEndpoint,
+		})
+		if err != nil {
+			runtime.stop()
+			return nil, err
+		}
+		if err := transport.ServeMembership(ctx, cfg.nodeID, membership); err != nil {
+			runtime.stop()
+			return nil, err
+		}
+		runtime.startMembership(ctx, membership)
+
+		placement, err = systemnats.NewPlacement(groveShopPlacements(cfg))
+		if err != nil {
+			runtime.stop()
+			return nil, err
+		}
+		if err := transport.ServePlacement(ctx, cfg.nodeID, placement); err != nil {
+			runtime.stop()
+			return nil, err
+		}
+		runtime.startPlacement(ctx, placement)
+
+		health, err := systemnats.NewHealth(cfg.nodeID, membership, systemnats.HealthConfig{})
+		if err != nil {
+			runtime.stop()
+			return nil, err
+		}
+		if err := transport.ServeClusterView(ctx, cfg.nodeID, health); err != nil {
+			runtime.stop()
+			return nil, err
+		}
+		runtime.startHealth(ctx, health)
+	}
 	if cfg.systemNATSSubject != "" {
 		handler := systemnats.Handler(func(_ context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
 			return grove.ResponseEnvelope{Payload: request.Payload}
 		})
-		if cfg.groveShopInventory || cfg.groveShopInventorySubject != "" {
+		if cfg.groveShopOrders || cfg.groveShopInventory || cfg.groveShopInventorySubject != "" {
 			registry := &grove.Registry{}
 			if cfg.groveShopInventory {
 				if err := groveshop.RegisterInventory(registry, &groveshop.Inventory{}); err != nil {
@@ -268,8 +318,13 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 					return nil, fmt.Errorf("register Grove Shop Inventory: %w", err)
 				}
 			}
-			if cfg.groveShopInventorySubject != "" {
-				inventoryClient, err := transport.RoutedClient(cfg.groveShopInventorySubject)
+			if cfg.groveShopOrders || cfg.groveShopInventorySubject != "" {
+				var inventoryClient *grove.Client
+				if cfg.groveShopOrders {
+					inventoryClient, err = transport.PlacementClient(placement)
+				} else {
+					inventoryClient, err = transport.RoutedClient(cfg.groveShopInventorySubject)
+				}
 				if err != nil {
 					runtime.stop()
 					return nil, err
@@ -302,32 +357,26 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 			return nil, err
 		}
 	}
-	if cfg.systemNATSMembership {
-		membership, err := systemnats.NewMembership(systemnats.MembershipRecord{
-			NodeID:             cfg.nodeID,
-			AdvertisedEndpoint: cfg.advertisedEndpoint,
-		})
-		if err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		if err := transport.ServeMembership(ctx, cfg.nodeID, membership); err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		runtime.startMembership(ctx, membership)
-		health, err := systemnats.NewHealth(cfg.nodeID, membership, systemnats.HealthConfig{})
-		if err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		if err := transport.ServeClusterView(ctx, cfg.nodeID, health); err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		runtime.startHealth(ctx, health)
-	}
 	return runtime, nil
+}
+
+func groveShopPlacements(cfg config) []systemnats.PlacementRecord {
+	placements := make([]systemnats.PlacementRecord, 0, 2)
+	if cfg.groveShopOrders {
+		placements = append(placements, systemnats.PlacementRecord{
+			ServiceID:         groveshop.ServiceOrders,
+			NodeID:            cfg.nodeID,
+			InvocationSubject: cfg.systemNATSSubject,
+		})
+	}
+	if cfg.groveShopInventory {
+		placements = append(placements, systemnats.PlacementRecord{
+			ServiceID:         groveshop.ServiceInventory,
+			NodeID:            cfg.nodeID,
+			InvocationSubject: cfg.systemNATSSubject,
+		})
+	}
+	return placements
 }
 
 func parseListenAddress(address string) (string, int, error) {
@@ -355,6 +404,16 @@ func (r *systemNATSRuntime) startMembership(ctx context.Context, membership *sys
 	}()
 }
 
+func (r *systemNATSRuntime) startPlacement(ctx context.Context, placement *systemnats.Placement) {
+	placementCtx, cancel := context.WithCancel(ctx)
+	r.placementCancel = cancel
+	r.placementDone = make(chan struct{})
+	go func() {
+		defer close(r.placementDone)
+		_ = placement.Run(placementCtx, r.transport)
+	}()
+}
+
 func (r *systemNATSRuntime) startHealth(ctx context.Context, health *systemnats.Health) {
 	healthCtx, cancel := context.WithCancel(ctx)
 	r.healthCancel = cancel
@@ -369,6 +428,10 @@ func (r *systemNATSRuntime) stop() {
 	if r.healthCancel != nil {
 		r.healthCancel()
 		<-r.healthDone
+	}
+	if r.placementCancel != nil {
+		r.placementCancel()
+		<-r.placementDone
 	}
 	if r.membershipCancel != nil {
 		r.membershipCancel()

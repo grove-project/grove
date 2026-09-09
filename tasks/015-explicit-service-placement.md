@@ -1,6 +1,6 @@
 # Task 015 — Explicit service placement in control state
 
-Status: TODO
+Status: DONE
 Depends on: 010, 013
 
 ## Goal
