@@ -45,6 +45,8 @@ type ComponentStatus struct {
 	ServiceID grove.ServiceID `json:"service_id"`
 	// Name is the component's application-owned display name.
 	Name string `json:"name"`
+	// InvocationSubject is this Grovlet's endpoint for the component.
+	InvocationSubject string `json:"invocation_subject"`
 	// State is the component's current locally observed lifecycle state.
 	State ComponentState `json:"state"`
 	// Error describes the latest startup or unexpected-exit failure.

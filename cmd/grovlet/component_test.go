@@ -17,7 +17,7 @@ func TestComponentManagerLifecycle(t *testing.T) {
 	started := make(chan struct{})
 	allowStart := make(chan struct{})
 	process := newFakeComponentProcess()
-	manager := newComponentManager([]componentSpec{{serviceID: 2, name: "Inventory"}}, func(context.Context, componentSpec) (componentProcess, error) {
+	manager := newComponentManager([]componentSpec{{serviceID: 2, name: "Inventory", subject: "inventory.node-a"}}, func(context.Context, componentSpec) (componentProcess, error) {
 		close(started)
 		<-allowStart
 		return process, nil
@@ -31,6 +31,9 @@ func TestComponentManagerLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertComponentState(t, manager, systemnats.ComponentHealthy)
+	if subject := manager.SnapshotComponents().Components[0].InvocationSubject; subject != "inventory.node-a" {
+		t.Errorf("component invocation subject = %q; want inventory.node-a", subject)
+	}
 
 	stopDone := make(chan error, 1)
 	go func() { stopDone <- manager.StopComponent(t.Context(), 2) }()

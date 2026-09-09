@@ -39,7 +39,10 @@ var (
 	ErrPlacementUnavailable = errors.New("grove placement is unavailable")
 	// ErrServiceNotPlaced is returned when no authoritative placement exists for
 	// a requested service.
-	ErrServiceNotPlaced     = errors.New("grove service is not placed")
+	ErrServiceNotPlaced = errors.New("grove service is not placed")
+	// ErrPlacementChanged is returned when a placement no longer matches the
+	// record a caller intended to replace.
+	ErrPlacementChanged     = errors.New("grove placement changed")
 	errPlacementWatchClosed = errors.New("grove placement watch closed")
 )
 
@@ -183,12 +186,9 @@ func (p *Placement) watch(ctx context.Context, transport *Transport) error {
 			if entry.Operation() == jetstream.KeyValueDelete || entry.Operation() == jetstream.KeyValuePurge {
 				delete(records, serviceID)
 			} else {
-				var record PlacementRecord
-				if err := json.Unmarshal(entry.Value(), &record); err != nil {
-					return fmt.Errorf("decode placement record %q: %w", entry.Key(), err)
-				}
-				if record.ServiceID != serviceID || record.NodeID == "" || record.InvocationSubject == "" {
-					return fmt.Errorf("validate placement record %q: %w", entry.Key(), ErrPlacementRecordInvalid)
+				record, err := decodePlacementRecord(entry.Key(), entry.Value())
+				if err != nil {
+					return err
 				}
 				records[serviceID] = record
 			}
@@ -238,6 +238,81 @@ func (p *Placement) Lookup(serviceID grove.ServiceID) (PlacementRecord, error) {
 		}
 	}
 	return PlacementRecord{}, &Error{Operation: "resolve Grove placement", Err: ErrServiceNotPlaced}
+}
+
+// Replace atomically changes current to replacement in the authoritative
+// placement bucket. The returned record is the authoritative value observed
+// when the comparison fails.
+func (p *Placement) Replace(
+	ctx context.Context,
+	transport *Transport,
+	current PlacementRecord,
+	replacement PlacementRecord,
+) (PlacementRecord, error) {
+	if !validPlacementRecord(current) || !validPlacementRecord(replacement) || current.ServiceID != replacement.ServiceID {
+		return PlacementRecord{}, &Error{Operation: "replace Grove placement", Err: ErrPlacementRecordInvalid}
+	}
+	js, err := jetstream.New(transport.connection)
+	if err != nil {
+		return PlacementRecord{}, &Error{Operation: "replace Grove placement", Err: err}
+	}
+	kv, err := js.KeyValue(ctx, PlacementBucket)
+	if err != nil {
+		return PlacementRecord{}, &Error{Operation: "replace Grove placement", Err: err}
+	}
+	key := PlacementKey(current.ServiceID)
+	entry, err := kv.Get(ctx, key)
+	if err != nil {
+		return PlacementRecord{}, &Error{Operation: "read Grove placement for replacement", Err: err}
+	}
+	observed, err := decodePlacementRecord(key, entry.Value())
+	if err != nil {
+		return PlacementRecord{}, &Error{Operation: "read Grove placement for replacement", Err: err}
+	}
+	if observed == replacement {
+		return observed, nil
+	}
+	if observed != current {
+		return observed, &Error{Operation: "compare Grove placement for replacement", Err: ErrPlacementChanged}
+	}
+	encoded, err := json.Marshal(replacement)
+	if err != nil {
+		return PlacementRecord{}, &Error{Operation: "encode Grove placement replacement", Err: err}
+	}
+	if _, err := kv.Update(ctx, key, encoded, entry.Revision()); err != nil {
+		if errors.Is(err, jetstream.ErrKeyExists) {
+			latest, getErr := kv.Get(ctx, key)
+			if getErr != nil {
+				return PlacementRecord{}, &Error{Operation: "read changed Grove placement", Err: getErr}
+			}
+			observed, decodeErr := decodePlacementRecord(key, latest.Value())
+			if decodeErr != nil {
+				return PlacementRecord{}, &Error{Operation: "read changed Grove placement", Err: decodeErr}
+			}
+			return observed, &Error{Operation: "compare Grove placement for replacement", Err: ErrPlacementChanged}
+		}
+		return PlacementRecord{}, &Error{Operation: "write Grove placement replacement", Err: err}
+	}
+	return replacement, nil
+}
+
+func validPlacementRecord(record PlacementRecord) bool {
+	return record.ServiceID != 0 && record.NodeID != "" && record.InvocationSubject != ""
+}
+
+func decodePlacementRecord(key string, value []byte) (PlacementRecord, error) {
+	serviceID, err := serviceIDFromPlacementKey(key)
+	if err != nil {
+		return PlacementRecord{}, err
+	}
+	var record PlacementRecord
+	if err := json.Unmarshal(value, &record); err != nil {
+		return PlacementRecord{}, fmt.Errorf("decode placement record %q: %w", key, err)
+	}
+	if record.ServiceID != serviceID || !validPlacementRecord(record) {
+		return PlacementRecord{}, fmt.Errorf("validate placement record %q: %w", key, ErrPlacementRecordInvalid)
+	}
+	return record, nil
 }
 
 func (p *Placement) setReady(records map[grove.ServiceID]PlacementRecord) {

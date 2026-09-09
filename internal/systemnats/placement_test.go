@@ -118,7 +118,35 @@ func TestPlacementConvergesAndRoutes(t *testing.T) {
 		t.Errorf("stored placement = %#v; want %#v", stored, want[1])
 	}
 
-	if err := transports[1].Serve(ctx, want[1].InvocationSubject, func(_ context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
+	replacement := systemnats.PlacementRecord{
+		ServiceID:         2,
+		NodeID:            "node-c",
+		InvocationSubject: "_GROVE.system.invoke.node-c",
+	}
+	observed, err := placements[2].Replace(ctx, transports[2], want[1], replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observed != replacement {
+		t.Errorf("replacement result = %#v; want %#v", observed, replacement)
+	}
+	replaced := []systemnats.PlacementRecord{want[0], replacement}
+	if _, err := waitForPlacementViews(ctx, transports, nodeIDs, replaced); err != nil {
+		t.Fatal(err)
+	}
+	observed, err = placements[1].Replace(ctx, transports[1], want[1], systemnats.PlacementRecord{
+		ServiceID:         2,
+		NodeID:            "node-d",
+		InvocationSubject: "_GROVE.system.invoke.node-d",
+	})
+	if !errors.Is(err, systemnats.ErrPlacementChanged) {
+		t.Errorf("stale replacement error = %v; want %v", err, systemnats.ErrPlacementChanged)
+	}
+	if observed != replacement {
+		t.Errorf("stale replacement observed = %#v; want %#v", observed, replacement)
+	}
+
+	if err := transports[1].Serve(ctx, replacement.InvocationSubject, func(_ context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
 		return grove.ResponseEnvelope{Payload: request.Payload}
 	}); err != nil {
 		t.Fatal(err)

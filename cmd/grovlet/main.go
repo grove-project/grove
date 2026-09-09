@@ -30,6 +30,7 @@ var (
 	errSystemNATSSeedRouteRequired   = errors.New("system NATS seed requires a route listener")
 	errSystemNATSClusterIdentity     = errors.New("system NATS clustering requires node identity")
 	errSystemNATSMembershipCluster   = errors.New("system NATS membership requires a route listener and seed")
+	errSystemNATSRecoveryCluster     = errors.New("system NATS recovery requires membership")
 	errGroveShopEndpoint             = errors.New("reference application service placement requires a System NATS endpoint")
 	errGroveShopPlacementCluster     = errors.New("orders placement requires System NATS membership")
 	errGroveShopOrdersConflict       = errors.New("orders placement and explicit Inventory destination are mutually exclusive")
@@ -44,6 +45,7 @@ type config struct {
 	systemNATSRouteListen     string
 	systemNATSSeed            string
 	systemNATSMembership      bool
+	systemNATSRecovery        bool
 	systemNATSURL             string
 	systemNATSSubject         string
 	groveShopOrders           bool
@@ -133,6 +135,7 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.StringVar(&cfg.systemNATSRouteListen, "system-nats-route-listen", "", "address for the embedded System NATS route listener")
 	flags.StringVar(&cfg.systemNATSSeed, "system-nats-seed", "", "explicit System NATS seed route URL")
 	flags.BoolVar(&cfg.systemNATSMembership, "system-nats-membership", false, "register and observe replicated Grove membership")
+	flags.BoolVar(&cfg.systemNATSRecovery, "system-nats-recovery", false, "recover placed services from unavailable Grovlets")
 	flags.StringVar(&cfg.systemNATSURL, "system-nats-url", "", "System NATS server URL")
 	flags.StringVar(&cfg.systemNATSSubject, "system-nats-subject", "", "System NATS transport endpoint subject")
 	flags.BoolVar(&cfg.groveShopOrders, "grove-shop-orders", false, "place Grove Shop Orders on this Grovlet")
@@ -170,10 +173,13 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	if cfg.systemNATSMembership && (cfg.systemNATSRouteListen == "" || cfg.systemNATSSeed == "") {
 		return config{}, errSystemNATSMembershipCluster
 	}
+	if cfg.systemNATSRecovery && !cfg.systemNATSMembership {
+		return config{}, errSystemNATSRecoveryCluster
+	}
 	if cfg.systemNATSSubject != "" && cfg.systemNATSListen == "" && cfg.systemNATSURL == "" {
 		return config{}, errSystemNATSRequired
 	}
-	if (cfg.groveShopOrders || cfg.groveShopInventory || cfg.groveShopInventorySubject != "") && cfg.systemNATSSubject == "" {
+	if (cfg.groveShopOrders || cfg.groveShopInventory || cfg.groveShopInventorySubject != "" || cfg.systemNATSRecovery) && cfg.systemNATSSubject == "" {
 		return config{}, errGroveShopEndpoint
 	}
 	if cfg.groveShopOrders && !cfg.systemNATSMembership {
@@ -227,6 +233,8 @@ type systemNATSRuntime struct {
 	healthCancel     context.CancelFunc
 	healthDone       chan struct{}
 	components       *componentManager
+	recoveryCancel   context.CancelFunc
+	recoveryDone     chan struct{}
 }
 
 func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error) {
@@ -314,17 +322,24 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 		}
 		runtime.startHealth(ctx, health)
 
+		componentSpecs := groveShopComponentSpecs(cfg)
+		if cfg.systemNATSRecovery {
+			componentSpecs = groveShopRecoveryComponentSpecs(cfg)
+		}
 		runtime.components = newComponentManager(
-			groveShopComponentSpecs(cfg),
+			componentSpecs,
 			newWorkerStarter(url, cfg.nodeID),
 		)
 		if err := transport.ServeComponents(ctx, cfg.nodeID, runtime.components); err != nil {
 			runtime.stop()
 			return nil, err
 		}
-		if err := runtime.components.startAll(ctx); err != nil {
+		if err := runtime.components.start(ctx, groveShopPlacedServiceIDs(cfg)); err != nil {
 			runtime.stop()
 			return nil, err
+		}
+		if cfg.systemNATSRecovery {
+			runtime.startRecovery(ctx, newServiceRecovery(cfg.nodeID, health, placement, runtime.components, transport))
 		}
 	}
 	if cfg.systemNATSSubject != "" {
@@ -417,6 +432,34 @@ func groveShopComponentSpecs(cfg config) []componentSpec {
 	return components
 }
 
+func groveShopRecoveryComponentSpecs(cfg config) []componentSpec {
+	return []componentSpec{
+		{
+			serviceID: groveshop.ServiceOrders,
+			name:      "Orders",
+			kind:      workerOrders,
+			subject:   componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceOrders),
+		},
+		{
+			serviceID: groveshop.ServiceInventory,
+			name:      "Inventory",
+			kind:      workerInventory,
+			subject:   componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceInventory),
+		},
+	}
+}
+
+func groveShopPlacedServiceIDs(cfg config) []grove.ServiceID {
+	serviceIDs := make([]grove.ServiceID, 0, 2)
+	if cfg.groveShopOrders {
+		serviceIDs = append(serviceIDs, groveshop.ServiceOrders)
+	}
+	if cfg.groveShopInventory {
+		serviceIDs = append(serviceIDs, groveshop.ServiceInventory)
+	}
+	return serviceIDs
+}
+
 func parseListenAddress(address string) (string, int, error) {
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
@@ -462,7 +505,21 @@ func (r *systemNATSRuntime) startHealth(ctx context.Context, health *systemnats.
 	}()
 }
 
+func (r *systemNATSRuntime) startRecovery(ctx context.Context, recovery *serviceRecovery) {
+	recoveryCtx, cancel := context.WithCancel(ctx)
+	r.recoveryCancel = cancel
+	r.recoveryDone = make(chan struct{})
+	go func() {
+		defer close(r.recoveryDone)
+		_ = recovery.Run(recoveryCtx)
+	}()
+}
+
 func (r *systemNATSRuntime) stop() {
+	if r.recoveryCancel != nil {
+		r.recoveryCancel()
+		<-r.recoveryDone
+	}
 	if r.components != nil {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = r.components.stopAll(stopCtx)

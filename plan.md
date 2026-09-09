@@ -47,27 +47,37 @@ desired deployment state and reconciliation.
 
 ## Sub-Tasks
 
-- [ ] 1. Add authoritative placement replacement.
+- [x] 1. Add authoritative placement replacement.
   **Context:** Add a validated JetStream/KV compare-and-swap operation and prove
   all placement watchers observe the new record while stale writers cannot
   overwrite it.
+  **Outcome:** Added a validated revision-based placement replacement that
+  returns the authoritative winner on conflict. Three replicated observers see
+  the update, and a stale replacement is rejected without overwriting it.
 
-- [ ] 2. Expose dormant recovery capabilities.
+- [x] 2. Expose dormant recovery capabilities.
   **Context:** Include invocation subjects in component views, let a manager
   start selected catalog entries, and configure recovery-enabled Grovlets with
   the Grove Shop Orders and Inventory worker catalog while preserving explicit
   initial placement.
+  **Outcome:** Recovery-enabled Grovlets advertise node-local Orders and
+  Inventory subjects while starting only their explicit boot placements.
 
-- [ ] 3. Reconcile unavailable placements.
+- [x] 3. Reconcile unavailable placements.
   **Context:** Add a bounded System NATS recovery loop that waits for ready
   health and placement views, selects one deterministic coordinator and target,
   starts the target component, and commits the placement change through KV.
+  **Outcome:** Added the smallest-healthy-node coordinator, prior-health guard,
+  local replacement start, KV compare-and-swap, and losing-worker cleanup.
 
-- [ ] 4. Prove real-process recovery and close Task 018.
+- [x] 4. Prove real-process recovery and close Task 018.
   **Context:** Start three recovery-enabled Grovlets, complete an order, kill
   Inventory's node, condition-wait for unavailability and replacement placement,
   then complete another order. Repeat the scenario and run formatting, vet,
   race, and full suites before marking Task 018 DONE.
+  **Outcome:** Three repeated recovery scenarios pass. Formatting, diff checks,
+  vet, the complete race suite, and `go test -count=1 ./...` pass. Task 018 is
+  DONE.
 
 ## Log
 
@@ -75,3 +85,6 @@ desired deployment state and reconciliation.
   vet, and full-suite checks passing.
 - 2026-09-09: Selected opt-in, deterministic stateless recovery so Task 017
   remains stable and Task 019's desired-state model stays out of scope.
+- 2026-09-09: Completed Task 018 with replicated placement replacement,
+  deterministic real-process Inventory recovery, and all historical race/full
+  tests passing.

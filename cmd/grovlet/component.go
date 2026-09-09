@@ -53,8 +53,7 @@ func newComponentManager(specs []componentSpec, starter componentStarter) *compo
 	return &componentManager{components: components, starter: starter}
 }
 
-func (m *componentManager) startAll(ctx context.Context) error {
-	serviceIDs := m.serviceIDs()
+func (m *componentManager) start(ctx context.Context, serviceIDs []grove.ServiceID) error {
 	for _, serviceID := range serviceIDs {
 		if err := m.StartComponent(ctx, serviceID); err != nil {
 			_ = m.stopAll(ctx)
@@ -96,10 +95,11 @@ func (m *componentManager) SnapshotComponents() systemnats.ComponentView {
 		component := m.components[serviceID]
 		component.mu.Lock()
 		components = append(components, systemnats.ComponentStatus{
-			ServiceID: component.spec.serviceID,
-			Name:      component.spec.name,
-			State:     component.state,
-			Error:     component.err,
+			ServiceID:         component.spec.serviceID,
+			Name:              component.spec.name,
+			InvocationSubject: component.spec.subject,
+			State:             component.state,
+			Error:             component.err,
 		})
 		component.mu.Unlock()
 	}

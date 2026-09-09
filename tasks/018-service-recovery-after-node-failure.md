@@ -1,6 +1,6 @@
 # Task 018 — Service recovery after node failure
 
-Status: TODO
+Status: DONE
 Depends on: 017
 
 ## Goal
