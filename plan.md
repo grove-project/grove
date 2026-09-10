@@ -1,83 +1,78 @@
-# Plan: Reconcile authoritative desired deployments
+# Plan: Reconstruct deployments after cluster restart
 
 ## Goal
 
-Complete Task 019 by storing a minimum desired Grove deployment in replicated
-JetStream/KV, exposing it through System NATS control APIs, and restarting a
-killed worker when observed local runtime state diverges from that intent.
+Complete Task 020 by restarting all three real Grovlets with their existing
+runtime directories, recovering authoritative membership, placement, and
+desired deployment state from embedded JetStream, and reconstructing Grove
+Shop workers through desired-state reconciliation.
 
 ## Context
 
-Tasks 001 through 018 are complete. Placement describes current routing,
-component views describe observed worker lifecycle, and opt-in recovery can
-move a service after node loss. Desired state must now describe intent
-separately. Task 020 owns persistence across a complete cluster restart, and
-Task 025 owns simultaneous N/N+1 version records.
+Tasks 001 through 019 are complete. Each Grovlet already stores embedded NATS
+state under `<runtime-dir>/system-nats`, and `grovetest.Node.Restart` preserves
+its runtime directory and launch arguments. Current startup writes boot
+placement and starts boot components before reading desired state; Task 020
+must distinguish first boot from restored intent. Task 021 owns the CLI and is
+not part of this increment.
 
 ### Key Files
 
-- `tasks/019-desired-state-in-jetstream-kv.md` — desired-state acceptance
-  contract.
-- `internal/systemnats/desired.go` — replicated desired deployment model,
-  watcher, and System NATS read/write API.
-- `internal/systemnats/desired_test.go` — model validation, KV encoding, and
-  multi-observer convergence.
-- `cmd/grovlet/component.go` — observed worker generation and explicit kill.
-- `cmd/grovlet/reconcile.go` — local desired-versus-observed decisions.
-- `cmd/grovlet/main_test.go` — real-process desired-state reconciliation E2E.
+- `tasks/020-durable-control-state-and-cluster-restart.md` — restart recovery
+  acceptance contract.
+- `cmd/grovlet/main.go` — control-plane initialization and component startup
+  ordering.
+- `cmd/grovlet/main_test.go` — three-process stop/restart/reconstruction E2E.
+- `grovetest/grovetest.go` — persistent per-node runtime directory and restart
+  behavior reused by the E2E.
+- `internal/systemnats/desired.go` — watcher-derived persisted intent used as
+  the first-boot/restored-state discriminator.
 
 ### Decisions Made
 
-- Store one record per application under `GROVE_DESIRED`. The Task 019 record
-  contains application ID, one current version label, and unique service/node
-  assignments. Task 025 will extend this to distinct concurrent versions.
-- Use a System NATS request/reply endpoint for writes; only JetStream/KV is
-  authoritative. Every Grovlet maintains an independent watcher-derived view.
-- Reconcile only components assigned to the local node and only when a desired
-  deployment exists. Empty desired state does not stop Task 018 boot placements.
-- Expose worker generation in observed component status and add an explicit
-  kill control command so the E2E proves a new OS worker is started, rather
-  than treating a graceful stop as a crash.
-- Keep placement mutation, node-failure recovery, durable restart, artifacts,
-  and rollout policy outside this increment unless required by the existing
-  Task 018 behavior.
+- Treat a ready non-empty desired view as restored deployment intent only when
+  reconciliation is enabled. First boot keeps the explicit placement flags.
+- Initialize desired state before placement and workers. Restored nodes observe
+  persisted desired state, open placement in observation-only mode, and start
+  no boot workers; the existing reconciler starts assigned components.
+- Keep membership self-registration on every process start. JetStream remains
+  the only durable store; no Grove snapshot, manifest, or side database is
+  introduced.
+- Restart all three Grovlets with the same node runtime directories and fixed
+  route ports, then reconnect test transports to their new ephemeral client
+  listener URLs.
 
 ## Sub-Tasks
 
-- [x] 1. Add replicated desired deployment state.
-  **Context:** Define and validate the minimum model, create the three-replica
-  file-backed KV bucket, maintain sorted watcher views, and expose read/write
-  request endpoints.
-  **Outcome:** Added validated, sorted application/version/component records,
-  three-replica KV observation, and System NATS read/write endpoints.
+- [ ] 1. Gate startup on restored desired state.
+  **Context:** Start the desired watcher before placement, condition-wait for
+  its initial snapshot, and select first-boot or restoration behavior without
+  fixed sleeps.
+  **Acceptance:** Existing first-boot tests remain green and focused startup
+  tests prove empty versus non-empty desired views select the right inputs.
 
-- [x] 2. Represent and inject worker loss.
-  **Context:** Add observed worker generation and an explicit component kill
-  command without changing normal start/stop semantics.
-  **Outcome:** Component views now report worker generation, and the control
-  endpoint can abruptly kill a worker while retaining failed observed state.
+- [ ] 2. Reconstruct the deployment from persisted control state.
+  **Context:** On restored intent, observe persisted placement without writing
+  boot assignments and let desired reconciliation start only assigned workers.
+  **Acceptance:** Unit/integration tests preserve separation between persisted
+  control records and fresh observed component generations.
 
-- [x] 3. Reconcile desired local components.
-  **Context:** Compute deterministic start decisions from desired assignments
-  and observed component states, then run a bounded local reconciliation loop
-  on desired-state-enabled Grovlets.
-  **Outcome:** Added deterministic local start decisions and a bounded loop
-  that creates a new worker generation for stopped or failed assigned services.
+- [ ] 3. Add the complete cluster restart E2E.
+  **Context:** Deploy Grove Shop, write and observe desired state, verify an
+  order, gracefully stop all nodes, restart the same Node objects, reconnect to
+  new System NATS URLs, wait for desired/placement/component reconstruction,
+  and verify another order.
+  **Acceptance:** The scenario uses real processes, reused runtime directories,
+  bounded condition waits, and diagnostics on every failure.
 
-- [x] 4. Prove convergence and close Task 019.
-  **Context:** Write Grove Shop desired state through the control API, observe
-  it from all three Grovlets, kill Inventory's worker, wait for a later healthy
-  generation, and verify Orders still completes. Repeat and run formatting,
-  vet, race, and full suites before marking Task 019 DONE.
-  **Outcome:** Replicated desired-state integration coverage and repeated real
-  process reconciliation pass; vet, the full race suite, and uncached full
-  suite pass. Task 019 is DONE.
+- [ ] 4. Verify and close Task 020.
+  **Context:** Repeat the restart scenario and run formatting, diff checks,
+  vet, the complete race suite, and uncached `go test ./...` before marking the
+  task DONE.
+  **Acceptance:** All checks pass without weakening historical tests.
 
 ## Log
 
-- 2026-09-09: Tasks 001 through 018 completed with focused, repeated, race,
-  vet, and full-suite checks passing.
-- 2026-09-09: Selected a single-current-version desired record and local worker
-  reconciliation, preserving Tasks 020 and 025 boundaries.
-- 2026-09-09: Completed Task 019 with authoritative desired state, observable
-  worker generations, and automated reconstruction after worker loss.
+- 2026-09-10: Tasks 001 through 019 are complete on `origin/main`.
+- 2026-09-10: Selected desired-view-first startup so persisted KV, rather than
+  boot flags or a new side store, drives reconstruction.
