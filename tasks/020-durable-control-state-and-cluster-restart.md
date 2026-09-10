@@ -1,6 +1,6 @@
 # Task 020 — JetStream-backed control state and cluster restart
 
-Status: TODO
+Status: DONE
 Depends on: 019
 
 ## Goal

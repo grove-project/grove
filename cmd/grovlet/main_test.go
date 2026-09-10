@@ -205,6 +205,40 @@ func TestParseConfig(t *testing.T) {
 	}
 }
 
+func TestGroveShopStartupStateUsesRestoredIntent(t *testing.T) {
+	cfg := config{
+		systemNATSRecovery: true,
+		systemNATSSubject:  "_GROVE.system.restart.node-1",
+		groveShopOrders:    true,
+	}
+	placements, services := groveShopStartupState(cfg, systemnats.DesiredView{Ready: true})
+	if len(placements) != 1 || !slices.Equal(services, []grove.ServiceID{groveshop.ServiceOrders}) {
+		t.Fatalf("first-boot state = %#v, %v; want Orders placement and worker", placements, services)
+	}
+	restored := systemnats.DesiredView{Ready: true, Deployments: []systemnats.DesiredDeployment{{
+		ApplicationID: "grove-shop",
+		Version:       "current",
+		Components:    []systemnats.DesiredComponent{{ServiceID: groveshop.ServiceOrders, NodeID: "node-1"}},
+	}}}
+	placements, services = groveShopStartupState(cfg, restored)
+	if len(placements) != 0 || len(services) != 0 {
+		t.Errorf("restored state = %#v, %v; want observation-only placement and no boot workers", placements, services)
+	}
+}
+
+func TestSystemNATSStateExists(t *testing.T) {
+	runtimeDir := t.TempDir()
+	if systemNATSStateExists(runtimeDir) {
+		t.Fatal("new runtime directory reports persisted System NATS state")
+	}
+	if err := os.Mkdir(filepath.Join(runtimeDir, "system-nats"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !systemNATSStateExists(runtimeDir) {
+		t.Fatal("existing System NATS directory does not report persisted state")
+	}
+}
+
 func TestPrepareRuntimeDir(t *testing.T) {
 	runtimeDir := filepath.Join(t.TempDir(), "runtime")
 	if err := prepareRuntimeDir(runtimeDir); err != nil {
@@ -536,6 +570,18 @@ func clusterLogs(nodes []*grovetest.Node) string {
 		}
 	}
 	return logs.String()
+}
+
+func stopGrovlets(ctx context.Context, nodes []*grovetest.Node) error {
+	errorsByNode := make(chan error, len(nodes))
+	for _, node := range nodes {
+		go func() { errorsByNode <- node.Stop(ctx) }()
+	}
+	var stopErr error
+	for range nodes {
+		stopErr = errors.Join(stopErr, <-errorsByNode)
+	}
+	return stopErr
 }
 
 // Every Grovlet reports the same logical membership after its local watcher
@@ -1080,6 +1126,19 @@ func TestGrovletNodeFailureIdentifiesAffectedPlacement(t *testing.T) {
 	if _, err := waitForGrovletPlacement(ctx, cluster, wantPlacement); err != nil {
 		t.Fatalf("%v\n%s", err, clusterLogs(cluster.nodes))
 	}
+	if _, err := waitForGrovletHealth(ctx, cluster, []int{0, 1, 2}, func(view systemnats.ClusterView) bool {
+		if !view.Ready || len(view.Nodes) != 3 {
+			return false
+		}
+		for _, node := range view.Nodes {
+			if node.Health != systemnats.HealthHealthy || node.LastSeen == "" {
+				return false
+			}
+		}
+		return true
+	}); err != nil {
+		t.Fatalf("wait for initially healthy cluster: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
 	client, err := cluster.transports[2].RoutedClient(wantPlacement[0].InvocationSubject)
 	if err != nil {
 		t.Fatal(err)
@@ -1277,6 +1336,115 @@ func TestGrovletDesiredStateRestartsKilledComponent(t *testing.T) {
 	}
 }
 
+// A complete cluster restart reuses only the Grovlets' persisted System NATS
+// state; desired reconciliation creates fresh workers from recovered intent.
+func TestGrovletClusterRestartReconstructsDesiredDeployment(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	const (
+		ordersSubject    = "_GROVE.system.restart.node-1"
+		inventorySubject = "_GROVE.system.restart.node-2"
+	)
+	cluster := startMembershipGrovlets(
+		t, ctx,
+		[]string{"--system-nats-subject", ordersSubject, "--grove-shop-orders", "--system-nats-recovery"},
+		[]string{"--system-nats-subject", inventorySubject, "--grove-shop-inventory", "--system-nats-recovery"},
+		[]string{"--system-nats-subject", "_GROVE.system.restart.node-3", "--system-nats-recovery"},
+	)
+	runtimeDirs := make([]string, len(cluster.nodes))
+	for i, node := range cluster.nodes {
+		runtimeDirs[i] = node.TempDir()
+		if _, err := os.Stat(filepath.Join(runtimeDirs[i], "system-nats")); err != nil {
+			t.Fatalf("%s System NATS state: %v", cluster.nodeIDs[i], err)
+		}
+	}
+	placement := []systemnats.PlacementRecord{
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders)},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory)},
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, placement); err != nil {
+		t.Fatalf("wait for initial placement: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	desired := systemnats.DesiredDeployment{
+		ApplicationID: "grove-shop",
+		Version:       "current",
+		Components: []systemnats.DesiredComponent{
+			{ServiceID: groveshop.ServiceOrders, NodeID: "node-1"},
+			{ServiceID: groveshop.ServiceInventory, NodeID: "node-2"},
+		},
+	}
+	if err := cluster.transports[2].PutDesired(ctx, "node-1", desired); err != nil {
+		t.Fatalf("write desired deployment: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletDesired(ctx, cluster, []systemnats.DesiredDeployment{desired}); err != nil {
+		t.Fatalf("wait for initial desired state: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	callOrder := func(orderID string) {
+		t.Helper()
+		client, err := cluster.transports[2].RoutedClient(placement[0].InvocationSubject)
+		if err != nil {
+			t.Fatal(err)
+		}
+		created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](ctx, client, groveshop.ServiceOrders, groveshop.MethodCreateOrder, groveshop.CreateOrderRequest{
+			OrderID: orderID, SKU: "coffee", Quantity: 1, AmountCents: 900, ShippingAddress: "20 Grove Lane",
+		})
+		if err != nil || created.Status != groveshop.OrderCompleted {
+			t.Fatalf("order %q = %#v, %v\n%s", orderID, created, err, clusterLogs(cluster.nodes))
+		}
+	}
+	callOrder("before-cluster-restart")
+
+	if err := stopGrovlets(ctx, cluster.nodes); err != nil {
+		t.Fatalf("stop cluster: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	for _, transport := range cluster.transports {
+		transport.Close()
+	}
+	for i, node := range cluster.nodes {
+		if node.TempDir() != runtimeDirs[i] {
+			t.Fatalf("%s runtime directory = %q; want %q", cluster.nodeIDs[i], node.TempDir(), runtimeDirs[i])
+		}
+		if err := node.Restart(); err != nil {
+			t.Fatalf("restart %s: %v\n%s", cluster.nodeIDs[i], err, clusterLogs(cluster.nodes))
+		}
+	}
+	for i, node := range cluster.nodes {
+		if err := node.WaitReady(ctx); err != nil {
+			t.Fatalf("wait for restarted %s: %v\n%s", cluster.nodeIDs[i], err, clusterLogs(cluster.nodes))
+		}
+		ready := readyEventFromLogs(t, node.Logs())
+		transport, err := systemnats.Connect(ctx, ready.SystemNATSURL)
+		if err != nil {
+			t.Fatalf("reconnect to %s: %v\n%s", cluster.nodeIDs[i], err, clusterLogs(cluster.nodes))
+		}
+		cluster.transports[i] = transport
+		t.Cleanup(transport.Close)
+	}
+	members := make([]systemnats.MembershipRecord, len(cluster.nodeIDs))
+	for i := range cluster.nodeIDs {
+		members[i] = systemnats.MembershipRecord{NodeID: cluster.nodeIDs[i], AdvertisedEndpoint: cluster.endpoints[i]}
+	}
+	if _, err := waitForGrovletMembership(ctx, cluster.transports, cluster.nodeIDs, members); err != nil {
+		t.Fatalf("wait for restored membership: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletDesired(ctx, cluster, []systemnats.DesiredDeployment{desired}); err != nil {
+		t.Fatalf("wait for restored desired state: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, placement); err != nil {
+		t.Fatalf("wait for restored placement: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletComponentState(ctx, cluster.transports[0], "node-1", groveshop.ServiceOrders, systemnats.ComponentHealthy); err != nil {
+		t.Fatalf("wait for reconstructed Orders: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletComponentState(ctx, cluster.transports[1], "node-2", groveshop.ServiceInventory, systemnats.ComponentHealthy); err != nil {
+		t.Fatalf("wait for reconstructed Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	callOrder("after-cluster-restart")
+	if err := stopGrovlets(ctx, cluster.nodes); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func waitForGrovletComponentGeneration(
 	ctx context.Context,
 	transport *systemnats.Transport,
@@ -1422,6 +1590,7 @@ func TestGrovletCrossNodeServiceInvocation(t *testing.T) {
 func readyEventFromLogs(t *testing.T, logs string) lifecycleEvent {
 	t.Helper()
 	decoder := json.NewDecoder(strings.NewReader(logs))
+	var ready lifecycleEvent
 	for {
 		var event lifecycleEvent
 		if err := decoder.Decode(&event); err != nil {
@@ -1431,8 +1600,11 @@ func readyEventFromLogs(t *testing.T, logs string) lifecycleEvent {
 			t.Fatal(err)
 		}
 		if event.Event == "ready" {
-			return event
+			ready = event
 		}
+	}
+	if ready.Event == "ready" {
+		return ready
 	}
 	t.Fatalf("Grovlet logs do not contain a ready event: %q", logs)
 	return lifecycleEvent{}

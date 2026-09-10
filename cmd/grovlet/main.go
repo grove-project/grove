@@ -242,6 +242,7 @@ type systemNATSRuntime struct {
 }
 
 func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error) {
+	restoreControlState := cfg.systemNATSRecovery && systemNATSStateExists(cfg.runtimeDir)
 	runtime := &systemNATSRuntime{}
 	url := cfg.systemNATSURL
 	if cfg.systemNATSListen != "" {
@@ -304,7 +305,24 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 		}
 		runtime.startMembership(ctx, membership)
 
-		placement, err = systemnats.NewPlacement(groveShopPlacements(cfg))
+		desired := systemnats.NewDesired()
+		placementRecords := groveShopPlacements(cfg)
+		initialServiceIDs := groveShopPlacedServiceIDs(cfg)
+		if restoreControlState {
+			if err := transport.ServeDesired(ctx, cfg.nodeID, desired); err != nil {
+				runtime.stop()
+				return nil, err
+			}
+			runtime.startDesired(ctx, desired)
+			desiredView, err := waitForDesiredState(ctx, desired)
+			if err != nil {
+				runtime.stop()
+				return nil, err
+			}
+			placementRecords, initialServiceIDs = groveShopStartupState(cfg, desiredView)
+		}
+
+		placement, err = systemnats.NewPlacement(placementRecords)
 		if err != nil {
 			runtime.stop()
 			return nil, err
@@ -314,13 +332,13 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 			return nil, err
 		}
 		runtime.startPlacement(ctx, placement)
-
-		desired := systemnats.NewDesired()
-		if err := transport.ServeDesired(ctx, cfg.nodeID, desired); err != nil {
-			runtime.stop()
-			return nil, err
+		if !restoreControlState {
+			if err := transport.ServeDesired(ctx, cfg.nodeID, desired); err != nil {
+				runtime.stop()
+				return nil, err
+			}
+			runtime.startDesired(ctx, desired)
 		}
-		runtime.startDesired(ctx, desired)
 
 		health, err := systemnats.NewHealth(cfg.nodeID, membership, systemnats.HealthConfig{})
 		if err != nil {
@@ -345,7 +363,7 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 			runtime.stop()
 			return nil, err
 		}
-		if err := runtime.components.start(ctx, groveShopPlacedServiceIDs(cfg)); err != nil {
+		if err := runtime.components.start(ctx, initialServiceIDs); err != nil {
 			runtime.stop()
 			return nil, err
 		}
@@ -402,6 +420,11 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 		}
 	}
 	return runtime, nil
+}
+
+func systemNATSStateExists(runtimeDir string) bool {
+	_, err := os.Stat(filepath.Join(runtimeDir, "system-nats"))
+	return err == nil
 }
 
 func groveShopPlacements(cfg config) []systemnats.PlacementRecord {
@@ -470,6 +493,29 @@ func groveShopPlacedServiceIDs(cfg config) []grove.ServiceID {
 		serviceIDs = append(serviceIDs, groveshop.ServiceInventory)
 	}
 	return serviceIDs
+}
+
+func groveShopStartupState(cfg config, desired systemnats.DesiredView) ([]systemnats.PlacementRecord, []grove.ServiceID) {
+	if cfg.systemNATSRecovery && desired.Ready && len(desired.Deployments) != 0 {
+		return nil, nil
+	}
+	return groveShopPlacements(cfg), groveShopPlacedServiceIDs(cfg)
+}
+
+func waitForDesiredState(ctx context.Context, desired *systemnats.Desired) (systemnats.DesiredView, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		view := desired.Snapshot()
+		if view.Ready {
+			return view, nil
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return systemnats.DesiredView{}, fmt.Errorf("wait for desired deployment state: %w", ctx.Err())
+		}
+	}
 }
 
 func parseListenAddress(address string) (string, int, error) {
