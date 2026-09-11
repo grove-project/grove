@@ -26,6 +26,7 @@ const (
 	placementKeyPrefix   = "services."
 	placementSubjectRoot = "_GROVE.system.placement."
 	placementRetryDelay  = 50 * time.Millisecond
+	placementRefreshInterval = 250 * time.Millisecond
 )
 
 var (
@@ -165,6 +166,8 @@ func (p *Placement) watch(ctx context.Context, transport *Transport) error {
 		return fmt.Errorf("watch placement bucket: %w", err)
 	}
 	defer watcher.Stop()
+	refresh := time.NewTicker(placementRefreshInterval)
+	defer refresh.Stop()
 
 	records := make(map[grove.ServiceID]PlacementRecord)
 	initialized := false
@@ -195,10 +198,48 @@ func (p *Placement) watch(ctx context.Context, transport *Transport) error {
 			if initialized {
 				p.setReady(records)
 			}
+		case <-refresh.C:
+			if !initialized {
+				continue
+			}
+			refreshCtx, cancel := operationContext(ctx)
+			refreshed, err := refreshPlacementRecords(refreshCtx, kv, records)
+			cancel()
+			if err != nil {
+				return err
+			}
+			records = refreshed
+			p.setReady(records)
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
+}
+
+// The refresh repairs a known-key view when an ordered KV consumer remains
+// open across stream-leader failover without delivering the replacement.
+func refreshPlacementRecords(
+	ctx context.Context,
+	kv jetstream.KeyValue,
+	records map[grove.ServiceID]PlacementRecord,
+) (map[grove.ServiceID]PlacementRecord, error) {
+	refreshed := make(map[grove.ServiceID]PlacementRecord, len(records))
+	for serviceID := range records {
+		key := PlacementKey(serviceID)
+		entry, err := kv.Get(ctx, key)
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("refresh placement record %q: %w", key, err)
+		}
+		record, err := decodePlacementRecord(key, entry.Value())
+		if err != nil {
+			return nil, err
+		}
+		refreshed[serviceID] = record
+	}
+	return refreshed, nil
 }
 
 func serviceIDFromPlacementKey(key string) (grove.ServiceID, error) {
