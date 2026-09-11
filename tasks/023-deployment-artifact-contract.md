@@ -1,6 +1,6 @@
 # Task 023 — Deployment artifact contract
 
-Status: TODO
+Status: DONE
 Depends on: 019
 
 ## Goal
