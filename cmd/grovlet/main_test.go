@@ -1173,10 +1173,8 @@ func TestGrovletNodeFailureIdentifiesAffectedPlacement(t *testing.T) {
 	if !errors.As(err, &responseErr) || responseErr.Code != grove.ErrorTransport {
 		t.Errorf("order after hosting-node loss error = %v; want transport ResponseError", err)
 	}
-	for _, survivor := range []int{2, 0} {
-		if err := cluster.nodes[survivor].Stop(ctx); err != nil {
-			t.Fatal(err)
-		}
+	if err := stopGrovlets(ctx, []*grovetest.Node{cluster.nodes[0], cluster.nodes[2]}); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1256,10 +1254,8 @@ func TestGrovletRecoversServiceAfterHostingNodeFailure(t *testing.T) {
 	if created.Status != groveshop.OrderCompleted || created.Reservation.ID != "reservation-after-recovery" {
 		t.Errorf("order after recovery = %#v; want completed with recovered reservation", created)
 	}
-	for _, survivor := range []int{0, 2} {
-		if err := cluster.nodes[survivor].Stop(ctx); err != nil {
-			t.Fatal(err)
-		}
+	if err := stopGrovlets(ctx, []*grovetest.Node{cluster.nodes[0], cluster.nodes[2]}); err != nil {
+		t.Fatal(err)
 	}
 }
 
