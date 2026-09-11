@@ -64,9 +64,13 @@ NATS using authoritative placement.
   through Orders to the restarted Inventory worker and returns a completed
   order with the expected reservation.
 
-- [ ] 4. Verify and close Task 022.
+- [x] 4. Verify and close Task 022.
   **Context:** Run formatting, diff checks, focused repeated E2E runs, vet, the
   full uncached suite, and the full race suite before marking the task DONE.
+  **Outcome:** Formatting and diff checks are clean. The focused E2E passed
+  three consecutive runs and a race-enabled run; `go vet ./...`, `go test
+  -count=1 ./...`, and `go test -race -count=1 ./...` pass with every earlier
+  test.
 
 ## Log
 
@@ -78,3 +82,6 @@ NATS using authoritative placement.
 - 2026-09-11: Expanded the existing three-Grovlet CLI E2E into the complete
   operator lifecycle. Three consecutive focused runs completed in
   10.69–15.41 seconds; the focused race run completed in 15.79 seconds.
+- 2026-09-11: Completed Task 022 after the full uncached suite passed with
+  `cmd/grovlet` in 168.364 seconds and the full race suite passed with
+  `cmd/grovlet` in 179.118 seconds.

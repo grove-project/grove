@@ -1,6 +1,6 @@
 # Task 022 — CLI-driven local cluster E2E
 
-Status: TODO
+Status: DONE
 Depends on: 021
 
 ## Goal
