@@ -1,6 +1,6 @@
 # Task 021 — Grove CLI lifecycle
 
-Status: TODO
+Status: DONE
 Depends on: 013, 016
 
 ## Goal
