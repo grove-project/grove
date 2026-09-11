@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"strconv"
@@ -21,6 +23,7 @@ import (
 const (
 	workerOrders    = "orders"
 	workerInventory = "inventory"
+	workerWeb       = "web"
 )
 
 type workerConfig struct {
@@ -29,6 +32,7 @@ type workerConfig struct {
 	subject         string
 	placementNodeID string
 	parentFD        int
+	webListen       string
 }
 
 type workerProcess struct {
@@ -54,15 +58,16 @@ func startWorkerProcess(ctx context.Context, systemNATSURL, placementNodeID stri
 	if err != nil {
 		return nil, fmt.Errorf("create worker parent pipe: %w", err)
 	}
-	cmd := exec.Command(
-		executable,
+	args := []string{
 		"worker",
 		"--component", spec.kind,
 		"--system-nats-url", systemNATSURL,
 		"--subject", spec.subject,
 		"--placement-node-id", placementNodeID,
 		"--parent-fd", "3",
-	)
+	}
+	args = append(args, spec.workerArgs...)
+	cmd := exec.Command(executable, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		parentRead.Close()
@@ -186,6 +191,10 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	}
 	defer transport.Close()
 	registry := &grove.Registry{}
+	var (
+		webServer *http.Server
+		webDone   chan error
+	)
 	switch cfg.component {
 	case workerOrders:
 		client, err := transport.ObservedPlacementClient(cfg.placementNodeID)
@@ -200,6 +209,18 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		if err := groveshop.RegisterInventory(registry, &groveshop.Inventory{}); err != nil {
 			return fmt.Errorf("register Grove Shop Inventory: %w", err)
 		}
+	case workerWeb:
+		listener, err := net.Listen("tcp", cfg.webListen)
+		if err != nil {
+			return fmt.Errorf("listen for Grove Shop Web: %w", err)
+		}
+		webServer = &http.Server{
+			Handler:           groveshop.WebHandler(),
+			ReadHeaderTimeout: 5 * time.Second,
+		}
+		defer webServer.Close()
+		webDone = make(chan error, 1)
+		go func() { webDone <- webServer.Serve(listener) }()
 	default:
 		return fmt.Errorf("unknown worker component %q", cfg.component)
 	}
@@ -214,7 +235,22 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if err := encoder.Encode(lifecycleEvent{Event: "ready"}); err != nil {
 		return fmt.Errorf("encode worker ready event: %w", err)
 	}
-	<-workerCtx.Done()
+	select {
+	case <-workerCtx.Done():
+	case err := <-webDone:
+		return fmt.Errorf("serve Grove Shop Web: %w", err)
+	}
+	if webServer != nil {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+		err := webServer.Shutdown(shutdownCtx)
+		shutdownCancel()
+		if err != nil {
+			return fmt.Errorf("stop Grove Shop Web: %w", err)
+		}
+		if err := <-webDone; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("serve Grove Shop Web: %w", err)
+		}
+	}
 	if err := encoder.Encode(lifecycleEvent{Event: "stopped"}); err != nil {
 		return fmt.Errorf("encode worker stopped event: %w", err)
 	}
@@ -230,11 +266,15 @@ func parseWorkerConfig(args []string, stderr io.Writer) (workerConfig, error) {
 	flags.StringVar(&cfg.subject, "subject", "", "component invocation subject")
 	flags.StringVar(&cfg.placementNodeID, "placement-node-id", "", "parent placement observer node ID")
 	flags.IntVar(&cfg.parentFD, "parent-fd", 0, "parent-lifetime file descriptor")
+	flags.StringVar(&cfg.webListen, "web-listen", "", "Grove Shop Web HTTP listen address")
 	if err := flags.Parse(args); err != nil {
 		return workerConfig{}, fmt.Errorf("parse worker flags: %w", err)
 	}
 	if flags.NArg() != 0 || cfg.component == "" || cfg.systemNATSURL == "" || cfg.subject == "" || cfg.placementNodeID == "" || cfg.parentFD < 3 {
 		return workerConfig{}, errors.New("worker configuration is incomplete")
+	}
+	if (cfg.component == workerWeb) != (cfg.webListen != "") {
+		return workerConfig{}, errors.New("Web worker listen configuration is invalid")
 	}
 	return cfg, nil
 }

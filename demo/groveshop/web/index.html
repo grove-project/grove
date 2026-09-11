@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en" data-grove-artifact="grove-shop-ui-v1">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Grove Shop</title>
+  <style>
+    :root { color-scheme: light; font-family: ui-sans-serif, system-ui, sans-serif; }
+    body { margin: 0; background: #f4f7f2; color: #183126; }
+    main { display: grid; grid-template-columns: 3fr 2fr; gap: 1rem; max-width: 72rem; margin: 0 auto; padding: 2rem; }
+    section { min-height: 16rem; padding: 1.5rem; border: 1px solid #cad8cf; border-radius: 0.75rem; background: white; }
+    h1, h2 { margin-top: 0; }
+    .progress { color: #38664d; font-weight: 600; }
+    @media (max-width: 48rem) { main { grid-template-columns: 1fr; padding: 1rem; } }
+  </style>
+</head>
+<body>
+  <main>
+    <section aria-labelledby="orders-heading">
+      <h1 id="orders-heading">Grove Shop Orders</h1>
+      <p>Create and inspect orders through the Grove-managed application.</p>
+      <p class="progress">Created → Reserved → Paid → Shipping → Completed</p>
+    </section>
+    <section aria-labelledby="cluster-heading">
+      <h2 id="cluster-heading">Grove Cluster Status</h2>
+      <p>Node, placement, artifact, and rollout details will appear here as the control read model grows.</p>
+    </section>
+  </main>
+</body>
+</html>

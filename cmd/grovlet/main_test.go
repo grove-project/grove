@@ -79,6 +79,8 @@ func TestParseConfig(t *testing.T) {
 		"--system-nats-recovery",
 		"--system-nats-subject", "_GROVE.system.invoke.node-a",
 		"--grove-shop-orders",
+		"--grove-shop-web",
+		"--grove-shop-web-listen", "127.0.0.1:8080",
 	}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
@@ -97,6 +99,9 @@ func TestParseConfig(t *testing.T) {
 	}
 	if !clusterCfg.groveShopOrders {
 		t.Error("Grove Shop Orders placement is disabled; want enabled")
+	}
+	if !clusterCfg.groveShopWeb || clusterCfg.groveShopWebListen != "127.0.0.1:8080" {
+		t.Errorf("Grove Shop Web config = enabled %t, listen %q", clusterCfg.groveShopWeb, clusterCfg.groveShopWebListen)
 	}
 
 	if _, err := parseConfig(nil, io.Discard); !errors.Is(err, errRuntimeDirRequired) {
@@ -136,6 +141,25 @@ func TestParseConfig(t *testing.T) {
 		"--grove-shop-orders-inventory-subject", "_GROVE.system.invoke.node-b",
 	}, io.Discard); !errors.Is(err, errGroveShopOrdersConflict) {
 		t.Errorf("Orders destination conflict error = %v; want %v", err, errGroveShopOrdersConflict)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+		"--advertise-endpoint", "nats-subject://system/node-a",
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-route-listen", "127.0.0.1:0",
+		"--system-nats-seed", "nats-route://127.0.0.1:6222",
+		"--system-nats-membership",
+		"--system-nats-subject", "_GROVE.system.invoke.node-a",
+		"--grove-shop-web",
+	}, io.Discard); !errors.Is(err, errGroveShopWebListenRequired) {
+		t.Errorf("Web without listen error = %v; want %v", err, errGroveShopWebListenRequired)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--grove-shop-web-listen", "127.0.0.1:8080",
+	}, io.Discard); !errors.Is(err, errGroveShopWebListenRequired) {
+		t.Errorf("Web listen without placement error = %v; want %v", err, errGroveShopWebListenRequired)
 	}
 	if _, err := parseConfig([]string{
 		"--runtime-dir", runtimeDir,

@@ -32,8 +32,9 @@ var (
 	errSystemNATSMembershipCluster   = errors.New("system NATS membership requires a route listener and seed")
 	errSystemNATSRecoveryCluster     = errors.New("system NATS recovery requires membership")
 	errGroveShopEndpoint             = errors.New("reference application service placement requires a System NATS endpoint")
-	errGroveShopPlacementCluster     = errors.New("orders placement requires System NATS membership")
+	errGroveShopPlacementCluster     = errors.New("placed Grove Shop components require System NATS membership")
 	errGroveShopOrdersConflict       = errors.New("orders placement and explicit Inventory destination are mutually exclusive")
+	errGroveShopWebListenRequired    = errors.New("Grove Shop Web requires an HTTP listen address")
 	errNodeIdentityPair              = errors.New("node ID and advertised endpoint must be configured together")
 	errNodeIDInvalid                 = errors.New("node ID is invalid")
 	errAdvertiseInvalid              = errors.New("advertised endpoint is invalid")
@@ -51,6 +52,8 @@ type config struct {
 	groveShopOrders           bool
 	groveShopInventory        bool
 	groveShopInventorySubject string
+	groveShopWeb              bool
+	groveShopWebListen        string
 	nodeID                    string
 	advertisedEndpoint        string
 }
@@ -93,6 +96,9 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	if _, err := inspectEmbeddedGroveShopArtifact(); err != nil {
+		return fmt.Errorf("verify embedded Grove Shop artifact: %w", err)
+	}
 	cfg, err := parseConfig(args, stderr)
 	if err != nil {
 		return err
@@ -141,6 +147,8 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.BoolVar(&cfg.groveShopOrders, "grove-shop-orders", false, "place Grove Shop Orders on this Grovlet")
 	flags.BoolVar(&cfg.groveShopInventory, "grove-shop-inventory", false, "host Grove Shop Inventory on this Grovlet")
 	flags.StringVar(&cfg.groveShopInventorySubject, "grove-shop-orders-inventory-subject", "", "explicit Inventory endpoint for Grove Shop Orders")
+	flags.BoolVar(&cfg.groveShopWeb, "grove-shop-web", false, "place Grove Shop Web on this Grovlet")
+	flags.StringVar(&cfg.groveShopWebListen, "grove-shop-web-listen", "", "HTTP listen address for Grove Shop Web")
 	flags.StringVar(&cfg.nodeID, "node-id", "", "stable process-lifetime Grove node ID")
 	flags.StringVar(&cfg.advertisedEndpoint, "advertise-endpoint", "", "advertised Grove transport endpoint URL")
 	if err := flags.Parse(args); err != nil {
@@ -179,14 +187,20 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	if cfg.systemNATSSubject != "" && cfg.systemNATSListen == "" && cfg.systemNATSURL == "" {
 		return config{}, errSystemNATSRequired
 	}
-	if (cfg.groveShopOrders || cfg.groveShopInventory || cfg.groveShopInventorySubject != "" || cfg.systemNATSRecovery) && cfg.systemNATSSubject == "" {
+	if (cfg.groveShopOrders || cfg.groveShopInventory || cfg.groveShopInventorySubject != "" || cfg.groveShopWeb || cfg.systemNATSRecovery) && cfg.systemNATSSubject == "" {
 		return config{}, errGroveShopEndpoint
 	}
-	if cfg.groveShopOrders && !cfg.systemNATSMembership {
+	if (cfg.groveShopOrders || cfg.groveShopWeb) && !cfg.systemNATSMembership {
 		return config{}, errGroveShopPlacementCluster
 	}
 	if cfg.groveShopOrders && cfg.groveShopInventorySubject != "" {
 		return config{}, errGroveShopOrdersConflict
+	}
+	if cfg.groveShopWeb && cfg.groveShopWebListen == "" {
+		return config{}, errGroveShopWebListenRequired
+	}
+	if !cfg.groveShopWeb && cfg.groveShopWebListen != "" {
+		return config{}, errGroveShopWebListenRequired
 	}
 	if (cfg.nodeID == "") != (cfg.advertisedEndpoint == "") {
 		return config{}, errNodeIdentityPair
@@ -428,7 +442,7 @@ func systemNATSStateExists(runtimeDir string) bool {
 }
 
 func groveShopPlacements(cfg config) []systemnats.PlacementRecord {
-	placements := make([]systemnats.PlacementRecord, 0, 2)
+	placements := make([]systemnats.PlacementRecord, 0, 3)
 	if cfg.groveShopOrders {
 		placements = append(placements, systemnats.PlacementRecord{
 			ServiceID:         groveshop.ServiceOrders,
@@ -443,11 +457,18 @@ func groveShopPlacements(cfg config) []systemnats.PlacementRecord {
 			InvocationSubject: componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceInventory),
 		})
 	}
+	if cfg.groveShopWeb {
+		placements = append(placements, systemnats.PlacementRecord{
+			ServiceID:         groveshop.ServiceWeb,
+			NodeID:            cfg.nodeID,
+			InvocationSubject: componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceWeb),
+		})
+	}
 	return placements
 }
 
 func groveShopComponentSpecs(cfg config) []componentSpec {
-	components := make([]componentSpec, 0, 2)
+	components := make([]componentSpec, 0, 3)
 	if cfg.groveShopOrders {
 		components = append(components, componentSpec{
 			serviceID: groveshop.ServiceOrders,
@@ -462,6 +483,15 @@ func groveShopComponentSpecs(cfg config) []componentSpec {
 			name:      "Inventory",
 			kind:      workerInventory,
 			subject:   componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceInventory),
+		})
+	}
+	if cfg.groveShopWeb {
+		components = append(components, componentSpec{
+			serviceID:  groveshop.ServiceWeb,
+			name:       "Web",
+			kind:       workerWeb,
+			subject:    componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceWeb),
+			workerArgs: []string{"--web-listen", cfg.groveShopWebListen},
 		})
 	}
 	return components
@@ -485,12 +515,15 @@ func groveShopRecoveryComponentSpecs(cfg config) []componentSpec {
 }
 
 func groveShopPlacedServiceIDs(cfg config) []grove.ServiceID {
-	serviceIDs := make([]grove.ServiceID, 0, 2)
+	serviceIDs := make([]grove.ServiceID, 0, 3)
 	if cfg.groveShopOrders {
 		serviceIDs = append(serviceIDs, groveshop.ServiceOrders)
 	}
 	if cfg.groveShopInventory {
 		serviceIDs = append(serviceIDs, groveshop.ServiceInventory)
+	}
+	if cfg.groveShopWeb {
+		serviceIDs = append(serviceIDs, groveshop.ServiceWeb)
 	}
 	return serviceIDs
 }

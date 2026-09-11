@@ -16,6 +16,8 @@ const (
 	ServicePayment grove.ServiceID = 3
 	// ServiceShipping identifies the Grove Shop Shipping service.
 	ServiceShipping grove.ServiceID = 4
+	// ServiceWeb identifies the Grove Shop Web component.
+	ServiceWeb grove.ServiceID = 5
 )
 
 const (

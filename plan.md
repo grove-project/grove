@@ -52,21 +52,34 @@ identity.
 
 ## Sub-Tasks
 
-- [ ] 1. Define and inspect the immutable artifact envelope.
+- [x] 1. Define and inspect the immutable artifact envelope.
   **Context:** Add manifest/inspection types, strict validation, unique binary
   framing, a fixed blank config reservation, and SHA-256 identities. Cover
   valid, malformed, missing, and file-inspection paths with unit tests.
+  **Outcome:** `internal/artifact` validates a versioned JSON manifest and its
+  uniquely framed 4 KiB config reservation from executable bytes or a file.
+  Inspection reports exact metadata and complete-artifact SHA-256 digests and
+  detects blank versus populated reservation bytes. Unit tests cover malformed,
+  missing, short, blank, populated, and file-backed inputs.
 
-- [ ] 2. Embed and serve the basic Grove Shop UI.
+- [x] 2. Embed and serve the basic Grove Shop UI.
   **Context:** Add the basic single-page Orders/Cluster Status shell as embedded
   assets and run its HTTP handler from a Grove-managed Web worker with explicit
   placement and lifecycle metadata.
+  **Outcome:** The Grove Shop package embeds a responsive Orders and Cluster
+  Status shell. Service 5 declares Web, and the Grovlet starts/stops its HTTP
+  server as a normal managed worker using explicit placement and listen
+  configuration.
 
-- [ ] 3. Prove the built artifact end to end.
+- [x] 3. Prove the built artifact end to end.
   **Context:** Build one Grovlet artifact, inspect its manifest and digests,
   verify the UI fingerprint is in the executable, deploy that same path across
   three real Grovlets, request the Web root, and complete an Orders-to-Inventory
   call through placement.
+  **Outcome:** `TestGroveShopArtifactDeploys` inspects the built Grovlet,
+  verifies its exact embedded UI bytes, deploys the unchanged executable to
+  three processes, observes Web/Orders/Inventory placement, receives the UI
+  over HTTP, and completes a placement-routed order.
 
 - [ ] 4. Verify and close Task 023.
   **Context:** Run formatting, diff checks, focused repetitions, vet, the full
@@ -79,3 +92,5 @@ identity.
 - 2026-09-11: Reserved all semantic customer-config compilation, mutation,
   extraction, and runtime use for Task 024; Task 023 establishes only the fixed
   artifact reservation and inspection contract.
+- 2026-09-11: The artifact deployment E2E passed three consecutive runs in
+  10.63–15.33 seconds and a race-enabled run in 15.90 seconds.

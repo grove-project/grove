@@ -17,10 +17,11 @@ var (
 )
 
 type componentSpec struct {
-	serviceID grove.ServiceID
-	name      string
-	kind      string
-	subject   string
+	serviceID  grove.ServiceID
+	name       string
+	kind       string
+	subject    string
+	workerArgs []string
 }
 
 type componentProcess interface {
