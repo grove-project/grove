@@ -41,18 +41,28 @@ NATS using authoritative placement.
 
 ## Sub-Tasks
 
-- [ ] 1. Generalize real CLI invocation helpers.
+- [x] 1. Generalize real CLI invocation helpers.
   **Context:** Extract bounded helpers that execute `grove`, wait for exact
   converged output, and report command output plus Grovlet logs on failure.
+  **Outcome:** The E2E now shares bounded real-binary invocation and exact-output
+  convergence helpers. Read commands may retry while state converges; lifecycle
+  commands execute exactly once.
 
-- [ ] 2. Exercise the operator lifecycle.
+- [x] 2. Exercise the operator lifecycle.
   **Context:** Inspect healthy status, nodes, and component placement; stop
   Inventory through the real CLI; observe stopped placement and failed Orders
   behavior; restart Inventory; observe the incremented healthy generation.
+  **Outcome:** The real CLI reports all three healthy nodes and exact Orders and
+  Inventory placement, stops Inventory at generation 2, exposes the stopped
+  state, and restarts it healthy at generation 3. An Orders request fails while
+  Inventory is stopped.
 
-- [ ] 3. Verify the recovered reference application.
+- [x] 3. Verify the recovered reference application.
   **Context:** Connect through System NATS from the observer side and complete a
   deterministic Grove Shop order through Orders after Inventory restarts.
+  **Outcome:** An observer-side placement client routes a public `grove.Call`
+  through Orders to the restarted Inventory worker and returns a completed
+  order with the expected reservation.
 
 - [ ] 4. Verify and close Task 022.
   **Context:** Run formatting, diff checks, focused repeated E2E runs, vet, the
@@ -65,3 +75,6 @@ NATS using authoritative placement.
 - 2026-09-11: Confirmed Task 022 needs no new production command or control
   protocol; it closes the operator-lifecycle proof using the accepted CLI and
   runtime behavior.
+- 2026-09-11: Expanded the existing three-Grovlet CLI E2E into the complete
+  operator lifecycle. Three consecutive focused runs completed in
+  10.69–15.41 seconds; the focused race run completed in 15.79 seconds.

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/systemnats"
 )
@@ -189,41 +190,139 @@ func (c *fakeControlClient) RequestStopComponent(_ context.Context, nodeID strin
 	return c.components[nodeID], c.commandErr
 }
 
-// A real CLI process observes health and components through one Grovlet while
-// all control traffic crosses the same clustered transport used in production.
-func TestGroveStatusAgainstGrovletCluster(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+// A real CLI process observes and controls three Grovlets before the public
+// Grove call path proves the distributed application recovered.
+func TestGroveCLILifecycleAgainstGrovletCluster(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
 	nodes, systemNATSURL := startGrovlets(t, ctx)
 	defer stopGrovlets(t, nodes)
 
-	want := "Cluster     healthy\nNodes       3 / 3 healthy\nComponents  2 / 2 healthy\n"
+	wantStatus := "Cluster     healthy\nNodes       3 / 3 healthy\nComponents  2 / 2 healthy\n"
+	if err := waitForGroveOutput(ctx, systemNATSURL, "node-1", wantStatus, "status"); err != nil {
+		t.Fatalf("wait for Grove status: %v\n%s", err, grovletLogs(nodes))
+	}
+	wantNodes := "NODE    HEALTH   ENDPOINT\n" +
+		"node-1  healthy  nats-subject://system/node-1\n" +
+		"node-2  healthy  nats-subject://system/node-2\n" +
+		"node-3  healthy  nats-subject://system/node-3\n"
+	if err := waitForGroveOutput(ctx, systemNATSURL, "node-1", wantNodes, "nodes"); err != nil {
+		t.Fatalf("wait for Grove nodes: %v\n%s", err, grovletLogs(nodes))
+	}
+	wantComponents := "NODE    SERVICE  NAME       STATE    GENERATION  ERROR\n" +
+		"node-1  1        Orders     healthy  1           -\n" +
+		"node-2  2        Inventory  healthy  1           -\n"
+	if err := waitForGroveOutput(ctx, systemNATSURL, "node-1", wantComponents, "components"); err != nil {
+		t.Fatalf("wait for Grove components: %v\n%s", err, grovletLogs(nodes))
+	}
+
+	stopped, err := runGroveCLI(ctx, systemNATSURL, "node-2", "component", "stop", "--service-id", "2")
+	if err != nil {
+		t.Fatalf("stop Inventory through Grove CLI: %v; output=%q\n%s", err, stopped, grovletLogs(nodes))
+	}
+	wantStopped := "NODE    SERVICE  NAME       STATE    GENERATION  ERROR\n" +
+		"node-2  2        Inventory  stopped  2           -\n"
+	if stopped != wantStopped {
+		t.Errorf("stopped Inventory output = %q; want %q", stopped, wantStopped)
+	}
+	wantStoppedComponents := "NODE    SERVICE  NAME       STATE    GENERATION  ERROR\n" +
+		"node-1  1        Orders     healthy  1           -\n" +
+		"node-2  2        Inventory  stopped  2           -\n"
+	if err := waitForGroveOutput(ctx, systemNATSURL, "node-1", wantStoppedComponents, "components"); err != nil {
+		t.Fatalf("wait for stopped Inventory placement: %v\n%s", err, grovletLogs(nodes))
+	}
+
+	transport, err := systemnats.Connect(ctx, systemNATSURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transport.Close()
+	client, err := transport.ObservedPlacementClient("node-3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedCtx, failedCancel := context.WithTimeout(ctx, time.Second)
+	_, err = grove.Call[groveshop.CreateOrderRequest, groveshop.Order](
+		failedCtx,
+		client,
+		groveshop.ServiceOrders,
+		groveshop.MethodCreateOrder,
+		groveshop.CreateOrderRequest{
+			OrderID:         "order-inventory-stopped",
+			SKU:             "coffee-beans",
+			Quantity:        1,
+			AmountCents:     1200,
+			ShippingAddress: "21 Grove Lane",
+		},
+	)
+	failedCancel()
+	if err == nil {
+		t.Fatal("order succeeded while Inventory was stopped")
+	}
+
+	restarted, err := runGroveCLI(ctx, systemNATSURL, "node-2", "component", "start", "--service-id", "2")
+	if err != nil {
+		t.Fatalf("start Inventory through Grove CLI: %v; output=%q\n%s", err, restarted, grovletLogs(nodes))
+	}
+	wantRestarted := "NODE    SERVICE  NAME       STATE    GENERATION  ERROR\n" +
+		"node-2  2        Inventory  healthy  3           -\n"
+	if restarted != wantRestarted {
+		t.Errorf("restarted Inventory output = %q; want %q", restarted, wantRestarted)
+	}
+	if err := waitForGroveOutput(ctx, systemNATSURL, "node-3", wantStatus, "status"); err != nil {
+		t.Fatalf("wait for recovered Grove status: %v\n%s", err, grovletLogs(nodes))
+	}
+
+	created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](
+		ctx,
+		client,
+		groveshop.ServiceOrders,
+		groveshop.MethodCreateOrder,
+		groveshop.CreateOrderRequest{
+			OrderID:         "order-cli-restarted",
+			SKU:             "coffee-beans",
+			Quantity:        2,
+			AmountCents:     2400,
+			ShippingAddress: "22 Grove Lane",
+		},
+	)
+	if err != nil {
+		t.Fatalf("order after CLI restart: %v\n%s", err, grovletLogs(nodes))
+	}
+	if created.Status != groveshop.OrderCompleted {
+		t.Errorf("order after CLI restart status = %q; want %q", created.Status, groveshop.OrderCompleted)
+	}
+	if created.Reservation.ID != "reservation-order-cli-restarted" {
+		t.Errorf("order after CLI restart reservation = %q; want reservation-order-cli-restarted", created.Reservation.ID)
+	}
+}
+
+func waitForGroveOutput(ctx context.Context, systemNATSURL, nodeID, want string, args ...string) error {
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	var lastOutput string
 	var lastErr error
 	for {
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, time.Second)
-		cmd := exec.CommandContext(
-			attemptCtx,
-			grovePath,
-			"status",
-			"--system-nats-url", systemNATSURL,
-			"--node-id", "node-1",
-		)
-		output, err := cmd.CombinedOutput()
+		lastOutput, lastErr = runGroveCLI(attemptCtx, systemNATSURL, nodeID, args...)
 		attemptCancel()
-		lastOutput = string(output)
-		lastErr = err
-		if err == nil && lastOutput == want {
-			return
+		if lastErr == nil && lastOutput == want {
+			return nil
 		}
 		select {
 		case <-ticker.C:
 		case <-ctx.Done():
-			t.Fatalf("grove status did not converge: output=%q error=%v\n%s", lastOutput, lastErr, grovletLogs(nodes))
+			return fmt.Errorf("grove %s did not converge: output=%q error=%v: %w", strings.Join(args, " "), lastOutput, lastErr, ctx.Err())
 		}
 	}
+}
+
+func runGroveCLI(ctx context.Context, systemNATSURL, nodeID string, args ...string) (string, error) {
+	commandArgs := append([]string(nil), args...)
+	commandArgs = append(commandArgs, "--system-nats-url", systemNATSURL, "--node-id", nodeID)
+	command := exec.CommandContext(ctx, grovePath, commandArgs...)
+	output, err := command.CombinedOutput()
+	return string(output), err
 }
 
 func startGrovlets(t *testing.T, ctx context.Context) ([]*grovetest.Node, string) {
