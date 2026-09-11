@@ -1,101 +1,67 @@
-# Plan: Operate Grove through the CLI
+# Plan: Prove the CLI-driven local cluster lifecycle
 
 ## Goal
 
-Complete Task 021 by adding the smallest useful `grove` command that reports
-cluster status, lists nodes and components, and starts or stops a component
-through the existing System NATS control endpoints. Prove the real CLI binary
-can inspect a three-Grovlet cluster without implementing Task 022's complete
-operator lifecycle.
+Complete Task 022 by exercising the real `grove` binary against three real
+Grovlet processes: inspect cluster nodes and component placement, stop and
+restart Inventory through the CLI, and verify the distributed Grove Shop order
+flow recovers. Keep deployment and upgrade commands out of this increment.
 
 ## Context
 
-Tasks 001 through 020 are complete on `origin/main`. Grovlets already expose
-machine-readable membership/health and component lifecycle endpoints through
-`internal/systemnats.Transport`. The new command may consume those existing
-control APIs but must not introduce deployment packaging, upgrades, rollout
-state, a TUI, or a competing control protocol.
+Tasks 001 through 021 are complete on `origin/main`. Task 021 introduced the
+`status`, `nodes`, `components`, and `component start|stop` commands and a
+real-process status E2E. Existing Grovlet workers already run Orders and
+Inventory as separate OS processes and route application calls through System
+NATS using authoritative placement.
 
 ### Key Files
 
-- `tasks/021-grove-cli-lifecycle.md` — current CLI acceptance contract.
-- `cmd/grove/main.go` — new command entry point, parser, control calls, and
-  human-readable output.
-- `cmd/grove/main_test.go` — parser/output tests and real-binary cluster E2E.
-- `internal/systemnats/health.go` — node health read model consumed by status
-  and nodes commands.
-- `internal/systemnats/component.go` — component read and lifecycle operations
-  consumed by components and component start/stop commands.
-- `grovetest/grovetest.go` — real Grovlet process harness reused by the E2E.
+- `tasks/022-cli-driven-local-cluster-e2e.md` — current acceptance contract.
+- `cmd/grove/main_test.go` — real CLI and three-Grovlet E2E to extend.
+- `cmd/grove/main.go` — accepted CLI behavior exercised without redesign.
+- `cmd/grovlet/worker.go` — real Grove Shop worker processes used by the test.
+- `demo/groveshop/` — deterministic application contract used to verify
+  recovery.
 
 ### Decisions Made
 
-- Use explicit per-command connection flags: `--system-nats-url` selects the
-  control-plane connection and `--node-id` selects the observer or lifecycle
-  target. Component actions additionally require `--service-id`.
-- Keep output compact and human-readable. `status` aggregates node and
-  component health; `nodes` and `components` emit deterministic tables; a
-  lifecycle action prints the resulting component row.
-- Connect directly to existing Grovlet control endpoints through System NATS.
-  Do not add HTTP, a new public SDK abstraction, or duplicated cluster state.
-- Task 021's E2E invokes real `grove status` against three real Grovlets. Task
-  022 retains ownership of the full CLI stop/start and Grove Shop call flow.
+- Extend the existing real CLI E2E instead of starting a second identical
+  three-node cluster. The expanded scenario permanently retains Task 021's
+  status proof while adding Task 022's operator lifecycle.
+- Treat `grove components` as the CLI placement inspection: its deterministic
+  rows map each stable service ID to the Grovlet hosting it and include current
+  lifecycle state.
+- Verify that Orders cannot complete while Inventory is stopped, then create a
+  completed order after the CLI restarts Inventory. Application verification
+  uses the public `grove.Call` path over the same clustered System NATS
+  transport, not a same-process shortcut.
+- Use bounded condition waits and command contexts throughout. Preserve the
+  existing concurrent process cleanup and include all Grovlet logs on failure.
 
 ## Sub-Tasks
 
-- [x] 1. Parse CLI commands and render control-plane reads.
-  **Context:** Implement `status`, `nodes`, and `components` with typed command
-  validation, deterministic output, and actionable errors. Query cluster state
-  from the requested observer and query component views for known nodes.
-  **Outcome:** `cmd/grove/main.go` now parses `status`, `nodes`, and
-  `components`, queries existing health/component endpoints, and renders
-  deterministic summaries and tables. `cmd/grove/main_test.go` covers valid
-  and invalid grammar plus healthy/degraded output.
+- [ ] 1. Generalize real CLI invocation helpers.
+  **Context:** Extract bounded helpers that execute `grove`, wait for exact
+  converged output, and report command output plus Grovlet logs on failure.
 
-- [x] 2. Control component lifecycle through the CLI.
-  **Context:** Implement `component start` and `component stop` using the
-  existing request/reply lifecycle endpoints. Require a non-zero stable service
-  ID and print the resulting component state.
-  **Outcome:** `component start` and `component stop` validate stable service
-  IDs, invoke the selected node through the control client, render the resulting
-  state, and propagate command failures. Unit tests verify both actions and the
-  failure path.
+- [ ] 2. Exercise the operator lifecycle.
+  **Context:** Inspect healthy status, nodes, and component placement; stop
+  Inventory through the real CLI; observe stopped placement and failed Orders
+  behavior; restart Inventory; observe the incremented healthy generation.
 
-- [x] 3. Exercise the real CLI against real Grovlets.
-  **Context:** Build `grove` and `grovlet`, start three isolated Grovlet OS
-  processes with production-shaped clustered System NATS, condition-wait by
-  invoking the CLI until status reports the healthy cluster, and clean up every
-  process with diagnostics on failure.
-  **Outcome:** `TestGroveStatusAgainstGrovletCluster` builds both binaries,
-  launches three isolated Grovlets with clustered System NATS, repeatedly
-  invokes the real CLI until it reports three healthy nodes, and concurrently
-  stops all children with diagnostics. No fixed sleep or external setup is
-  used.
+- [ ] 3. Verify the recovered reference application.
+  **Context:** Connect through System NATS from the observer side and complete a
+  deterministic Grove Shop order through Orders after Inventory restarts.
 
-- [x] 4. Verify and close Task 021.
-  **Context:** Run formatting, diff checks, focused repetitions, vet, the full
-  uncached suite, and the full race suite before marking the task DONE.
-  **Outcome:** The Grove status E2E passed three consecutive runs. `go vet
-  ./...`, `go test -count=1 ./...`, and `go test -race -count=1 ./...` pass
-  with every historical E2E and the new real CLI scenario.
+- [ ] 4. Verify and close Task 022.
+  **Context:** Run formatting, diff checks, focused repeated E2E runs, vet, the
+  full uncached suite, and the full race suite before marking the task DONE.
 
 ## Log
 
-- 2026-09-11: Tasks 001 through 020 are complete on `origin/main`.
-- 2026-09-11: Reserved the complete CLI-driven component lifecycle and Grove
-  Shop verification scenario for Task 022 while retaining every Task 021
-  command in the implemented grammar.
-- 2026-09-11: Implemented and race-tested the command parser, output renderers,
-  lifecycle routing, and real-binary status E2E in `cmd/grove`.
-- 2026-09-11: The additional real-process package load exposed two historical
-  node-failure tests spending their remaining deadline on sequential embedded
-  NATS shutdown. Reused the existing concurrent graceful-stop helper for their
-  complete survivor sets; three repeated recovery pairs pass without changing
-  timeouts or assertions.
-- 2026-09-11: Race verification also exposed a JetStream failover case where an
-  ordered placement watch remained open but missed a replacement. Placement
-  observers now refresh already-known keys from authoritative KV state; three
-  race-enabled recovery repetitions converge in 11.37–16.03 seconds.
-- 2026-09-11: Completed Task 021 after the full uncached suite passed with
-  `cmd/grovlet` in 168.344 seconds and the full race suite passed with
-  `cmd/grovlet` in 173.922 seconds.
+- 2026-09-11: Task 021 was rebased onto the latest `main`, passed vet plus full
+  non-race and race suites, and was pushed to `main` at `cddfd77`.
+- 2026-09-11: Confirmed Task 022 needs no new production command or control
+  protocol; it closes the operator-lifecycle proof using the accepted CLI and
+  runtime behavior.
