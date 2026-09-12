@@ -272,6 +272,9 @@ func TestGroveCLILifecycleAgainstGrovletCluster(t *testing.T) {
 	if err := waitForGroveOutput(ctx, systemNATSURL, "node-3", wantStatus, "status"); err != nil {
 		t.Fatalf("wait for recovered Grove status: %v\n%s", err, grovletLogs(nodes))
 	}
+	if err := waitForObservedServices(ctx, transport, "node-3", groveshop.ServiceOrders, groveshop.ServiceInventory); err != nil {
+		t.Fatalf("wait for recovered placement: %v\n%s", err, grovletLogs(nodes))
+	}
 
 	created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](
 		ctx,

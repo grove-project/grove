@@ -54,22 +54,22 @@ handoff. Task 027 remains responsible for health-gated authoritative cutover.
 
 ## Sub-Tasks
 
-- [ ] 1. Define and test the stable bootstrap hello contract.
+- [x] 1. Define and test the stable bootstrap hello contract.
   **Context:** Add the versioned envelope and hello identity, deterministic
   capability negotiation, compatibility errors, unknown-optional-field
   tolerance, and malformed/incompatible tests without importing SDK models.
 
-- [ ] 2. Expose target-owned bootstrap identity.
+- [x] 2. Expose target-owned bootstrap identity.
   **Context:** Add the private Grovlet hello command using full executable and
   embedded configuration inspection. Add CLI-side target invocation and prove
   exact binary identity plus same-class compatibility checks.
 
-- [ ] 3. Make standalone Grove Shop components consume embedded config.
+- [x] 3. Make standalone Grove Shop components consume embedded config.
   **Context:** Ensure the existing non-membership Inventory path uses the same
   compiled reservation buffer as managed workers so candidate behavior is not
   accidentally served by development defaults.
 
-- [ ] 4. Prove explicit N and N+1 invocation end to end.
+- [x] 4. Prove explicit N and N+1 invocation end to end.
   **Context:** Build current/candidate configured artifacts, negotiate bootstrap
   compatibility, run current placement plus candidate-specific Orders and
   Inventory processes on one mesh, verify both ready, invoke N through current
@@ -88,3 +88,7 @@ handoff. Task 027 remains responsible for health-gated authoritative cutover.
 - 2026-09-12: Kept candidate launch orchestration and authoritative placement
   cutover out of Task 026. The harness starts prebuilt local artifacts solely to
   prove coexistence; Task 027 owns health-gated control-plane handoff.
+- 2026-09-12: Bootstrap negotiation passed ten repetitions; the real current
+  plus candidate process topology passed three repetitions and the race
+  detector. Current placement remained unchanged while both exact configured
+  artifacts were explicitly invoked through System NATS.
