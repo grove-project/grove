@@ -209,7 +209,8 @@ func (p *Placement) watch(ctx context.Context, transport *Transport) error {
 			refreshed, err := refreshPlacementRecords(refreshCtx, kv, records)
 			cancel()
 			if err != nil {
-				return err
+				p.setRefreshError(records, err)
+				continue
 			}
 			records = refreshed
 			p.setReady(records)
@@ -360,6 +361,14 @@ func decodePlacementRecord(key string, value []byte) (PlacementRecord, error) {
 }
 
 func (p *Placement) setReady(records map[grove.ServiceID]PlacementRecord) {
+	p.setObserved(records, "")
+}
+
+func (p *Placement) setRefreshError(records map[grove.ServiceID]PlacementRecord, err error) {
+	p.setObserved(records, err.Error())
+}
+
+func (p *Placement) setObserved(records map[grove.ServiceID]PlacementRecord, observedError string) {
 	placements := make([]PlacementRecord, 0, len(records))
 	for _, record := range records {
 		placements = append(placements, record)
@@ -368,7 +377,7 @@ func (p *Placement) setReady(records map[grove.ServiceID]PlacementRecord) {
 		return placements[i].ServiceID < placements[j].ServiceID
 	})
 	p.mu.Lock()
-	p.view = PlacementView{Ready: true, Placements: placements}
+	p.view = PlacementView{Ready: true, Placements: placements, Error: observedError}
 	p.mu.Unlock()
 }
 
