@@ -50,6 +50,8 @@ Result        recovered
 
 ## Understand Grove
 
+**[Concepts](concepts.md)** defines Grove's mental model: services, workers, Grovlets, nodes, clusters, ingress, RPC, control/data planes, placement, configuration, durable execution, edge, and operations.
+
 **[Vision](vision/vision.md)** explains why Grove exists and the product principles behind the experience.
 
 **[Architecture](architecture/system-architecture.md)** explains how Grove implements the runtime.
