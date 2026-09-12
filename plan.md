@@ -1,85 +1,73 @@
-# Plan: Expose the Grove Shop E2E through `grove test`
+# Plan: Rerun `grove test` after one controlled node loss
 
 ## Goal
 
-Complete Task 029 with a real `grove test --binary <artifact>` command that
-starts an isolated three-Grovlet cluster through the Go harness, waits for
-production-shaped health and placement, executes the reference application
-flow, cleans up all processes, and returns deterministic success or failure.
-Do not inject failures, define SLAs, generate tests, or add a scenario matrix.
+Complete Task 030 by extending `grove test` with one bounded resilience mode:
+run the normal Grove Shop flow, kill the node currently hosting a selected
+stateless service, wait for production recovery to move that service, and run
+the same functional flow again. Do not add a scenario matrix, SLA enforcement,
+or any other fault type.
 
 ## Context
 
-Earlier tasks prove the same Grove Shop flow from package tests. Task 029 makes
-that experience a developer-facing CLI operation while retaining Go tests and
-`grovetest` as the automation foundation. Task 030 will reuse the runner to add
-one node-kill scenario.
+Task 029 launches the exact artifact in an isolated three-Grovlet cluster and
+executes a cross-process order flow. Existing Grovlet recovery already detects
+node loss and compare-and-set moves affected placement. Task 030 activates that
+production path from the command and observes it through the same System NATS
+control APIs.
 
 ### Key Files
 
-- `tasks/029-grove-test-command-foundation.md` — current acceptance contract.
-- `docs/developer-experience/testing.md` and `local-development.md` — test the
-  shipped artifact through the real runtime model.
-- `cmd/grove/main.go` — `test` command parsing and dispatch.
-- `cmd/grove/test.go` — isolated topology, bounded readiness, functional flow,
-  diagnostics, shutdown, and deterministic output.
-- `cmd/grove/test_test.go` — parser, real command success, and failure exit
-  coverage.
-- `grovetest/grovetest.go` — existing real-process lifecycle primitive used by
-  the command.
+- `tasks/030-resilience-scenario-execution.md` — current acceptance contract.
+- `docs/developer-experience/testing.md` — reuse the developer's functional
+  flow instead of authoring a separate chaos suite.
+- `cmd/grove/main.go` — `--resilience` and selected service parsing.
+- `cmd/grove/test.go` — baseline/recovery flow reuse, node kill, survivor
+  reconnect, bounded recovery observation, diagnostics, and output.
+- `cmd/grove/test_test.go` — real command resilience proof.
+- `cmd/grovlet/recovery.go` — existing production recovery behavior invoked by
+  the test cluster.
 
 ### Decisions Made
 
-- Require `--binary` so the command tests the exact immutable artifact supplied
-  by the developer rather than rebuilding an implicit source tree.
-- Launch Orders, Inventory, and an observer as distinct Grovlet processes with
-  isolated runtime directories and an explicit embedded System NATS route
-  topology. Reuse `grovetest.StartNode`; do not add shell or Docker
-  orchestration.
-- Wait for node/component health and Orders/Inventory placement with bounded
-  polling. On timeout, include every child process log and last observed state.
-- Execute one deterministic order through the observer's placement-routed Grove
-  client. A completed reservation proves the real Orders-to-Inventory path.
-- Print the fixed success transcript only after graceful stop and cleanup
-  succeed. Any setup, health, business-flow, or cleanup error returns non-zero
-  through the existing CLI main function.
+- Add `--resilience` and optional `--service-id`; default to Grove Shop
+  Inventory. Baseline `grove test` output and behavior remain unchanged.
+- Enable `--system-nats-recovery` on the isolated Grovlets only for resilience
+  mode. Determine the target process from authoritative placement rather than
+  assuming the initial topology.
+- Kill the complete hosting Grovlet through `grovetest.Node.Kill`, then reconnect
+  to System NATS through a surviving process so the command works even when the
+  selected service was on the original client node.
+- Wait until the failed node is unavailable, selected service placement names a
+  healthy survivor, and the replacement component reports healthy. Do not use
+  fixed sleeps.
+- Invoke the same order helper before and after failure with distinct order IDs.
+  Print the failed and recovered node IDs so the deterministic transcript shows
+  the action and result.
 
 ## Sub-Tasks
 
-- [x] 1. Parse and dispatch `grove test`.
-  **Context:** Add the command/required binary flag, reject extra or missing
-  arguments, and preserve existing command behavior.
+- [ ] 1. Parse the bounded resilience mode.
+  **Context:** Add the flag/default service, validate the service ID, and keep
+  baseline invocation compatibility.
 
-- [x] 2. Implement the isolated reference-flow runner.
-  **Context:** Start real Grovlets, wait for health/placement, run the order
-  flow, emit diagnostics on failure, and guarantee bounded child cleanup.
+- [ ] 2. Execute node loss and observe production recovery.
+  **Context:** Enable recovery, resolve and kill the hosting node, reconnect via
+  a survivor, wait for health/placement/component convergence, rerun the flow,
+  and clean up the already-dead child safely.
 
-- [x] 3. Exercise the real command and exit contract.
-  **Context:** Run the built CLI with the built Grovlet artifact, assert exact
-  success output, and prove an unusable artifact returns non-zero.
+- [ ] 3. Prove the real resilience command.
+  **Context:** Assert exact baseline, injection, recovery, rerun, and PASS output
+  from the built CLI with real Grovlet processes.
 
-- [x] 4. Verify and close Task 029.
+- [ ] 4. Verify and close Task 030.
   **Context:** Run formatting, diff checks, focused repetitions, vet, full
   uncached tests, and full race tests; mark DONE only after all prior E2Es pass,
   then rebase and push directly to `main`.
 
 ## Log
 
-- 2026-09-12: Task 028 passed focused, full uncached, and race gates and was
-  pushed to `main` at `dab3dcf`.
-- 2026-09-12: Kept node failure injection and post-recovery reruns out of this
-  command slice; Task 030 owns the single resilience action.
-- 2026-09-12: The command launches three isolated Grovlets through `grovetest`,
-  observes cluster/component/placement readiness without fixed sleeps, and
-  completes the cross-process Grove Shop order flow before cleanup.
-- 2026-09-12: The built `grove test` command passed three real-process
-  repetitions and focused race coverage; a missing artifact returned non-zero
-  with a deterministic diagnostic.
-- 2026-09-12: Parallel full-suite load exposed two timing assumptions: the new
-  command inherited the 10-second read-command timeout, and an existing
-  placement refresh discarded a ready view on a transient JetStream error.
-  `grove test` now has a bounded 60-second lifecycle deadline, while placement
-  retains its last ready authoritative records and reports/retries refresh
-  errors. The corrected full suite and full race suite passed.
-- 2026-09-12: Final verification passed `go vet ./...`,
-  `go test -count=1 ./...`, and `go test -race -count=1 ./...`.
+- 2026-09-12: Task 029 passed focused, full uncached, and race gates and was
+  pushed to `main` at `9272bab`.
+- 2026-09-12: Kept the action to one hosting-node kill. Network, disk, CPU,
+  latency, scenario generation, and SLA evaluation remain out of scope.
