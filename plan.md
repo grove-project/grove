@@ -79,7 +79,7 @@ Task 026 remains responsible for actually launching N and N+1 side by side.
   per-node progress consistently from every Grovlet and directly in the
   replicated KV bucket.
 
-- [ ] 5. Verify and close Task 025.
+- [x] 5. Verify and close Task 025.
   **Context:** Run formatting, diff checks, focused repetitions, vet, the full
   uncached suite, and full race suite; mark DONE only after every earlier E2E
   remains green, then rebase and push directly to `main`.
@@ -97,3 +97,6 @@ Task 026 remains responsible for actually launching N and N+1 side by side.
 - 2026-09-12: Focused System NATS, CLI, and complete Grovlet package tests pass,
   including the real config-only N to N+1 control-state E2E and every earlier
   distributed Grovlet scenario.
+- 2026-09-12: Task 025 passed five consecutive real rollout-state E2Es,
+  race-focused checks, `go vet ./...`, `go test -count=1 ./...`, and
+  `go test -race -count=1 ./...`; marked the task DONE.

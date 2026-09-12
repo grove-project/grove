@@ -1,6 +1,6 @@
 # Task 025 — Deployment artifacts and rollout identity in control state
 
-Status: TODO
+Status: DONE
 Depends on: 023, 024, 019
 
 ## Goal
