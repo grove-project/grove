@@ -1,6 +1,7 @@
 package groveshop_test
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -40,5 +41,40 @@ func TestWebAsset(t *testing.T) {
 	}
 	if _, err := groveshop.WebAsset("missing.html"); err == nil {
 		t.Fatal("missing embedded asset returned nil error")
+	}
+}
+
+func TestWebHandlerExposesReadOnlyRuntimeConfiguration(t *testing.T) {
+	configuration := groveshop.DefaultConfiguration()
+	configuration.Revision = "acme-r42"
+	configuration.Customer.Name = "Acme Retail"
+	configuration.Cluster.Name = "production"
+	configuration.Node.Zone = "edge"
+	configuration.Inventory.ReservationBuffer = 7
+	server := httptest.NewServer(groveshop.WebHandlerWithConfiguration(configuration, "sha256:config"))
+	defer server.Close()
+	response, err := http.Get(server.URL + "/grove/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var view groveshop.RuntimeConfigurationView
+	if err := json.NewDecoder(response.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Revision != "acme-r42" || view.ConfigDigest != "sha256:config" || view.CustomerName != "Acme Retail" || view.ClusterName != "production" || view.NodeZone != "edge" || view.ReservationBuffer != 7 {
+		t.Errorf("runtime configuration view = %#v", view)
+	}
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/grove/config", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("POST /grove/config status = %d; want %d", response.StatusCode, http.StatusMethodNotAllowed)
 	}
 }

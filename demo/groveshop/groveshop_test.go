@@ -68,6 +68,25 @@ func TestInventoryReserve(t *testing.T) {
 	}
 }
 
+func TestInventoryUsesConfiguredReservationBuffer(t *testing.T) {
+	inventory := groveshop.NewInventory(1)
+	_, err := inventory.Reserve(t.Context(), groveshop.ReserveRequest{
+		OrderID:  "order-buffer",
+		SKU:      "coffee-beans",
+		Quantity: 2,
+	})
+	if !errors.Is(err, groveshop.ErrReservationBufferExceeded) {
+		t.Errorf("Reserve() error = %v; want %v", err, groveshop.ErrReservationBufferExceeded)
+	}
+	if _, err := groveshop.NewInventory(2).Reserve(t.Context(), groveshop.ReserveRequest{
+		OrderID:  "order-buffer",
+		SKU:      "coffee-beans",
+		Quantity: 2,
+	}); err != nil {
+		t.Errorf("Reserve() within configured buffer: %v", err)
+	}
+}
+
 func TestPaymentCharge(t *testing.T) {
 	payment := &groveshop.Payment{}
 	req := groveshop.ChargeRequest{OrderID: "order-1", AmountCents: 2400}

@@ -22,6 +22,9 @@ var (
 	ErrSKURequired = errors.New("sku is required")
 	// ErrQuantityPositive is returned when an inventory quantity is not positive.
 	ErrQuantityPositive = errors.New("quantity must be positive")
+	// ErrReservationBufferExceeded means Inventory cannot reserve the requested
+	// quantity within its immutable configured buffer.
+	ErrReservationBufferExceeded = errors.New("inventory reservation buffer exceeded")
 	// ErrAmountPositive is returned when a payment amount is not positive.
 	ErrAmountPositive = errors.New("amount must be positive")
 	// ErrShippingAddressRequired is returned when a shipping address is empty.
@@ -67,7 +70,16 @@ type Reservation struct {
 }
 
 // Inventory reserves products for Grove Shop orders.
-type Inventory struct{}
+type Inventory struct {
+	reservationBuffer int
+	configured        bool
+}
+
+// NewInventory creates Inventory with an immutable reservation buffer from the
+// compiled Grove Shop configuration.
+func NewInventory(reservationBuffer int) *Inventory {
+	return &Inventory{reservationBuffer: reservationBuffer, configured: true}
+}
 
 // Reserve validates req and returns a deterministic reservation.
 func (s *Inventory) Reserve(ctx context.Context, req ReserveRequest) (Reservation, error) {
@@ -82,6 +94,13 @@ func (s *Inventory) Reserve(ctx context.Context, req ReserveRequest) (Reservatio
 	}
 	if req.Quantity <= 0 {
 		return Reservation{}, ErrQuantityPositive
+	}
+	reservationBuffer := DefaultReservationBuffer
+	if s.configured {
+		reservationBuffer = s.reservationBuffer
+	}
+	if req.Quantity > reservationBuffer {
+		return Reservation{}, ErrReservationBufferExceeded
 	}
 	return Reservation{
 		ID:       "reservation-" + req.OrderID,
