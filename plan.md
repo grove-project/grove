@@ -46,11 +46,11 @@ one node-kill scenario.
 
 ## Sub-Tasks
 
-- [ ] 1. Parse and dispatch `grove test`.
+- [x] 1. Parse and dispatch `grove test`.
   **Context:** Add the command/required binary flag, reject extra or missing
   arguments, and preserve existing command behavior.
 
-- [ ] 2. Implement the isolated reference-flow runner.
+- [x] 2. Implement the isolated reference-flow runner.
   **Context:** Start real Grovlets, wait for health/placement, run the order
   flow, emit diagnostics on failure, and guarantee bounded child cleanup.
 
@@ -69,3 +69,6 @@ one node-kill scenario.
   pushed to `main` at `dab3dcf`.
 - 2026-09-12: Kept node failure injection and post-recovery reruns out of this
   command slice; Task 030 owns the single resilience action.
+- 2026-09-12: The command launches three isolated Grovlets through `grovetest`,
+  observes cluster/component/placement readiness without fixed sleeps, and
+  completes the cross-process Grove Shop order flow before cleanup.

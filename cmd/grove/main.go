@@ -34,6 +34,7 @@ var (
 	errBinaryPathRequired    = errors.New("binary path is required")
 	errConfigPathRequired    = errors.New("config path is required")
 	errOutputPathRequired    = errors.New("output path is required")
+	errTestApplication       = errors.New("test artifact must contain Grove Shop")
 )
 
 type commandName string
@@ -44,6 +45,7 @@ const (
 	commandComponents commandName = "components"
 	commandComponent  commandName = "component"
 	commandConfig     commandName = "config"
+	commandTest       commandName = "test"
 )
 
 type componentAction string
@@ -84,7 +86,11 @@ type controlClient interface {
 func main() {
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	ctx, cancel := context.WithTimeout(signalCtx, commandTimeout)
+	timeout := commandTimeout
+	if len(os.Args) > 1 && commandName(os.Args[1]) == commandTest {
+		timeout = testCommandTimeout
+	}
+	ctx, cancel := context.WithTimeout(signalCtx, timeout)
 	defer cancel()
 	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "grove: %v\n", err)
@@ -99,6 +105,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	if invocation.command == commandConfig {
 		return executeConfig(ctx, invocation, stdout)
+	}
+	if invocation.command == commandTest {
+		return executeTest(ctx, invocation, stdout)
 	}
 	client, err := systemnats.Connect(ctx, invocation.systemNATSURL)
 	if err != nil {
@@ -119,9 +128,28 @@ func parseInvocation(args []string, stderr io.Writer) (invocation, error) {
 		return parseComponentInvocation(args[1:], stderr)
 	case commandConfig:
 		return parseConfigInvocation(args[1:], stderr)
+	case commandTest:
+		return parseTestInvocation(args[1:], stderr)
 	default:
 		return invocation{}, fmt.Errorf("parse command %q: %w", args[0], errCommandUnknown)
 	}
+}
+
+func parseTestInvocation(args []string, stderr io.Writer) (invocation, error) {
+	parsed := invocation{command: commandTest}
+	flags := flag.NewFlagSet("test", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.StringVar(&parsed.binaryPath, "binary", "", "Grove application artifact to test")
+	if err := flags.Parse(args); err != nil {
+		return invocation{}, fmt.Errorf("parse test flags: %w", err)
+	}
+	if flags.NArg() != 0 {
+		return invocation{}, fmt.Errorf("parse test: %w: %q", errUnexpectedArguments, flags.Args())
+	}
+	if parsed.binaryPath == "" {
+		return invocation{}, errBinaryPathRequired
+	}
+	return parsed, nil
 }
 
 func parseReadInvocation(command commandName, args []string, stderr io.Writer) (invocation, error) {
