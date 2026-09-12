@@ -100,6 +100,21 @@ func TestDeploymentStateConvergesThroughControlAPI(t *testing.T) {
 	if err := waitForDeployments(ctx, transports, artifacts, []systemnats.Rollout{second}); err != nil {
 		t.Fatal(err)
 	}
+	skippedHealth := second
+	skippedHealth.Generation = 3
+	skippedHealth.RolloutID = "grove-shop-skipped-health"
+	skippedHealth.CurrentArtifactDigest = candidate.ArtifactDigest
+	skippedHealth.CandidateArtifactDigest = ""
+	skippedHealth.Phase = systemnats.RolloutActive
+	skippedHealth.Nodes = append([]systemnats.RolloutNodeProgress(nil), second.Nodes...)
+	for i := range skippedHealth.Nodes {
+		skippedHealth.Nodes[i].CurrentArtifactDigest = candidate.ArtifactDigest
+		skippedHealth.Nodes[i].CandidateArtifactDigest = ""
+		skippedHealth.Nodes[i].Phase = systemnats.RolloutActive
+	}
+	if err := deployments[0].PutRollout(ctx, transports[0], skippedHealth); !errors.Is(err, systemnats.ErrRolloutInvalid) {
+		t.Errorf("skipped candidate health error = %v; want %v", err, systemnats.ErrRolloutInvalid)
+	}
 
 	stale := second
 	stale.RolloutID = "stale"

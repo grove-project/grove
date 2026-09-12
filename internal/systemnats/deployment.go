@@ -64,6 +64,12 @@ const (
 	// RolloutPending means a candidate is recorded but has not been launched or
 	// handed ownership.
 	RolloutPending RolloutPhase = "pending"
+	// RolloutCandidateHealthy means every candidate runtime reported readiness
+	// for the exact candidate artifact while the current artifact remains active.
+	RolloutCandidateHealthy RolloutPhase = "candidate-healthy"
+	// RolloutSwitching means candidate health passed and authoritative service
+	// placement is being moved to the candidate artifact.
+	RolloutSwitching RolloutPhase = "switching"
 )
 
 // DeploymentArtifact is immutable identity metadata for one configured Grove
@@ -328,7 +334,7 @@ func (d *Deployments) PutRollout(ctx context.Context, transport *Transport, roll
 	if rollout.Generation != observed.Generation+1 {
 		return &Error{Operation: "advance rollout", Err: ErrRolloutGeneration}
 	}
-	if rollout.ClusterID != observed.ClusterID || rollout.RolloutID == observed.RolloutID || (rollout.CurrentArtifactDigest != observed.CurrentArtifactDigest && rollout.CurrentArtifactDigest != observed.CandidateArtifactDigest) {
+	if rollout.ClusterID != observed.ClusterID || rollout.RolloutID == observed.RolloutID || !validRolloutTransition(observed, rollout) {
 		return &Error{Operation: "advance rollout", Err: ErrRolloutInvalid}
 	}
 	if _, err := kv.Update(ctx, key, encoded, entry.Revision()); err != nil {
@@ -338,6 +344,25 @@ func (d *Deployments) PutRollout(ctx context.Context, transport *Transport, roll
 		return &Error{Operation: "advance rollout", Err: err}
 	}
 	return nil
+}
+
+func validRolloutTransition(current, next Rollout) bool {
+	sameArtifacts := next.CurrentArtifactDigest == current.CurrentArtifactDigest && next.CandidateArtifactDigest == current.CandidateArtifactDigest
+	sameTargets := slices.EqualFunc(current.Nodes, next.Nodes, func(a, b RolloutNodeProgress) bool {
+		return a.NodeID == b.NodeID
+	})
+	switch current.Phase {
+	case RolloutActive:
+		return next.Phase == RolloutPending && sameTargets && next.CurrentArtifactDigest == current.CurrentArtifactDigest && next.CandidateArtifactDigest != ""
+	case RolloutPending:
+		return next.Phase == RolloutCandidateHealthy && sameArtifacts && sameTargets
+	case RolloutCandidateHealthy:
+		return next.Phase == RolloutSwitching && sameArtifacts && sameTargets
+	case RolloutSwitching:
+		return next.Phase == RolloutActive && sameTargets && next.CurrentArtifactDigest == current.CandidateArtifactDigest && next.CandidateArtifactDigest == ""
+	default:
+		return false
+	}
 }
 
 func deploymentKV(ctx context.Context, transport *Transport) (jetstream.KeyValue, error) {
@@ -405,10 +430,22 @@ func validateRollout(rollout Rollout) (Rollout, error) {
 			return Rollout{}, ErrRolloutInvalid
 		}
 	}
+	switch rollout.Phase {
+	case RolloutActive:
+		if rollout.CandidateArtifactDigest != "" {
+			return Rollout{}, ErrRolloutInvalid
+		}
+	case RolloutPending, RolloutCandidateHealthy, RolloutSwitching:
+		if rollout.CandidateArtifactDigest == "" {
+			return Rollout{}, ErrRolloutInvalid
+		}
+	default:
+		return Rollout{}, ErrRolloutInvalid
+	}
 	nodes := append([]RolloutNodeProgress(nil), rollout.Nodes...)
 	seen := make(map[string]struct{}, len(nodes))
 	for _, node := range nodes {
-		if node.NodeID == "" || node.CurrentArtifactDigest != rollout.CurrentArtifactDigest || node.CandidateArtifactDigest != rollout.CandidateArtifactDigest || node.Phase == "" {
+		if node.NodeID == "" || node.CurrentArtifactDigest != rollout.CurrentArtifactDigest || node.CandidateArtifactDigest != rollout.CandidateArtifactDigest || node.Phase != rollout.Phase {
 			return Rollout{}, ErrRolloutInvalid
 		}
 		if _, exists := seen[node.NodeID]; exists {

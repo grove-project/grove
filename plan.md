@@ -59,7 +59,7 @@ JetStream/KV facts; candidate readiness is ephemeral System NATS messaging.
   exact identity validation, and bounded health observation without fixed
   sleeps.
 
-- [ ] 2. Implement and test durable upgrade transitions.
+- [x] 2. Implement and test durable upgrade transitions.
   **Context:** Validate routes and phases, reject unhealthy/wrong candidates,
   commit candidate-health and switching generations, replace placements in
   deterministic order, and finish with N+1 active.
@@ -86,3 +86,5 @@ JetStream/KV facts; candidate readiness is ephemeral System NATS messaging.
   of this task; Task 028 owns rollback and structured rollback reasons.
 - 2026-09-12: Stable readiness envelope round trips and compatibility failures
   passed ten focused repetitions.
+- 2026-09-12: Exact-artifact readiness and the R3 JetStream/KV upgrade state
+  machine passed five focused integration repetitions.
