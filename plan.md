@@ -54,7 +54,7 @@ JetStream/KV facts; candidate readiness is ephemeral System NATS messaging.
 
 ## Sub-Tasks
 
-- [ ] 1. Add and test stable candidate readiness messaging.
+- [x] 1. Add and test stable candidate readiness messaging.
   **Context:** Define the versioned bootstrap payload, System NATS endpoint,
   exact identity validation, and bounded health observation without fixed
   sleeps.
@@ -84,3 +84,5 @@ JetStream/KV facts; candidate readiness is ephemeral System NATS messaging.
   pushed to `main` at `40185ab`.
 - 2026-09-12: Kept failed-candidate rejection and restoring prior placement out
   of this task; Task 028 owns rollback and structured rollback reasons.
+- 2026-09-12: Stable readiness envelope round trips and compatibility failures
+  passed ten focused repetitions.
