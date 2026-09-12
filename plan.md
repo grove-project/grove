@@ -1,98 +1,86 @@
-# Plan: Run current and candidate artifacts side by side
+# Plan: Commit a health-gated artifact upgrade
 
 ## Goal
 
-Complete Task 026 by defining a tiny stable bootstrap hello/negotiation
-boundary and proving that current N and candidate N+1 Grove Shop artifacts can
-run healthy at the same time on the existing System NATS mesh and be invoked
-explicitly. Do not switch placement/traffic, retire N, migrate state, or claim
-general mixed-version application compatibility.
+Complete Task 027 by advancing a side-by-side Grove Shop candidate through a
+small durable rollout state machine, proving the exact candidate artifact is
+healthy over the stable bootstrap boundary, switching service placement with
+JetStream/KV compare-and-set writes, and retiring current workers only after
+N+1 is durably active. Do not add rollback, canaries, migration, or rollout
+policy.
 
 ## Context
 
-Task 025 records exact current/candidate artifact and rollout identities in
-replicated control state. Task 026 makes simultaneous execution possible and
-introduces the stable compatibility check required before later ownership
-handoff. Task 027 remains responsible for health-gated authoritative cutover.
+Task 026 can run and explicitly invoke N and N+1 at the same time. Task 027
+turns that coexistence into the simplest deterministic ownership handoff. The
+authoritative rollout generation and every placement change remain replicated
+JetStream/KV facts; candidate readiness is ephemeral System NATS messaging.
 
 ### Key Files
 
-- `tasks/026-side-by-side-n-and-n-plus-1.md` — current acceptance contract.
-- `docs/architecture/bootstrap-and-binary-handoff.md` — stable bootstrap ABI
-  constraints.
-- `internal/bootstrap/bootstrap.go` — versioned, language-independent JSON
-  hello envelope, artifact/process identity, capabilities, validation, and
-  negotiation.
-- `cmd/grovlet/bootstrap.go` — private target-binary bootstrap hello entrypoint
-  populated from the exact running artifact.
-- `cmd/grove/bootstrap.go` — invokes current and candidate target binaries and
-  negotiates their common bootstrap protocol/capabilities.
-- `cmd/grove/side_by_side_test.go` — real N/N+1 processes and explicit
-  invocation proof over production-shaped System NATS transport.
+- `tasks/027-traffic-switch-and-upgrade.md` — current acceptance contract.
+- `docs/architecture/bootstrap-and-binary-handoff.md` — stable readiness and
+  ownership-handoff constraints.
+- `internal/bootstrap/bootstrap.go` — versioned readiness wire message below
+  the application SDK.
+- `internal/systemnats/deployment.go` — durable rollout phases and validated
+  generation transitions.
+- `internal/systemnats/upgrade.go` — exact-artifact readiness probe and
+  deterministic placement/active-artifact commit sequence.
+- `cmd/grovlet/main.go` — publishes candidate runtime readiness only after its
+  invocation endpoint is active.
+- `cmd/grove/upgrade_test.go` — real N to N+1 handoff and post-cutover request
+  proof.
 
 ### Decisions Made
 
-- Use a conservative JSON envelope with explicit protocol version, message
-  type, message version, and payload. Do not use Gob or evolving SDK/runtime
-  structs for the bootstrap wire boundary.
-- Bootstrap hello advertises supported bootstrap versions, capabilities,
-  application/code/config/artifact identity, cluster identity, and optional
-  node class/zone. Negotiation requires a common protocol plus side-by-side
-  process and readiness capabilities and rejects application, cluster, or node
-  class/zone mismatches before launch/handoff work.
-- Add a private `bootstrap-hello` target entrypoint. The current CLI-side
-  runtime invokes both exact binaries and computes their compatible
-  intersection; no application SDK compatibility is inferred from version
-  labels.
-- Run candidate Orders and Inventory as distinct real Grovlet processes on the
-  current cluster's System NATS plane with candidate-specific subjects. Current
-  calls use authoritative placement; candidate calls use an explicit candidate
-  subject. No placement or active-artifact switch occurs in this task.
-- Use two config-only artifact revisions for N and N+1 so the E2E can prove
-  which artifact handled each request deterministically while retaining the
-  same executable code identity.
+- Extend the stable bootstrap JSON envelope with a minimal readiness message:
+  node ID, exact artifact digest, and healthy state. Unknown optional fields
+  remain ignorable; no SDK/runtime structs enter this wire contract.
+- Persist four operator-visible rollout phases: `pending`,
+  `candidate-healthy`, `switching`, and `active`. Each transition is a new
+  rollout generation in the existing R3 deployment KV bucket.
+- Gate handoff by requesting readiness from every candidate route and matching
+  the returned node and artifact identities. A missing, unhealthy, or wrong
+  artifact cannot advance durable state.
+- Switch placement records in stable service-ID order with existing KV
+  compare-and-set semantics, then commit N+1 as the active artifact. The
+  `switching` generation makes the unavoidable multi-key MVP handoff window an
+  explicit durable state rather than hidden process memory.
+- Stop N's application workers only after the final active rollout generation
+  commits. Keep Grovlet/System NATS processes alive because they remain quorum
+  members; binary process replacement is represented by retiring their N
+  application ownership in this MVP topology.
 
 ## Sub-Tasks
 
-- [x] 1. Define and test the stable bootstrap hello contract.
-  **Context:** Add the versioned envelope and hello identity, deterministic
-  capability negotiation, compatibility errors, unknown-optional-field
-  tolerance, and malformed/incompatible tests without importing SDK models.
+- [ ] 1. Add and test stable candidate readiness messaging.
+  **Context:** Define the versioned bootstrap payload, System NATS endpoint,
+  exact identity validation, and bounded health observation without fixed
+  sleeps.
 
-- [x] 2. Expose target-owned bootstrap identity.
-  **Context:** Add the private Grovlet hello command using full executable and
-  embedded configuration inspection. Add CLI-side target invocation and prove
-  exact binary identity plus same-class compatibility checks.
+- [ ] 2. Implement and test durable upgrade transitions.
+  **Context:** Validate routes and phases, reject unhealthy/wrong candidates,
+  commit candidate-health and switching generations, replace placements in
+  deterministic order, and finish with N+1 active.
 
-- [x] 3. Make standalone Grove Shop components consume embedded config.
-  **Context:** Ensure the existing non-membership Inventory path uses the same
-  compiled reservation buffer as managed workers so candidate behavior is not
-  accidentally served by development defaults.
+- [ ] 3. Expose readiness from running candidate Grovlets.
+  **Context:** Register readiness after the candidate invocation subscription
+  is active so health implies the process can receive application traffic.
 
-- [x] 4. Prove explicit N and N+1 invocation end to end.
-  **Context:** Build current/candidate configured artifacts, negotiate bootstrap
-  compatibility, run current placement plus candidate-specific Orders and
-  Inventory processes on one mesh, verify both ready, invoke N through current
-  placement and N+1 through its explicit subject, and prove N remains the
-  authoritative placement throughout.
+- [ ] 4. Prove N to N+1 ownership handoff end to end.
+  **Context:** Run real current and candidate artifacts, verify pre-cutover N
+  behavior, commit the upgrade, retire N workers after commit, verify durable
+  active/placement state, and prove post-cutover requests reach N+1.
 
-- [x] 5. Verify and close Task 026.
+- [ ] 5. Verify and close Task 027.
   **Context:** Run formatting, diff checks, focused repetitions, vet, full
   uncached tests, and full race tests; mark DONE only after all prior E2Es pass,
   then rebase and push directly to `main`.
 
 ## Log
 
-- 2026-09-12: Task 025 passed all focused/full non-race and race gates and was
-  pushed to `main` at `1eb5c14`.
-- 2026-09-12: Kept candidate launch orchestration and authoritative placement
-  cutover out of Task 026. The harness starts prebuilt local artifacts solely to
-  prove coexistence; Task 027 owns health-gated control-plane handoff.
-- 2026-09-12: Bootstrap negotiation passed ten repetitions; the real current
-  plus candidate process topology passed three repetitions and the race
-  detector. Current placement remained unchanged while both exact configured
-  artifacts were explicitly invoked through System NATS.
-- 2026-09-12: Hardened the existing CLI lifecycle E2E to wait for placement
-  recovery after Inventory restart; its focused race run passed. Final
-  verification passed `go vet ./...`, `go test -count=1 ./...`, and
-  `go test -race -count=1 ./...`.
+- 2026-09-12: Task 026 passed focused, full uncached, and race gates and was
+  pushed to `main` at `40185ab`.
+- 2026-09-12: Kept failed-candidate rejection and restoring prior placement out
+  of this task; Task 028 owns rollback and structured rollback reasons.
