@@ -68,7 +68,7 @@ JetStream/KV facts; candidate readiness is ephemeral System NATS messaging.
   **Context:** Register readiness after the candidate invocation subscription
   is active so health implies the process can receive application traffic.
 
-- [ ] 4. Prove N to N+1 ownership handoff end to end.
+- [x] 4. Prove N to N+1 ownership handoff end to end.
   **Context:** Run real current and candidate artifacts, verify pre-cutover N
   behavior, commit the upgrade, retire N workers after commit, verify durable
   active/placement state, and prove post-cutover requests reach N+1.
@@ -91,3 +91,7 @@ JetStream/KV facts; candidate readiness is ephemeral System NATS messaging.
 - 2026-09-12: A standalone Grovlet now exposes readiness only after its
   application invocation subscription is active; five focused process runs
   passed.
+- 2026-09-12: The real-process N to N+1 handoff passed three repetitions and a
+  focused race run. N remained authoritative during candidate startup; N+1
+  became active in durable state before N's application workers retired, and
+  post-cutover calls observed N+1's embedded configuration.
