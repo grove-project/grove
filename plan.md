@@ -61,7 +61,7 @@ handoff.
   current placement, commit terminal rolled-back state, and prove retries are
   safe when routes never switched or switched only partially.
 
-- [ ] 3. Prove broken-config rollback end to end.
+- [x] 3. Prove broken-config rollback end to end.
   **Context:** Run healthy A, record B pending, verify bidirectional bootstrap
   compatibility, start B Inventory with `reservation_buffer < 0`, observe its
   startup failure, roll back through replicated state, verify A's artifact and
@@ -82,3 +82,8 @@ handoff.
 - 2026-09-12: Structured rollback state, legal transition enforcement, and
   current/partially-switched placement reconciliation passed three focused R3
   JetStream/KV integration repetitions.
+- 2026-09-12: Broken Inventory rollback passed three real-process repetitions
+  plus focused race coverage. Bootstrap compatibility succeeded forward and
+  backward without decoding application config; candidate startup then failed
+  on `inventory.reservation_buffer`, and Artifact A completed an order after
+  the durable rollback.
