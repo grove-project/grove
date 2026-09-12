@@ -5,6 +5,7 @@ package artifact
 import (
 	"bytes"
 	"crypto/sha256"
+	"debug/macho"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -77,8 +78,12 @@ type ConfigRegion struct {
 type Inspection struct {
 	Manifest       Manifest
 	MetadataDigest string
+	CodeDigest     string
 	ArtifactDigest string
 	ConfigEmpty    bool
+	Config         *ConfigMetadata
+	CompiledConfig []byte
+	CanonicalYAML  []byte
 }
 
 // InspectFile reads path as an immutable Grove artifact and verifies its
@@ -108,12 +113,24 @@ func InspectBytes(binary []byte) (Inspection, error) {
 	}
 	metadataSum := sha256.Sum256(encoded)
 	artifactSum := sha256.Sum256(binary)
-	return Inspection{
+	inspection := Inspection{
 		Manifest:       manifest,
 		MetadataDigest: digest(metadataSum),
+		CodeDigest:     normalizedCodeDigest(binary, config),
 		ArtifactDigest: digest(artifactSum),
-		ConfigEmpty:    allZero(config),
-	}, nil
+		ConfigEmpty:    allZero(config.data),
+	}
+	if inspection.ConfigEmpty {
+		return inspection, nil
+	}
+	bundle, metadata, err := decodeConfigRegion(config.data)
+	if err != nil {
+		return Inspection{}, err
+	}
+	inspection.Config = &metadata
+	inspection.CompiledConfig = append([]byte(nil), bundle.Payload...)
+	inspection.CanonicalYAML = append([]byte(nil), bundle.CanonicalYAML...)
+	return inspection, nil
 }
 
 func findManifest(binary []byte) (Manifest, []byte, error) {
@@ -209,11 +226,17 @@ func validateManifest(manifest Manifest) error {
 	return nil
 }
 
-func findConfigRegion(binary []byte, capacity int) ([]byte, error) {
+type configRegion struct {
+	offset   int
+	capacity int
+	data     []byte
+}
+
+func findConfigRegion(binary []byte, capacity int) (configRegion, error) {
 	prefix := []byte(ConfigRegionPrefix)
 	suffix := []byte(ConfigRegionSuffix)
 	var (
-		region  []byte
+		region  configRegion
 		matches int
 	)
 	for offset := 0; offset < len(binary); {
@@ -224,18 +247,93 @@ func findConfigRegion(binary []byte, capacity int) ([]byte, error) {
 		start += offset + len(prefix)
 		end := start + capacity
 		if end+len(suffix) <= len(binary) && bytes.Equal(binary[end:end+len(suffix)], suffix) {
-			region = binary[start:end]
+			region = configRegion{offset: start, capacity: capacity, data: binary[start:end]}
 			matches++
 		}
 		offset = start
 	}
 	if matches == 0 {
-		return nil, ErrConfigRegionNotFound
+		return configRegion{}, ErrConfigRegionNotFound
 	}
 	if matches != 1 {
-		return nil, fmt.Errorf("%w: found %d valid config regions", ErrManifestInvalid, matches)
+		return configRegion{}, fmt.Errorf("%w: found %d valid config regions", ErrManifestInvalid, matches)
 	}
 	return region, nil
+}
+
+func normalizedCodeDigest(binary []byte, region configRegion) string {
+	normalized := append([]byte(nil), binary...)
+	clear(normalized[region.offset : region.offset+region.capacity])
+	if signature, ok := findMachoCodeSignature(binary); ok {
+		// Ad-hoc re-signing changes both the signature blob and the size fields
+		// describing it. Neither is application code, so exclude both from the
+		// stable code identity.
+		clear(normalized[signature.commandOffset : signature.commandOffset+16])
+		for _, field := range signature.linkeditSizeFields {
+			clear(normalized[field.offset : field.offset+field.size])
+		}
+		normalized = append(normalized[:signature.dataOffset], normalized[signature.dataOffset+signature.dataSize:]...)
+	}
+	sum := sha256.Sum256(normalized)
+	return digest(sum)
+}
+
+type byteRange struct {
+	offset int
+	size   int
+}
+
+type machoSignature struct {
+	commandOffset      int
+	dataOffset         int
+	dataSize           int
+	linkeditSizeFields []byteRange
+}
+
+func findMachoCodeSignature(binaryImage []byte) (machoSignature, bool) {
+	file, err := macho.NewFile(bytes.NewReader(binaryImage))
+	if err != nil {
+		return machoSignature{}, false
+	}
+	defer file.Close()
+	headerSize := 28
+	if file.Magic == macho.Magic64 {
+		headerSize = 32
+	}
+	const (
+		loadCommandSegment       = 0x1
+		loadCommandSegment64     = 0x19
+		loadCommandCodeSignature = 0x1d
+	)
+	var signature machoSignature
+	offset := headerSize
+	for command := uint32(0); command < file.Ncmd; command++ {
+		if offset+8 > len(binaryImage) {
+			return machoSignature{}, false
+		}
+		kind := file.ByteOrder.Uint32(binaryImage[offset : offset+4])
+		size := int(file.ByteOrder.Uint32(binaryImage[offset+4 : offset+8]))
+		if size < 8 || offset+size > len(binaryImage) {
+			return machoSignature{}, false
+		}
+		if (kind == loadCommandSegment || kind == loadCommandSegment64) && size >= 48 && string(bytes.TrimRight(binaryImage[offset+8:offset+24], "\x00")) == "__LINKEDIT" {
+			if kind == loadCommandSegment64 && size >= 56 {
+				signature.linkeditSizeFields = append(signature.linkeditSizeFields, byteRange{offset: offset + 32, size: 8}, byteRange{offset: offset + 48, size: 8})
+			} else if kind == loadCommandSegment {
+				signature.linkeditSizeFields = append(signature.linkeditSizeFields, byteRange{offset: offset + 28, size: 4}, byteRange{offset: offset + 36, size: 4})
+			}
+		}
+		if kind == loadCommandCodeSignature && size >= 16 {
+			signature.commandOffset = offset
+			signature.dataOffset = int(file.ByteOrder.Uint32(binaryImage[offset+8 : offset+12]))
+			signature.dataSize = int(file.ByteOrder.Uint32(binaryImage[offset+12 : offset+16]))
+		}
+		offset += size
+	}
+	if signature.dataOffset <= 0 || signature.dataSize <= 0 || signature.dataOffset+signature.dataSize > len(binaryImage) {
+		return machoSignature{}, false
+	}
+	return signature, true
 }
 
 func allZero(data []byte) bool {

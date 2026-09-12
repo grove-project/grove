@@ -1,6 +1,8 @@
 package artifact_test
 
 import (
+	"bytes"
+	"crypto/rand"
 	"errors"
 	"os"
 	"path/filepath"
@@ -27,12 +29,18 @@ func TestInspectBytes(t *testing.T) {
 	if !inspection.ConfigEmpty {
 		t.Error("blank config region reported non-empty")
 	}
-	if !strings.HasPrefix(inspection.MetadataDigest, "sha256:") || !strings.HasPrefix(inspection.ArtifactDigest, "sha256:") {
-		t.Errorf("inspection digests = %q, %q", inspection.MetadataDigest, inspection.ArtifactDigest)
+	if inspection.Config != nil || inspection.CodeDigest != inspection.ArtifactDigest {
+		t.Errorf("blank config inspection = %#v", inspection)
 	}
 
-	configured := artifactBytes(validManifest, "compiled"+strings.Repeat("\x00", artifact.ConfigRegionCapacity-len("compiled")))
-	configuredInspection, err := artifact.InspectBytes(configured)
+	compilation := artifact.Compilation{
+		ProtocolVersion: artifact.CompilerProtocolVersion,
+		Revision:        "acme-r42",
+		Encoding:        "gob",
+		Payload:         []byte("compiled runtime configuration"),
+		CanonicalYAML:   []byte("revision: acme-r42\n"),
+	}
+	configured, configuredInspection, err := artifact.EmbedBytes(binary, compilation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,8 +50,23 @@ func TestInspectBytes(t *testing.T) {
 	if configuredInspection.MetadataDigest != inspection.MetadataDigest {
 		t.Error("config bytes changed metadata digest")
 	}
+	if configuredInspection.CodeDigest != inspection.CodeDigest {
+		t.Error("config bytes changed normalized code digest")
+	}
 	if configuredInspection.ArtifactDigest == inspection.ArtifactDigest {
 		t.Error("config bytes did not change artifact digest")
+	}
+	if configuredInspection.Config == nil || configuredInspection.Config.Revision != "acme-r42" || configuredInspection.Config.Digest != artifact.ConfigDigest(compilation.Payload) {
+		t.Errorf("configured metadata = %#v", configuredInspection.Config)
+	}
+	if !bytes.Equal(configuredInspection.CompiledConfig, compilation.Payload) || !bytes.Equal(configuredInspection.CanonicalYAML, compilation.CanonicalYAML) {
+		t.Errorf("configured payload = %q, YAML = %q", configuredInspection.CompiledConfig, configuredInspection.CanonicalYAML)
+	}
+	corrupt := append([]byte(nil), configured...)
+	region := bytes.Index(corrupt, []byte(artifact.ConfigRegionPrefix)) + len(artifact.ConfigRegionPrefix)
+	corrupt[region+12] ^= 0xff
+	if _, err := artifact.InspectBytes(corrupt); !errors.Is(err, artifact.ErrConfigCorrupt) {
+		t.Errorf("corrupt configuration error = %v; want %v", err, artifact.ErrConfigCorrupt)
 	}
 }
 
@@ -82,6 +105,41 @@ func TestInspectFile(t *testing.T) {
 	}
 	if _, err := artifact.InspectFile(filepath.Join(t.TempDir(), "missing")); err == nil {
 		t.Fatal("InspectFile() missing path returned nil error")
+	}
+}
+
+func TestEmbedBytesRejectsInvalidInputs(t *testing.T) {
+	base := artifactBytes(validManifest, strings.Repeat("\x00", artifact.ConfigRegionCapacity))
+	invalid := artifact.Compilation{ProtocolVersion: 99, Revision: "r1", Encoding: "gob", Payload: []byte("payload"), CanonicalYAML: []byte("revision: r1\n")}
+	if _, _, err := artifact.EmbedBytes(base, invalid); !errors.Is(err, artifact.ErrCompilationInvalid) {
+		t.Errorf("invalid compilation error = %v; want %v", err, artifact.ErrCompilationInvalid)
+	}
+	large := make([]byte, artifact.ConfigRegionCapacity*2)
+	if _, err := rand.Read(large); err != nil {
+		t.Fatal(err)
+	}
+	overflow := artifact.Compilation{ProtocolVersion: artifact.CompilerProtocolVersion, Revision: "large", Encoding: "gob", Payload: large, CanonicalYAML: large}
+	if _, _, err := artifact.EmbedBytes(base, overflow); !errors.Is(err, artifact.ErrConfigOverflow) {
+		t.Errorf("overflow error = %v; want %v", err, artifact.ErrConfigOverflow)
+	}
+	configured, _, err := artifact.EmbedBytes(base, artifact.Compilation{
+		ProtocolVersion: artifact.CompilerProtocolVersion,
+		Revision:        "r1",
+		Encoding:        "gob",
+		Payload:         []byte("payload"),
+		CanonicalYAML:   []byte("revision: r1\n"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := artifact.EmbedBytes(configured, artifact.Compilation{
+		ProtocolVersion: artifact.CompilerProtocolVersion,
+		Revision:        "r2",
+		Encoding:        "gob",
+		Payload:         []byte("other"),
+		CanonicalYAML:   []byte("revision: r2\n"),
+	}); !errors.Is(err, artifact.ErrConfigAlreadyEmbedded) {
+		t.Errorf("configured input error = %v; want %v", err, artifact.ErrConfigAlreadyEmbedded)
 	}
 }
 
