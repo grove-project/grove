@@ -54,7 +54,7 @@ one node-kill scenario.
   **Context:** Start real Grovlets, wait for health/placement, run the order
   flow, emit diagnostics on failure, and guarantee bounded child cleanup.
 
-- [ ] 3. Exercise the real command and exit contract.
+- [x] 3. Exercise the real command and exit contract.
   **Context:** Run the built CLI with the built Grovlet artifact, assert exact
   success output, and prove an unusable artifact returns non-zero.
 
@@ -72,3 +72,6 @@ one node-kill scenario.
 - 2026-09-12: The command launches three isolated Grovlets through `grovetest`,
   observes cluster/component/placement readiness without fixed sleeps, and
   completes the cross-process Grove Shop order flow before cleanup.
+- 2026-09-12: The built `grove test` command passed three real-process
+  repetitions and focused race coverage; a missing artifact returned non-zero
+  with a deterministic diagnostic.
