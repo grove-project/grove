@@ -1,6 +1,6 @@
 # Task 028 — Rollback
 
-Status: TODO
+Status: DONE
 Depends on: 027
 
 ## Goal

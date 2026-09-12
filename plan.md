@@ -67,7 +67,7 @@ handoff.
   startup failure, roll back through replicated state, verify A's artifact and
   config identities plus placement, and complete another order on A.
 
-- [ ] 4. Verify and close Task 028.
+- [x] 4. Verify and close Task 028.
   **Context:** Run formatting, diff checks, focused repetitions, vet, full
   uncached tests, and full race tests; mark DONE only after all prior E2Es pass,
   then rebase and push directly to `main`.
@@ -87,3 +87,5 @@ handoff.
   backward without decoding application config; candidate startup then failed
   on `inventory.reservation_buffer`, and Artifact A completed an order after
   the durable rollback.
+- 2026-09-12: Final verification passed `go vet ./...`,
+  `go test -count=1 ./...`, and `go test -race -count=1 ./...`.
