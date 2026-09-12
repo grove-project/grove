@@ -55,24 +55,24 @@ Task 026 remains responsible for actually launching N and N+1 side by side.
 
 ## Sub-Tasks
 
-- [ ] 1. Add durable deployment-control records.
+- [x] 1. Add durable deployment-control records.
   **Context:** Define immutable artifact, rollout, and per-node progress types;
   canonical digest/key validation; deterministic snapshots; replicated bucket
   watcher; idempotent artifact writes; generation-checked rollout writes; and
   System NATS read/write endpoints.
 
-- [ ] 2. Require artifact identity in desired state and placement.
+- [x] 2. Require artifact identity in desired state and placement.
   **Context:** Extend validation, copying, equality expectations, and recovery
   so every deployment/placement identifies the immutable artifact it refers to,
   rather than relying on a diagnostic version label.
 
-- [ ] 3. Run deployment observers in every clustered Grovlet.
+- [x] 3. Run deployment observers in every clustered Grovlet.
   **Context:** Serve and run the watcher-derived deployment view with existing
   membership/desired/placement lifecycle management. Propagate the inspected
   running artifact digest into initial Grove Shop placements without creating
   candidate execution behavior.
 
-- [ ] 4. Prove current and config-only candidate control state.
+- [x] 4. Prove current and config-only candidate control state.
   **Context:** Build two configured variants from one code image, run N on a
   real three-Grovlet cluster, publish current generation N, introduce N+1 as a
   pending candidate, and verify exact artifact/config/code identities plus
@@ -91,3 +91,9 @@ Task 026 remains responsible for actually launching N and N+1 side by side.
 - 2026-09-12: Kept deployment metadata separate from embedded configuration.
   Task 025 records identities and intent only; stable bootstrap negotiation and
   side-by-side candidate processes remain owned by Tasks 026–028.
+- 2026-09-12: Corrected runtime artifact identity to inspect the complete
+  executable rather than only the embedded manifest/config envelope. Runtime
+  placement and readiness now match offline `grove config inspect` exactly.
+- 2026-09-12: Focused System NATS, CLI, and complete Grovlet package tests pass,
+  including the real config-only N to N+1 control-state E2E and every earlier
+  distributed Grovlet scenario.
