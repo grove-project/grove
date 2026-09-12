@@ -92,6 +92,13 @@ func main() {
 	defer stop()
 
 	args := os.Args[1:]
+	if len(args) != 0 && args[0] == "bootstrap-hello" {
+		if err := runBootstrapHello(args[1:], os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "grovlet: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(args) != 0 && args[0] == "config-compile" {
 		if err := runConfigCompile(ctx, args[1:], os.Stdin, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "grovlet: %v\n", err)
@@ -429,7 +436,8 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 		if !cfg.systemNATSMembership && (cfg.groveShopInventory || cfg.groveShopInventorySubject != "") {
 			registry := &grove.Registry{}
 			if cfg.groveShopInventory {
-				if err := groveshop.RegisterInventory(registry, &groveshop.Inventory{}); err != nil {
+				inventory := groveshop.NewInventory(cfg.groveShopConfiguration.Inventory.ReservationBuffer)
+				if err := groveshop.RegisterInventory(registry, inventory); err != nil {
 					runtime.stop()
 					return nil, fmt.Errorf("register Grove Shop Inventory: %w", err)
 				}
