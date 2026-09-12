@@ -43,10 +43,12 @@ rollout identities into authoritative JetStream/KV state.
   reservation. The bundle contains the target-produced runtime bytes and
   canonical YAML. The artifact layer verifies lengths and SHA-256 integrity but
   remains unaware of application fields.
-- Define code identity by hashing the complete artifact with only the reserved
-  config bytes normalized to zero. Config identity hashes the compiled runtime
-  bytes; artifact identity hashes exact final bytes. Config-only variants must
-  therefore share code identity and differ in config/artifact identity.
+- Define code identity by hashing the complete artifact with the reserved
+  config bytes normalized to zero. On macOS, exclude the ad-hoc signature and
+  its mutable Mach-O size metadata as platform packaging rather than code.
+  Config identity hashes compiled runtime bytes; artifact identity hashes exact
+  final bytes. Config-only variants must therefore share code identity and
+  differ in config/artifact identity.
 - Reject embedding into an already configured artifact and reject existing
   output paths. A changed configuration is produced from the canonical blank
   binary as a new immutable output artifact; no in-place or live mutation path
@@ -61,30 +63,30 @@ rollout identities into authoritative JetStream/KV state.
 
 ## Sub-Tasks
 
-- [ ] 1. Compile Grove Shop configuration in the target binary.
+- [x] 1. Compile Grove Shop configuration in the target binary.
   **Context:** Add typed config/defaults/strict validation/canonical YAML and a
   private compiler command with versioned structured responses. Decode the Gob
   result defensively at runtime and expose immutable identity/facts.
 
-- [ ] 2. Encode immutable configured artifacts.
+- [x] 2. Encode immutable configured artifacts.
   **Context:** Extend artifact inspection with code/config/artifact digests,
   deterministic compressed bundles, fixed-region bounds and integrity checks,
   new-output embedding, and extraction. Cover round trips, overflow,
   configured-input rejection, and corruption/incompatibility.
 
-- [ ] 3. Add schema-agnostic config CLI commands.
+- [x] 3. Add schema-agnostic config CLI commands.
   **Context:** Implement `config validate`, `embed`, `inspect`, and `extract`.
   Delegate validation to the selected target executable, preserve structured
   errors, and test with fake compiler semantics to prove CLI/target version
   separation.
 
-- [ ] 4. Apply compiled configuration in Grove Shop.
+- [x] 4. Apply compiled configuration in Grove Shop.
   **Context:** Construct Inventory from the embedded reservation buffer, expose
   revision/customer/cluster/zone/config digest through a read-only Web endpoint
   and Grovlet readiness, and retain safe defaults for the blank development
   artifact.
 
-- [ ] 5. Prove configured variants end to end.
+- [x] 5. Prove configured variants end to end.
   **Context:** Build the base artifact, use the real CLI and target compiler to
   create cloud and edge variants, inspect/extract them, assert common code but
   distinct config/artifact digests, reject invalid YAML, deploy a configured
@@ -101,3 +103,10 @@ rollout identities into authoritative JetStream/KV state.
 - 2026-09-12: Kept configuration bytes out of System NATS/KV; Task 024 identity
   remains local artifact/runtime metadata until Task 025 introduces replicated
   rollout records.
+- 2026-09-12: Focused Task 024 tests passed three consecutive runs and under
+  the race detector, including real cloud/edge artifact compilation,
+  inspection, extraction, deployment, and configured application behavior.
+- 2026-09-12: Configured Mach-O artifacts are ad-hoc re-signed after embedding
+  so macOS can execute them. Signature blobs and signer-mutated load metadata
+  are normalized out of code identity; exact signed bytes remain represented
+  by artifact identity.

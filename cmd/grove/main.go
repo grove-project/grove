@@ -30,6 +30,10 @@ var (
 	errServiceIDRequired     = errors.New("service ID must be greater than zero")
 	errComponentNotFound     = errors.New("component is not present in the node view")
 	errUnexpectedArguments   = errors.New("unexpected arguments")
+	errConfigAction          = errors.New("config action must be validate, embed, inspect, or extract")
+	errBinaryPathRequired    = errors.New("binary path is required")
+	errConfigPathRequired    = errors.New("config path is required")
+	errOutputPathRequired    = errors.New("output path is required")
 )
 
 type commandName string
@@ -39,6 +43,7 @@ const (
 	commandNodes      commandName = "nodes"
 	commandComponents commandName = "components"
 	commandComponent  commandName = "component"
+	commandConfig     commandName = "config"
 )
 
 type componentAction string
@@ -48,12 +53,25 @@ const (
 	componentStop  componentAction = "stop"
 )
 
+type configAction string
+
+const (
+	configValidate configAction = "validate"
+	configEmbed    configAction = "embed"
+	configInspect  configAction = "inspect"
+	configExtract  configAction = "extract"
+)
+
 type invocation struct {
 	command       commandName
 	action        componentAction
 	systemNATSURL string
 	nodeID        string
 	serviceID     grove.ServiceID
+	configAction  configAction
+	binaryPath    string
+	configPath    string
+	outputPath    string
 }
 
 type controlClient interface {
@@ -79,6 +97,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if invocation.command == commandConfig {
+		return executeConfig(ctx, invocation, stdout)
+	}
 	client, err := systemnats.Connect(ctx, invocation.systemNATSURL)
 	if err != nil {
 		return err
@@ -96,6 +117,8 @@ func parseInvocation(args []string, stderr io.Writer) (invocation, error) {
 		return parseReadInvocation(commandName(args[0]), args[1:], stderr)
 	case commandComponent:
 		return parseComponentInvocation(args[1:], stderr)
+	case commandConfig:
+		return parseConfigInvocation(args[1:], stderr)
 	default:
 		return invocation{}, fmt.Errorf("parse command %q: %w", args[0], errCommandUnknown)
 	}

@@ -54,6 +54,8 @@ type config struct {
 	groveShopInventorySubject string
 	groveShopWeb              bool
 	groveShopWebListen        string
+	groveShopConfiguration    groveshop.Configuration
+	groveShopConfigDigest     string
 	nodeID                    string
 	advertisedEndpoint        string
 }
@@ -64,6 +66,10 @@ type lifecycleEvent struct {
 	AdvertisedEndpoint string `json:"advertised_endpoint,omitempty"`
 	SystemNATSURL      string `json:"system_nats_url,omitempty"`
 	SystemNATSRouteURL string `json:"system_nats_route_url,omitempty"`
+	ConfigRevision     string `json:"config_revision,omitempty"`
+	ConfigDigest       string `json:"config_digest,omitempty"`
+	ClusterName        string `json:"cluster_name,omitempty"`
+	NodeZone           string `json:"node_zone,omitempty"`
 }
 
 type runtimeDirError struct {
@@ -84,6 +90,13 @@ func main() {
 	defer stop()
 
 	args := os.Args[1:]
+	if len(args) != 0 && args[0] == "config-compile" {
+		if err := runConfigCompile(ctx, args[1:], os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "grovlet: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	runCommand := run
 	if len(args) != 0 && args[0] == "worker" {
 		args = args[1:]
@@ -96,13 +109,16 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
-	if _, err := inspectEmbeddedGroveShopArtifact(); err != nil {
+	inspection, configuration, err := loadEmbeddedGroveShopConfiguration()
+	if err != nil {
 		return fmt.Errorf("verify embedded Grove Shop artifact: %w", err)
 	}
 	cfg, err := parseConfig(args, stderr)
 	if err != nil {
 		return err
 	}
+	cfg.groveShopConfiguration = configuration
+	cfg.groveShopConfigDigest = inspection.Config.Digest
 	if err := prepareRuntimeDir(cfg.runtimeDir); err != nil {
 		return err
 	}
@@ -112,13 +128,20 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 
 	encoder := json.NewEncoder(stdout)
-	if err := encoder.Encode(lifecycleEvent{
+	ready := lifecycleEvent{
 		Event:              "ready",
 		NodeID:             cfg.nodeID,
 		AdvertisedEndpoint: cfg.advertisedEndpoint,
 		SystemNATSURL:      systemRuntime.url,
 		SystemNATSRouteURL: systemRuntime.routeURL,
-	}); err != nil {
+	}
+	if !inspection.ConfigEmpty {
+		ready.ConfigRevision = configuration.Revision
+		ready.ConfigDigest = inspection.Config.Digest
+		ready.ClusterName = configuration.Cluster.Name
+		ready.NodeZone = configuration.Node.Zone
+	}
+	if err := encoder.Encode(ready); err != nil {
 		systemRuntime.stop()
 		return fmt.Errorf("encode ready event: %w", err)
 	}

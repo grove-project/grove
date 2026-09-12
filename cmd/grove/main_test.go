@@ -320,12 +320,20 @@ func waitForGroveOutput(ctx context.Context, systemNATSURL, nodeID, want string,
 func runGroveCLI(ctx context.Context, systemNATSURL, nodeID string, args ...string) (string, error) {
 	commandArgs := append([]string(nil), args...)
 	commandArgs = append(commandArgs, "--system-nats-url", systemNATSURL, "--node-id", nodeID)
-	command := exec.CommandContext(ctx, grovePath, commandArgs...)
+	return runGroveCommand(ctx, commandArgs...)
+}
+
+func runGroveCommand(ctx context.Context, args ...string) (string, error) {
+	command := exec.CommandContext(ctx, grovePath, args...)
 	output, err := command.CombinedOutput()
 	return string(output), err
 }
 
 func startGrovlets(t *testing.T, ctx context.Context) ([]*grovetest.Node, string) {
+	return startGrovletsFromArtifact(t, ctx, grovletPath)
+}
+
+func startGrovletsFromArtifact(t *testing.T, ctx context.Context, artifactPath string) ([]*grovetest.Node, string) {
 	t.Helper()
 	nodeIDs := []string{"node-1", "node-2", "node-3"}
 	nodeArgs := [][]string{
@@ -349,7 +357,7 @@ func startGrovlets(t *testing.T, ctx context.Context) ([]*grovetest.Node, string
 			"--system-nats-membership",
 		}
 		args = append(args, nodeArgs[i]...)
-		node, err := grovetest.StartNode(grovletPath, args...)
+		node, err := grovetest.StartNode(artifactPath, args...)
 		if err != nil {
 			t.Fatal(err)
 		}

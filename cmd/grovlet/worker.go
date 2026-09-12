@@ -173,6 +173,10 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if err != nil {
 		return err
 	}
+	inspection, applicationConfig, err := loadEmbeddedGroveShopConfiguration()
+	if err != nil {
+		return fmt.Errorf("load embedded Grove Shop configuration: %w", err)
+	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	parent := os.NewFile(uintptr(cfg.parentFD), "grovlet-parent")
@@ -206,7 +210,8 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			return fmt.Errorf("register Grove Shop Orders: %w", err)
 		}
 	case workerInventory:
-		if err := groveshop.RegisterInventory(registry, &groveshop.Inventory{}); err != nil {
+		inventory := groveshop.NewInventory(applicationConfig.Inventory.ReservationBuffer)
+		if err := groveshop.RegisterInventory(registry, inventory); err != nil {
 			return fmt.Errorf("register Grove Shop Inventory: %w", err)
 		}
 	case workerWeb:
@@ -215,7 +220,7 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			return fmt.Errorf("listen for Grove Shop Web: %w", err)
 		}
 		webServer = &http.Server{
-			Handler:           groveshop.WebHandler(),
+			Handler:           groveshop.WebHandlerWithConfiguration(applicationConfig, inspection.Config.Digest),
 			ReadHeaderTimeout: 5 * time.Second,
 		}
 		defer webServer.Close()
