@@ -1,6 +1,6 @@
 # Task 026 — Side-by-side N and N+1
 
-Status: TODO
+Status: DONE
 Depends on: 025
 
 ## Goal

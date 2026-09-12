@@ -76,7 +76,7 @@ handoff. Task 027 remains responsible for health-gated authoritative cutover.
   placement and N+1 through its explicit subject, and prove N remains the
   authoritative placement throughout.
 
-- [ ] 5. Verify and close Task 026.
+- [x] 5. Verify and close Task 026.
   **Context:** Run formatting, diff checks, focused repetitions, vet, full
   uncached tests, and full race tests; mark DONE only after all prior E2Es pass,
   then rebase and push directly to `main`.
@@ -92,3 +92,7 @@ handoff. Task 027 remains responsible for health-gated authoritative cutover.
   plus candidate process topology passed three repetitions and the race
   detector. Current placement remained unchanged while both exact configured
   artifacts were explicitly invoked through System NATS.
+- 2026-09-12: Hardened the existing CLI lifecycle E2E to wait for placement
+  recovery after Inventory restart; its focused race run passed. Final
+  verification passed `go vet ./...`, `go test -count=1 ./...`, and
+  `go test -race -count=1 ./...`.
