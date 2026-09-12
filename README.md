@@ -59,6 +59,4 @@ Last event
 | **[Operations](docs/operations/)** | Understand cluster state, changes, failures, and recovery. |
 | **[Vision](docs/vision/vision.md)** | Why Grove treats a distributed application as one product. |
 
-Want the machinery underneath? Read the **[architecture](docs/architecture/system-architecture.md)** and **[ADRs](docs/adr/)**.
-
 > **Project status:** Grove is under active development. Examples in the docs define the intended experience; some commands and runtime behavior may not be implemented yet.
