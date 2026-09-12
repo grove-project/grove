@@ -81,6 +81,7 @@ func (r *serviceRecovery) reconcile(ctx context.Context) error {
 		ServiceID:         current.ServiceID,
 		NodeID:            r.nodeID,
 		InvocationSubject: component.InvocationSubject,
+		ArtifactDigest:    current.ArtifactDigest,
 	}
 	observed, err := r.placement.Replace(ctx, r.transport, current, replacement)
 	if err == nil {

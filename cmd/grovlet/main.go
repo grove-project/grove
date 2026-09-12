@@ -56,6 +56,7 @@ type config struct {
 	groveShopWebListen        string
 	groveShopConfiguration    groveshop.Configuration
 	groveShopConfigDigest     string
+	groveShopArtifactDigest   string
 	nodeID                    string
 	advertisedEndpoint        string
 }
@@ -68,6 +69,7 @@ type lifecycleEvent struct {
 	SystemNATSRouteURL string `json:"system_nats_route_url,omitempty"`
 	ConfigRevision     string `json:"config_revision,omitempty"`
 	ConfigDigest       string `json:"config_digest,omitempty"`
+	ArtifactDigest     string `json:"artifact_digest,omitempty"`
 	ClusterName        string `json:"cluster_name,omitempty"`
 	NodeZone           string `json:"node_zone,omitempty"`
 }
@@ -119,6 +121,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	cfg.groveShopConfiguration = configuration
 	cfg.groveShopConfigDigest = inspection.Config.Digest
+	cfg.groveShopArtifactDigest = inspection.ArtifactDigest
 	if err := prepareRuntimeDir(cfg.runtimeDir); err != nil {
 		return err
 	}
@@ -138,6 +141,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if !inspection.ConfigEmpty {
 		ready.ConfigRevision = configuration.Revision
 		ready.ConfigDigest = inspection.Config.Digest
+		ready.ArtifactDigest = inspection.ArtifactDigest
 		ready.ClusterName = configuration.Cluster.Name
 		ready.NodeZone = configuration.Node.Zone
 	}
@@ -259,23 +263,25 @@ func validNodeID(nodeID string) bool {
 }
 
 type systemNATSRuntime struct {
-	server           *systemnats.Server
-	transport        *systemnats.Transport
-	url              string
-	routeURL         string
-	membershipCancel context.CancelFunc
-	membershipDone   chan struct{}
-	placementCancel  context.CancelFunc
-	placementDone    chan struct{}
-	healthCancel     context.CancelFunc
-	healthDone       chan struct{}
-	components       *componentManager
-	desiredCancel    context.CancelFunc
-	desiredDone      chan struct{}
-	recoveryCancel   context.CancelFunc
-	recoveryDone     chan struct{}
-	reconcileCancel  context.CancelFunc
-	reconcileDone    chan struct{}
+	server            *systemnats.Server
+	transport         *systemnats.Transport
+	url               string
+	routeURL          string
+	membershipCancel  context.CancelFunc
+	membershipDone    chan struct{}
+	placementCancel   context.CancelFunc
+	placementDone     chan struct{}
+	healthCancel      context.CancelFunc
+	healthDone        chan struct{}
+	components        *componentManager
+	desiredCancel     context.CancelFunc
+	desiredDone       chan struct{}
+	deploymentsCancel context.CancelFunc
+	deploymentsDone   chan struct{}
+	recoveryCancel    context.CancelFunc
+	recoveryDone      chan struct{}
+	reconcileCancel   context.CancelFunc
+	reconcileDone     chan struct{}
 }
 
 func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error) {
@@ -341,6 +347,13 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 			return nil, err
 		}
 		runtime.startMembership(ctx, membership)
+
+		deployments := systemnats.NewDeployments()
+		if err := transport.ServeDeployments(ctx, cfg.nodeID, deployments); err != nil {
+			runtime.stop()
+			return nil, err
+		}
+		runtime.startDeployments(ctx, deployments)
 
 		desired := systemnats.NewDesired()
 		placementRecords := groveShopPlacements(cfg)
@@ -471,6 +484,7 @@ func groveShopPlacements(cfg config) []systemnats.PlacementRecord {
 			ServiceID:         groveshop.ServiceOrders,
 			NodeID:            cfg.nodeID,
 			InvocationSubject: componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceOrders),
+			ArtifactDigest:    cfg.groveShopArtifactDigest,
 		})
 	}
 	if cfg.groveShopInventory {
@@ -478,6 +492,7 @@ func groveShopPlacements(cfg config) []systemnats.PlacementRecord {
 			ServiceID:         groveshop.ServiceInventory,
 			NodeID:            cfg.nodeID,
 			InvocationSubject: componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceInventory),
+			ArtifactDigest:    cfg.groveShopArtifactDigest,
 		})
 	}
 	if cfg.groveShopWeb {
@@ -485,6 +500,7 @@ func groveShopPlacements(cfg config) []systemnats.PlacementRecord {
 			ServiceID:         groveshop.ServiceWeb,
 			NodeID:            cfg.nodeID,
 			InvocationSubject: componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceWeb),
+			ArtifactDigest:    cfg.groveShopArtifactDigest,
 		})
 	}
 	return placements
@@ -629,6 +645,16 @@ func (r *systemNATSRuntime) startDesired(ctx context.Context, desired *systemnat
 	}()
 }
 
+func (r *systemNATSRuntime) startDeployments(ctx context.Context, deployments *systemnats.Deployments) {
+	deploymentsCtx, cancel := context.WithCancel(ctx)
+	r.deploymentsCancel = cancel
+	r.deploymentsDone = make(chan struct{})
+	go func() {
+		defer close(r.deploymentsDone)
+		_ = deployments.Run(deploymentsCtx, r.transport)
+	}()
+}
+
 func (r *systemNATSRuntime) startRecovery(ctx context.Context, recovery *serviceRecovery) {
 	recoveryCtx, cancel := context.WithCancel(ctx)
 	r.recoveryCancel = cancel
@@ -674,6 +700,10 @@ func (r *systemNATSRuntime) stop() {
 	if r.desiredCancel != nil {
 		r.desiredCancel()
 		<-r.desiredDone
+	}
+	if r.deploymentsCancel != nil {
+		r.deploymentsCancel()
+		<-r.deploymentsDone
 	}
 	if r.membershipCancel != nil {
 		r.membershipCancel()

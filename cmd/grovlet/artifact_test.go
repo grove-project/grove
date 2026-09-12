@@ -68,9 +68,9 @@ func TestGroveShopArtifactDeploys(t *testing.T) {
 	}()
 
 	wantPlacement := []systemnats.PlacementRecord{
-		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: "_GROVE.system.artifact.node-1.service.1"},
-		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: "_GROVE.system.artifact.node-2.service.2"},
-		{ServiceID: groveshop.ServiceWeb, NodeID: "node-1", InvocationSubject: "_GROVE.system.artifact.node-1.service.5"},
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: "_GROVE.system.artifact.node-1.service.1", ArtifactDigest: grovletArtifactDigest},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: "_GROVE.system.artifact.node-2.service.2", ArtifactDigest: grovletArtifactDigest},
+		{ServiceID: groveshop.ServiceWeb, NodeID: "node-1", InvocationSubject: "_GROVE.system.artifact.node-1.service.5", ArtifactDigest: grovletArtifactDigest},
 	}
 	if _, err := waitForGrovletPlacement(ctx, cluster, wantPlacement); err != nil {
 		t.Fatalf("wait for artifact placement: %v\n%s", err, clusterLogs(cluster.nodes))

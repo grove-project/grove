@@ -6,6 +6,8 @@ import (
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
+const recoveryArtifactDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 func TestSelectRecoveryUsesFirstHealthyNode(t *testing.T) {
 	cluster := systemnats.ClusterView{
 		Ready: true,
@@ -15,9 +17,9 @@ func TestSelectRecoveryUsesFirstHealthyNode(t *testing.T) {
 			{NodeID: "node-c", Health: systemnats.HealthHealthy, LastSeen: "now"},
 		},
 	}
-	want := systemnats.PlacementRecord{ServiceID: 2, NodeID: "node-b", InvocationSubject: "inventory.node-b"}
+	want := systemnats.PlacementRecord{ServiceID: 2, NodeID: "node-b", InvocationSubject: "inventory.node-b", ArtifactDigest: recoveryArtifactDigest}
 	placement := systemnats.PlacementView{Ready: true, Placements: []systemnats.PlacementRecord{
-		{ServiceID: 1, NodeID: "node-a", InvocationSubject: "orders.node-a"},
+		{ServiceID: 1, NodeID: "node-a", InvocationSubject: "orders.node-a", ArtifactDigest: recoveryArtifactDigest},
 		want,
 	}}
 
@@ -39,7 +41,7 @@ func TestSelectRecoveryWaitsForPriorHealth(t *testing.T) {
 		},
 	}
 	placement := systemnats.PlacementView{Ready: true, Placements: []systemnats.PlacementRecord{{
-		ServiceID: 2, NodeID: "node-b", InvocationSubject: "inventory.node-b",
+		ServiceID: 2, NodeID: "node-b", InvocationSubject: "inventory.node-b", ArtifactDigest: recoveryArtifactDigest,
 	}}}
 	if got, ok := selectRecovery("node-a", cluster, placement); ok {
 		t.Errorf("startup selection = %#v, true; want no decision before node-b was healthy", got)

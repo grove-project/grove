@@ -10,7 +10,7 @@ import (
 
 func TestDesiredStartsSeparatesIntentFromObservedState(t *testing.T) {
 	desired := systemnats.DesiredView{Ready: true, Deployments: []systemnats.DesiredDeployment{{
-		ApplicationID: "grove-shop", Version: "current",
+		ApplicationID: "grove-shop", Version: "current", ArtifactDigest: recoveryArtifactDigest,
 		Components: []systemnats.DesiredComponent{{ServiceID: 1, NodeID: "node-a"}, {ServiceID: 2, NodeID: "node-b"}},
 	}}}
 	observed := systemnats.ComponentView{Components: []systemnats.ComponentStatus{
