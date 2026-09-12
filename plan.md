@@ -1,103 +1,103 @@
-# Plan: Define the Grove Shop deployment artifact
+# Plan: Embed immutable Grove Shop configuration
 
 ## Goal
 
-Complete Task 023 by making the Grovlet executable a self-describing immutable
-Grove Shop artifact containing application/runtime metadata, application code,
-embedded Web UI assets, and a fixed-capacity reserved customer-configuration
-region. Deploy that exact binary to three real Grovlets and prove its Web and
-business paths without implementing configuration embedding or rollout.
+Complete Task 024 by having the `grove` CLI delegate YAML compilation to the
+target Grovlet binary, embed the returned validated representation into the
+artifact's fixed region, inspect/extract it read-only, and run that same
+representation in Grove Shop. Prove defaults, validation, integrity, immutable
+node facts, and distinct code/config/artifact identities without introducing
+rollout control state.
 
 ## Context
 
-Tasks 001 through 022 are complete on `origin/main`. The current Grovlet binary
-already contains and launches Grove Shop Orders and Inventory workers. Task 023
-adds the artifact boundary and the first Grove-managed Web worker. Task 024
-retains ownership of target-binary configuration validation, config
-embedding/extraction commands, runtime config access, and separate code/config
-identity.
+Tasks 001 through 023 are complete on `origin/main`. Task 023 established a
+self-describing Grovlet artifact with a uniquely framed blank 4 KiB config
+reservation and offline manifest/artifact inspection. Task 024 fills that
+reservation. Task 025 retains ownership of publishing configured artifact and
+rollout identities into authoritative JetStream/KV state.
 
 ### Key Files
 
-- `tasks/023-deployment-artifact-contract.md` — current acceptance contract.
-- `internal/artifact/` — versioned manifest, reserved-region framing, offline
-  executable inspection, validation, and digest calculation.
-- `cmd/grovlet/artifact.go` — Grove Shop manifest and blank reserved region
-  compiled into the shipped executable.
-- `cmd/grovlet/main.go` and `cmd/grovlet/worker.go` — Web component declaration,
-  placement, and managed worker lifecycle.
-- `demo/groveshop/web.go` and `demo/groveshop/web/` — embedded HTTP assets and
-  handler shipped inside the artifact.
-- `cmd/grovlet/main_test.go` — real artifact build, inspection, cluster deploy,
-  HTTP, and cross-node business E2E.
+- `tasks/024-embedded-customer-configuration.md` — current acceptance contract.
+- `demo/groveshop/config.go` — application-owned YAML schema, defaults,
+  validation, canonical output, and Gob runtime representation.
+- `internal/artifact/config.go` — schema-agnostic compiler protocol,
+  deterministic compression, fixed-region encoding/decoding, integrity,
+  normalized code digest, embedding, and extraction.
+- `cmd/grovlet/config.go` — private target-binary `config-compile` entrypoint
+  and defensive runtime loading of the same compiled representation.
+- `cmd/grove/main.go` — `config validate|embed|inspect|extract` CLI grammar and
+  execution; it transports bytes and metadata but never parses Grove Shop YAML.
+- `cmd/grovlet/*_test.go`, `cmd/grove/main_test.go`, and
+  `internal/artifact/*_test.go` — compiler, runtime, CLI, corruption, identity,
+  version-skew, and real configured-artifact coverage.
 
 ### Decisions Made
 
-- Treat the existing Grovlet executable as the single deployable application
-  artifact: every node receives the same binary and flags select which declared
-  components it hosts. Do not introduce per-service binaries or packaging.
-- Embed a small, explicitly versioned JSON manifest with Grove Shop identity,
-  code version, component entrypoints/runtime mode, UI asset paths, and reserved
-  config capacity. Compute SHA-256 metadata and complete-artifact digests during
-  offline inspection; avoid a self-referential digest inside the binary.
-- Compile a uniquely framed fixed-capacity blank byte region into the artifact.
-  Task 023 only validates and exposes the reservation. Task 024 will define its
-  config payload/header and post-build mutation workflow.
-- Add Web as a normal managed component worker. It listens on an explicitly
-  configured local address and serves only an embedded filesystem, so the E2E
-  needs neither a separate frontend deployment nor loose runtime assets.
-- Keep Payment and Shipping as the existing in-process Orders dependencies for
-  this increment. Declaring or placing them independently would extend beyond
-  the Task 023 Web/artifact proof.
+- Use an explicitly versioned JSON subprocess protocol for target compilation.
+  The CLI sends source bytes on stdin to `<binary> config-compile`; only that
+  binary applies schema, defaults, and validation and returns Gob bytes,
+  canonical YAML, revision, and structured validation errors.
+- Store a deterministic gzip-compressed, versioned config bundle in the fixed
+  reservation. The bundle contains the target-produced runtime bytes and
+  canonical YAML. The artifact layer verifies lengths and SHA-256 integrity but
+  remains unaware of application fields.
+- Define code identity by hashing the complete artifact with only the reserved
+  config bytes normalized to zero. Config identity hashes the compiled runtime
+  bytes; artifact identity hashes exact final bytes. Config-only variants must
+  therefore share code identity and differ in config/artifact identity.
+- Reject embedding into an already configured artifact and reject existing
+  output paths. A changed configuration is produced from the canonical blank
+  binary as a new immutable output artifact; no in-place or live mutation path
+  is added.
+- Grove Shop config includes revision, customer name, cluster name, node zone,
+  and Inventory reservation buffer. Defaults are applied by the target binary;
+  negative buffers fail compilation. Runtime Inventory and the read-only Web
+  config endpoint consume the compiled values.
+- Use `go.yaml.in/yaml/v3` with strict known-field decoding for the
+  application-owned YAML boundary. No YAML dependency or schema knowledge is
+  introduced into `cmd/grove` or `internal/artifact`.
 
 ## Sub-Tasks
 
-- [x] 1. Define and inspect the immutable artifact envelope.
-  **Context:** Add manifest/inspection types, strict validation, unique binary
-  framing, a fixed blank config reservation, and SHA-256 identities. Cover
-  valid, malformed, missing, and file-inspection paths with unit tests.
-  **Outcome:** `internal/artifact` validates a versioned JSON manifest and its
-  uniquely framed 4 KiB config reservation from executable bytes or a file.
-  Inspection reports exact metadata and complete-artifact SHA-256 digests and
-  detects blank versus populated reservation bytes. Unit tests cover malformed,
-  missing, short, blank, populated, and file-backed inputs.
+- [ ] 1. Compile Grove Shop configuration in the target binary.
+  **Context:** Add typed config/defaults/strict validation/canonical YAML and a
+  private compiler command with versioned structured responses. Decode the Gob
+  result defensively at runtime and expose immutable identity/facts.
 
-- [x] 2. Embed and serve the basic Grove Shop UI.
-  **Context:** Add the basic single-page Orders/Cluster Status shell as embedded
-  assets and run its HTTP handler from a Grove-managed Web worker with explicit
-  placement and lifecycle metadata.
-  **Outcome:** The Grove Shop package embeds a responsive Orders and Cluster
-  Status shell. Service 5 declares Web, and the Grovlet starts/stops its HTTP
-  server as a normal managed worker using explicit placement and listen
-  configuration.
+- [ ] 2. Encode immutable configured artifacts.
+  **Context:** Extend artifact inspection with code/config/artifact digests,
+  deterministic compressed bundles, fixed-region bounds and integrity checks,
+  new-output embedding, and extraction. Cover round trips, overflow,
+  configured-input rejection, and corruption/incompatibility.
 
-- [x] 3. Prove the built artifact end to end.
-  **Context:** Build one Grovlet artifact, inspect its manifest and digests,
-  verify the UI fingerprint is in the executable, deploy that same path across
-  three real Grovlets, request the Web root, and complete an Orders-to-Inventory
-  call through placement.
-  **Outcome:** `TestGroveShopArtifactDeploys` inspects the built Grovlet,
-  verifies its exact embedded UI bytes, deploys the unchanged executable to
-  three processes, observes Web/Orders/Inventory placement, receives the UI
-  over HTTP, and completes a placement-routed order.
+- [ ] 3. Add schema-agnostic config CLI commands.
+  **Context:** Implement `config validate`, `embed`, `inspect`, and `extract`.
+  Delegate validation to the selected target executable, preserve structured
+  errors, and test with fake compiler semantics to prove CLI/target version
+  separation.
 
-- [x] 4. Verify and close Task 023.
+- [ ] 4. Apply compiled configuration in Grove Shop.
+  **Context:** Construct Inventory from the embedded reservation buffer, expose
+  revision/customer/cluster/zone/config digest through a read-only Web endpoint
+  and Grovlet readiness, and retain safe defaults for the blank development
+  artifact.
+
+- [ ] 5. Prove configured variants end to end.
+  **Context:** Build the base artifact, use the real CLI and target compiler to
+  create cloud and edge variants, inspect/extract them, assert common code but
+  distinct config/artifact digests, reject invalid YAML, deploy a configured
+  artifact, and verify exactly compiled runtime behavior through real processes.
+
+- [ ] 6. Verify and close Task 024.
   **Context:** Run formatting, diff checks, focused repetitions, vet, the full
   uncached suite, and the full race suite before marking the task DONE.
-  **Outcome:** Formatting and diff checks are clean. The artifact E2E passed
-  three consecutive runs and a race-enabled run; `go vet ./...`, `go test
-  -count=1 ./...`, and `go test -race -count=1 ./...` pass with every earlier
-  test.
 
 ## Log
 
-- 2026-09-11: Task 022 passed all focused/full non-race and race tests and was
-  pushed to `main` at `c19972d`.
-- 2026-09-11: Reserved all semantic customer-config compilation, mutation,
-  extraction, and runtime use for Task 024; Task 023 establishes only the fixed
-  artifact reservation and inspection contract.
-- 2026-09-11: The artifact deployment E2E passed three consecutive runs in
-  10.63–15.33 seconds and a race-enabled run in 15.90 seconds.
-- 2026-09-11: Completed Task 023 after the full uncached suite passed with
-  `cmd/grovlet` in 168.510 seconds and the full race suite passed with
-  `cmd/grovlet` in 184.503 seconds.
+- 2026-09-12: Task 023 passed all focused/full non-race and race tests and was
+  pushed to `main` at `2344ba4`.
+- 2026-09-12: Kept configuration bytes out of System NATS/KV; Task 024 identity
+  remains local artifact/runtime metadata until Task 025 introduces replicated
+  rollout records.
