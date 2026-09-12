@@ -53,6 +53,7 @@ Last event
 
 | | |
 |---|---|
+| **[Concepts](docs/concepts.md)** | Understand Grove's mental model: services, workers, Grovlets, nodes, clusters, ingress, and RPC. |
 | **[SDK](sdk/)** | Write ordinary Go services and make distributed boundaries explicit. |
 | **[CLI](docs/cli/)** | Run, inspect, test, debug, deploy, and recover the application. |
 | **[Operations](docs/operations/)** | Understand cluster state, changes, failures, and recovery. |
