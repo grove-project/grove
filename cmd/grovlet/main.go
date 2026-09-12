@@ -19,6 +19,7 @@ import (
 
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/demo/groveshop"
+	"github.com/grove-project/grove/internal/bootstrap"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
@@ -473,6 +474,16 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 			cfg.systemNATSSubject,
 			handler,
 		); err != nil {
+			runtime.stop()
+			return nil, err
+		}
+	}
+	if cfg.nodeID != "" {
+		if err := transport.ServeBootstrapReadiness(ctx, bootstrap.Readiness{
+			NodeID:         cfg.nodeID,
+			ArtifactDigest: cfg.groveShopArtifactDigest,
+			State:          bootstrap.ReadinessHealthy,
+		}); err != nil {
 			runtime.stop()
 			return nil, err
 		}

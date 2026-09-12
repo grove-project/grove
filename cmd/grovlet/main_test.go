@@ -29,6 +29,39 @@ var (
 	grovletArtifactDigest string
 )
 
+func TestStandaloneGrovletReportsBootstrapReadiness(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	server, err := systemnats.StartServer(ctx, "127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Shutdown)
+	node, err := grovetest.StartNode(
+		grovletPath,
+		"--node-id", "candidate-inventory",
+		"--advertise-endpoint", "nats-subject://system/candidate-inventory",
+		"--system-nats-url", server.URL(),
+		"--system-nats-subject", "_GROVE.system.candidate.inventory",
+		"--grove-shop-inventory",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = node.Cleanup() })
+	if err := node.WaitReady(ctx); err != nil {
+		t.Fatalf("wait for candidate: %v; logs=%q", err, node.Logs())
+	}
+	transport, err := systemnats.Connect(ctx, server.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(transport.Close)
+	if err := transport.WaitBootstrapHealthy(ctx, "candidate-inventory", grovletArtifactDigest); err != nil {
+		t.Fatalf("wait for exact candidate readiness: %v; logs=%q", err, node.Logs())
+	}
+}
+
 // A Grovlet announces when it is ready and when a graceful shutdown completes.
 func Example() {
 	runtimeDir, err := os.MkdirTemp("", "grovlet-example-")

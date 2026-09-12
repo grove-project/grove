@@ -64,7 +64,7 @@ JetStream/KV facts; candidate readiness is ephemeral System NATS messaging.
   commit candidate-health and switching generations, replace placements in
   deterministic order, and finish with N+1 active.
 
-- [ ] 3. Expose readiness from running candidate Grovlets.
+- [x] 3. Expose readiness from running candidate Grovlets.
   **Context:** Register readiness after the candidate invocation subscription
   is active so health implies the process can receive application traffic.
 
@@ -88,3 +88,6 @@ JetStream/KV facts; candidate readiness is ephemeral System NATS messaging.
   passed ten focused repetitions.
 - 2026-09-12: Exact-artifact readiness and the R3 JetStream/KV upgrade state
   machine passed five focused integration repetitions.
+- 2026-09-12: A standalone Grovlet now exposes readiness only after its
+  application invocation subscription is active; five focused process runs
+  passed.
