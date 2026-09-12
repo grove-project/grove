@@ -1,6 +1,6 @@
 # Task 024 — Embedded customer and node configuration
 
-Status: TODO
+Status: DONE
 Depends on: 023
 
 ## Goal

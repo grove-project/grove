@@ -92,7 +92,7 @@ rollout identities into authoritative JetStream/KV state.
   distinct config/artifact digests, reject invalid YAML, deploy a configured
   artifact, and verify exactly compiled runtime behavior through real processes.
 
-- [ ] 6. Verify and close Task 024.
+- [x] 6. Verify and close Task 024.
   **Context:** Run formatting, diff checks, focused repetitions, vet, the full
   uncached suite, and the full race suite before marking the task DONE.
 
@@ -110,3 +110,6 @@ rollout identities into authoritative JetStream/KV state.
   so macOS can execute them. Signature blobs and signer-mutated load metadata
   are normalized out of code identity; exact signed bytes remain represented
   by artifact identity.
+- 2026-09-12: Task 024 passed `go vet ./...`, `go test -count=1 ./...`,
+  and `go test -race -count=1 ./...`; marked the task DONE with no Task 025
+  rollout or replicated-state behavior introduced.
