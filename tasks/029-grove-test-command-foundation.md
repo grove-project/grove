@@ -1,6 +1,6 @@
 # Task 029 — `grove test` command foundation
 
-Status: TODO
+Status: DONE
 Depends on: 022, 023
 
 ## Goal

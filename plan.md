@@ -58,7 +58,7 @@ one node-kill scenario.
   **Context:** Run the built CLI with the built Grovlet artifact, assert exact
   success output, and prove an unusable artifact returns non-zero.
 
-- [ ] 4. Verify and close Task 029.
+- [x] 4. Verify and close Task 029.
   **Context:** Run formatting, diff checks, focused repetitions, vet, full
   uncached tests, and full race tests; mark DONE only after all prior E2Es pass,
   then rebase and push directly to `main`.
@@ -75,3 +75,11 @@ one node-kill scenario.
 - 2026-09-12: The built `grove test` command passed three real-process
   repetitions and focused race coverage; a missing artifact returned non-zero
   with a deterministic diagnostic.
+- 2026-09-12: Parallel full-suite load exposed two timing assumptions: the new
+  command inherited the 10-second read-command timeout, and an existing
+  placement refresh discarded a ready view on a transient JetStream error.
+  `grove test` now has a bounded 60-second lifecycle deadline, while placement
+  retains its last ready authoritative records and reports/retries refresh
+  errors. The corrected full suite and full race suite passed.
+- 2026-09-12: Final verification passed `go vet ./...`,
+  `go test -count=1 ./...`, and `go test -race -count=1 ./...`.
