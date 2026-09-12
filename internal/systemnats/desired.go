@@ -51,6 +51,8 @@ type DesiredDeployment struct {
 	ApplicationID string `json:"application_id"`
 	// Version labels the single current version represented by this MVP record.
 	Version string `json:"version"`
+	// ArtifactDigest identifies the exact immutable artifact intended to run.
+	ArtifactDigest string `json:"artifact_digest"`
 	// Components contains the intended service assignments.
 	Components []DesiredComponent `json:"components"`
 }
@@ -186,7 +188,7 @@ func (d *Desired) Put(ctx context.Context, transport *Transport, deployment Desi
 }
 
 func validateDesiredDeployment(deployment DesiredDeployment) (DesiredDeployment, error) {
-	if deployment.ApplicationID == "" || strings.Contains(deployment.ApplicationID, ".") || deployment.Version == "" || len(deployment.Components) == 0 {
+	if deployment.ApplicationID == "" || strings.Contains(deployment.ApplicationID, ".") || deployment.Version == "" || !validSHA256Digest(deployment.ArtifactDigest) || len(deployment.Components) == 0 {
 		return DesiredDeployment{}, ErrDesiredDeploymentInvalid
 	}
 	components := append([]DesiredComponent(nil), deployment.Components...)

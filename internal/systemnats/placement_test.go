@@ -28,11 +28,13 @@ func TestPlacementConvergesAndRoutes(t *testing.T) {
 			ServiceID:         1,
 			NodeID:            "node-a",
 			InvocationSubject: "_GROVE.system.invoke.node-a",
+			ArtifactDigest:    testDigest("a"),
 		},
 		{
 			ServiceID:         2,
 			NodeID:            "node-b",
 			InvocationSubject: "_GROVE.system.invoke.node-b",
+			ArtifactDigest:    testDigest("a"),
 		},
 	}
 	placements := make([]*systemnats.Placement, len(transports))
@@ -122,6 +124,7 @@ func TestPlacementConvergesAndRoutes(t *testing.T) {
 		ServiceID:         2,
 		NodeID:            "node-c",
 		InvocationSubject: "_GROVE.system.invoke.node-c",
+		ArtifactDigest:    testDigest("a"),
 	}
 	observed, err := placements[2].Replace(ctx, transports[2], want[1], replacement)
 	if err != nil {
@@ -138,6 +141,7 @@ func TestPlacementConvergesAndRoutes(t *testing.T) {
 		ServiceID:         2,
 		NodeID:            "node-d",
 		InvocationSubject: "_GROVE.system.invoke.node-d",
+		ArtifactDigest:    testDigest("a"),
 	})
 	if !errors.Is(err, systemnats.ErrPlacementChanged) {
 		t.Errorf("stale replacement error = %v; want %v", err, systemnats.ErrPlacementChanged)
@@ -300,8 +304,8 @@ func TestNewPlacementRejectsInvalidRecords(t *testing.T) {
 		}
 	}
 	if _, err := systemnats.NewPlacement([]systemnats.PlacementRecord{
-		{ServiceID: 1, NodeID: "node-a", InvocationSubject: "subject-a"},
-		{ServiceID: 1, NodeID: "node-b", InvocationSubject: "subject-b"},
+		{ServiceID: 1, NodeID: "node-a", InvocationSubject: "subject-a", ArtifactDigest: testDigest("a")},
+		{ServiceID: 1, NodeID: "node-b", InvocationSubject: "subject-b", ArtifactDigest: testDigest("a")},
 	}); !errors.Is(err, systemnats.ErrPlacementRecordInvalid) {
 		t.Errorf("duplicate placement error = %v; want %v", err, systemnats.ErrPlacementRecordInvalid)
 	}

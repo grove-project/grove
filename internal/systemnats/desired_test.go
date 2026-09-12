@@ -37,8 +37,9 @@ func TestDesiredDeploymentConvergesThroughControlAPI(t *testing.T) {
 	}
 	t.Cleanup(func() { cancelRun(); runs.Wait() })
 	want := systemnats.DesiredDeployment{
-		ApplicationID: "grove-shop",
-		Version:       "current",
+		ApplicationID:  "grove-shop",
+		Version:        "current",
+		ArtifactDigest: testDigest("a"),
 		Components: []systemnats.DesiredComponent{
 			{ServiceID: 1, NodeID: "node-1"},
 			{ServiceID: 2, NodeID: "node-2"},
@@ -83,7 +84,7 @@ func waitForDesired(ctx context.Context, transport *systemnats.Transport, nodeID
 	for {
 		view, err := transport.RequestDesired(ctx, nodeID)
 		if err == nil && view.Ready && slices.EqualFunc(view.Deployments, want, func(a, b systemnats.DesiredDeployment) bool {
-			return a.ApplicationID == b.ApplicationID && a.Version == b.Version && slices.Equal(a.Components, b.Components)
+			return a.ApplicationID == b.ApplicationID && a.Version == b.Version && a.ArtifactDigest == b.ArtifactDigest && slices.Equal(a.Components, b.Components)
 		}) {
 			return nil
 		}
@@ -97,10 +98,11 @@ func waitForDesired(ctx context.Context, transport *systemnats.Transport, nodeID
 
 func TestDesiredDeploymentRejectsInvalidRecords(t *testing.T) {
 	invalid := []systemnats.DesiredDeployment{
-		{Version: "current", Components: []systemnats.DesiredComponent{{ServiceID: 1, NodeID: "node-1"}}},
-		{ApplicationID: "grove-shop", Components: []systemnats.DesiredComponent{{ServiceID: 1, NodeID: "node-1"}}},
-		{ApplicationID: "grove-shop", Version: "current"},
-		{ApplicationID: "grove-shop", Version: "current", Components: []systemnats.DesiredComponent{{NodeID: "node-1"}}},
+		{Version: "current", ArtifactDigest: testDigest("a"), Components: []systemnats.DesiredComponent{{ServiceID: 1, NodeID: "node-1"}}},
+		{ApplicationID: "grove-shop", ArtifactDigest: testDigest("a"), Components: []systemnats.DesiredComponent{{ServiceID: 1, NodeID: "node-1"}}},
+		{ApplicationID: "grove-shop", Version: "current", ArtifactDigest: testDigest("a")},
+		{ApplicationID: "grove-shop", Version: "current", ArtifactDigest: testDigest("a"), Components: []systemnats.DesiredComponent{{NodeID: "node-1"}}},
+		{ApplicationID: "grove-shop", Version: "current", Components: []systemnats.DesiredComponent{{ServiceID: 1, NodeID: "node-1"}}},
 	}
 	for _, deployment := range invalid {
 		ctx, cancel := context.WithCancel(t.Context())

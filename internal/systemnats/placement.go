@@ -23,9 +23,9 @@ const (
 	// authoritative Grove service placement.
 	PlacementReplicas = 3
 
-	placementKeyPrefix   = "services."
-	placementSubjectRoot = "_GROVE.system.placement."
-	placementRetryDelay  = 50 * time.Millisecond
+	placementKeyPrefix       = "services."
+	placementSubjectRoot     = "_GROVE.system.placement."
+	placementRetryDelay      = 50 * time.Millisecond
 	placementRefreshInterval = 250 * time.Millisecond
 )
 
@@ -55,6 +55,9 @@ type PlacementRecord struct {
 	NodeID string `json:"node_id"`
 	// InvocationSubject is the selected Grovlet's System NATS call endpoint.
 	InvocationSubject string `json:"invocation_subject"`
+	// ArtifactDigest identifies the exact immutable artifact hosting the
+	// service.
+	ArtifactDigest string `json:"artifact_digest"`
 }
 
 // PlacementView is one Grovlet's current observation of authoritative service
@@ -82,7 +85,7 @@ func NewPlacement(records []PlacementRecord) (*Placement, error) {
 	seen := make(map[grove.ServiceID]struct{}, len(records))
 	owned := make([]PlacementRecord, len(records))
 	for i, record := range records {
-		if record.ServiceID == 0 || record.NodeID == "" || record.InvocationSubject == "" {
+		if !validPlacementRecord(record) {
 			return nil, &Error{Operation: "configure Grove placement", Err: ErrPlacementRecordInvalid}
 		}
 		if _, exists := seen[record.ServiceID]; exists {
@@ -338,7 +341,7 @@ func (p *Placement) Replace(
 }
 
 func validPlacementRecord(record PlacementRecord) bool {
-	return record.ServiceID != 0 && record.NodeID != "" && record.InvocationSubject != ""
+	return record.ServiceID != 0 && record.NodeID != "" && record.InvocationSubject != "" && validSHA256Digest(record.ArtifactDigest)
 }
 
 func decodePlacementRecord(key string, value []byte) (PlacementRecord, error) {
