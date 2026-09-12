@@ -1,6 +1,6 @@
 # Task 027 — Traffic switch and upgrade
 
-Status: TODO
+Status: DONE
 Depends on: 026
 
 ## Goal

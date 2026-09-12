@@ -73,7 +73,7 @@ JetStream/KV facts; candidate readiness is ephemeral System NATS messaging.
   behavior, commit the upgrade, retire N workers after commit, verify durable
   active/placement state, and prove post-cutover requests reach N+1.
 
-- [ ] 5. Verify and close Task 027.
+- [x] 5. Verify and close Task 027.
   **Context:** Run formatting, diff checks, focused repetitions, vet, full
   uncached tests, and full race tests; mark DONE only after all prior E2Es pass,
   then rebase and push directly to `main`.
@@ -95,3 +95,5 @@ JetStream/KV facts; candidate readiness is ephemeral System NATS messaging.
   focused race run. N remained authoritative during candidate startup; N+1
   became active in durable state before N's application workers retired, and
   post-cutover calls observed N+1's embedded configuration.
+- 2026-09-12: Final verification passed `go vet ./...`,
+  `go test -count=1 ./...`, and `go test -race -count=1 ./...`.
