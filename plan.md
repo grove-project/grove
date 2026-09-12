@@ -51,12 +51,12 @@ handoff.
 
 ## Sub-Tasks
 
-- [ ] 1. Define and test durable rollback state.
+- [x] 1. Define and test durable rollback state.
   **Context:** Add structured failure validation, legal failure/rollback
   transitions, terminal rejected-candidate retention, and malformed/illegal
   transition coverage.
 
-- [ ] 2. Implement and test idempotent rollback reconciliation.
+- [x] 2. Implement and test idempotent rollback reconciliation.
   **Context:** Record failure and rollback intent, restore candidate routes to
   current placement, commit terminal rolled-back state, and prove retries are
   safe when routes never switched or switched only partially.
@@ -79,3 +79,6 @@ handoff.
 - 2026-09-12: Kept normal invalid-config CLI rejection intact. The broken
   runtime artifact is a deliberate E2E fixture so rollback is exercised after
   immutable artifact creation rather than by weakening earlier validation.
+- 2026-09-12: Structured rollback state, legal transition enforcement, and
+  current/partially-switched placement reconciliation passed three focused R3
+  JetStream/KV integration repetitions.

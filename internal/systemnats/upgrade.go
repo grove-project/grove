@@ -153,10 +153,63 @@ func (d *Deployments) CommitHealthyUpgrade(
 	return active, nil
 }
 
+// RollbackFailedUpgrade durably rejects a candidate, records rollback intent,
+// reconciles every route to the retained current artifact, and commits the
+// terminal rolled-back generation with its structured cause.
+func (d *Deployments) RollbackFailedUpgrade(
+	ctx context.Context,
+	transport *Transport,
+	rollout Rollout,
+	routes []UpgradeRoute,
+	failure RolloutFailure,
+) (Rollout, error) {
+	rollout, err := validateRollout(rollout)
+	if err != nil || !slices.Contains([]RolloutPhase{RolloutPending, RolloutCandidateHealthy, RolloutSwitching}, rollout.Phase) || !validRolloutFailure(&failure) {
+		return Rollout{}, &Error{Operation: "validate Grove rollback", Err: ErrUpgradeInvalid}
+	}
+	routes, err = validateUpgradeRoutes(rollout, routes)
+	if err != nil {
+		return Rollout{}, &Error{Operation: "validate Grove rollback", Err: err}
+	}
+	failed := advanceFailedRollout(rollout, RolloutCandidateFailed, failure)
+	if err := d.PutRollout(ctx, transport, failed); err != nil {
+		return Rollout{}, err
+	}
+	rollingBack := advanceFailedRollout(failed, RolloutRollingBack, failure)
+	if err := d.PutRollout(ctx, transport, rollingBack); err != nil {
+		return Rollout{}, err
+	}
+	placement, err := NewPlacement(nil)
+	if err != nil {
+		return Rollout{}, err
+	}
+	for _, route := range routes {
+		if _, err := placement.Replace(ctx, transport, route.Candidate, route.Current); err != nil {
+			return Rollout{}, err
+		}
+	}
+	rolledBack := advanceFailedRollout(rollingBack, RolloutRolledBack, failure)
+	if err := d.PutRollout(ctx, transport, rolledBack); err != nil {
+		return Rollout{}, err
+	}
+	return rolledBack, nil
+}
+
 func validateUpgrade(pending Rollout, routes []UpgradeRoute) (Rollout, []UpgradeRoute, error) {
 	pending, err := validateRollout(pending)
 	if err != nil || pending.Phase != RolloutPending || len(routes) == 0 {
 		return Rollout{}, nil, ErrUpgradeInvalid
+	}
+	routes, err = validateUpgradeRoutes(pending, routes)
+	if err != nil {
+		return Rollout{}, nil, err
+	}
+	return pending, routes, nil
+}
+
+func validateUpgradeRoutes(rollout Rollout, routes []UpgradeRoute) ([]UpgradeRoute, error) {
+	if len(routes) == 0 {
+		return nil, ErrUpgradeInvalid
 	}
 	routes = append([]UpgradeRoute(nil), routes...)
 	sort.Slice(routes, func(i, j int) bool { return routes[i].Current.ServiceID < routes[j].Current.ServiceID })
@@ -164,16 +217,16 @@ func validateUpgrade(pending Rollout, routes []UpgradeRoute) (Rollout, []Upgrade
 	for _, route := range routes {
 		if !validPlacementRecord(route.Current) || !validPlacementRecord(route.Candidate) ||
 			route.Current.ServiceID != route.Candidate.ServiceID ||
-			route.Current.ArtifactDigest != pending.CurrentArtifactDigest ||
-			route.Candidate.ArtifactDigest != pending.CandidateArtifactDigest {
-			return Rollout{}, nil, ErrUpgradeInvalid
+			route.Current.ArtifactDigest != rollout.CurrentArtifactDigest ||
+			route.Candidate.ArtifactDigest != rollout.CandidateArtifactDigest {
+			return nil, ErrUpgradeInvalid
 		}
 		if _, exists := seen[route.Current.ServiceID]; exists {
-			return Rollout{}, nil, ErrUpgradeInvalid
+			return nil, ErrUpgradeInvalid
 		}
 		seen[route.Current.ServiceID] = struct{}{}
 	}
-	return pending, routes, nil
+	return routes, nil
 }
 
 func advanceUpgradeRollout(previous Rollout, phase RolloutPhase, currentArtifactDigest, candidateArtifactDigest string) Rollout {
@@ -195,5 +248,29 @@ func advanceUpgradeRollout(previous Rollout, phase RolloutPhase, currentArtifact
 		CandidateArtifactDigest: candidateArtifactDigest,
 		Phase:                   phase,
 		Nodes:                   nodes,
+	}
+}
+
+func advanceFailedRollout(previous Rollout, phase RolloutPhase, failure RolloutFailure) Rollout {
+	nodes := make([]RolloutNodeProgress, len(previous.Nodes))
+	for i, node := range previous.Nodes {
+		nodes[i] = RolloutNodeProgress{
+			NodeID:                  node.NodeID,
+			CurrentArtifactDigest:   previous.CurrentArtifactDigest,
+			CandidateArtifactDigest: previous.CandidateArtifactDigest,
+			Phase:                   phase,
+			Failure:                 node.Failure,
+		}
+	}
+	return Rollout{
+		ApplicationID:           previous.ApplicationID,
+		ClusterID:               previous.ClusterID,
+		RolloutID:               fmt.Sprintf("%s.%d.%s", previous.RolloutID, previous.Generation+1, phase),
+		Generation:              previous.Generation + 1,
+		CurrentArtifactDigest:   previous.CurrentArtifactDigest,
+		CandidateArtifactDigest: previous.CandidateArtifactDigest,
+		Phase:                   phase,
+		Nodes:                   nodes,
+		Failure:                 cloneRolloutFailure(&failure),
 	}
 }

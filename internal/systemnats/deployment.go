@@ -70,6 +70,15 @@ const (
 	// RolloutSwitching means candidate health passed and authoritative service
 	// placement is being moved to the candidate artifact.
 	RolloutSwitching RolloutPhase = "switching"
+	// RolloutCandidateFailed means the candidate failed validation or health and
+	// cannot take ownership.
+	RolloutCandidateFailed RolloutPhase = "candidate-failed"
+	// RolloutRollingBack means placement is being reconciled to the retained
+	// current artifact.
+	RolloutRollingBack RolloutPhase = "rolling-back"
+	// RolloutRolledBack means the rejected candidate remains recorded while the
+	// previous known-good artifact is authoritative.
+	RolloutRolledBack RolloutPhase = "rolled-back"
 )
 
 // DeploymentArtifact is immutable identity metadata for one configured Grove
@@ -96,6 +105,15 @@ type RolloutNodeProgress struct {
 	Failure                 string       `json:"failure,omitempty"`
 }
 
+// RolloutFailure is a stable machine-readable candidate rejection reason for
+// CLI and status-UI consumers.
+type RolloutFailure struct {
+	Code      string `json:"code"`
+	Component string `json:"component,omitempty"`
+	Field     string `json:"field,omitempty"`
+	Message   string `json:"message"`
+}
+
 // Rollout records one durable generation for an application and cluster.
 type Rollout struct {
 	ApplicationID           string                `json:"application_id"`
@@ -106,6 +124,7 @@ type Rollout struct {
 	CandidateArtifactDigest string                `json:"candidate_artifact_digest,omitempty"`
 	Phase                   RolloutPhase          `json:"phase"`
 	Nodes                   []RolloutNodeProgress `json:"nodes"`
+	Failure                 *RolloutFailure       `json:"failure,omitempty"`
 }
 
 // DeploymentView is one Grovlet's watcher-derived view of artifact and rollout
@@ -355,14 +374,23 @@ func validRolloutTransition(current, next Rollout) bool {
 	case RolloutActive:
 		return next.Phase == RolloutPending && sameTargets && next.CurrentArtifactDigest == current.CurrentArtifactDigest && next.CandidateArtifactDigest != ""
 	case RolloutPending:
-		return next.Phase == RolloutCandidateHealthy && sameArtifacts && sameTargets
+		return (next.Phase == RolloutCandidateHealthy || next.Phase == RolloutCandidateFailed) && sameArtifacts && sameTargets
 	case RolloutCandidateHealthy:
-		return next.Phase == RolloutSwitching && sameArtifacts && sameTargets
+		return (next.Phase == RolloutSwitching || next.Phase == RolloutCandidateFailed) && sameArtifacts && sameTargets
 	case RolloutSwitching:
-		return next.Phase == RolloutActive && sameTargets && next.CurrentArtifactDigest == current.CandidateArtifactDigest && next.CandidateArtifactDigest == ""
+		return (next.Phase == RolloutActive && sameTargets && next.CurrentArtifactDigest == current.CandidateArtifactDigest && next.CandidateArtifactDigest == "") ||
+			(next.Phase == RolloutCandidateFailed && sameArtifacts && sameTargets)
+	case RolloutCandidateFailed:
+		return next.Phase == RolloutRollingBack && sameArtifacts && sameTargets && equalRolloutFailure(current.Failure, next.Failure)
+	case RolloutRollingBack:
+		return next.Phase == RolloutRolledBack && sameArtifacts && sameTargets && equalRolloutFailure(current.Failure, next.Failure)
 	default:
 		return false
 	}
+}
+
+func validRolloutFailure(failure *RolloutFailure) bool {
+	return failure != nil && failure.Code != "" && failure.Message != ""
 }
 
 func deploymentKV(ctx context.Context, transport *Transport) (jetstream.KeyValue, error) {
@@ -432,11 +460,15 @@ func validateRollout(rollout Rollout) (Rollout, error) {
 	}
 	switch rollout.Phase {
 	case RolloutActive:
-		if rollout.CandidateArtifactDigest != "" {
+		if rollout.CandidateArtifactDigest != "" || rollout.Failure != nil {
 			return Rollout{}, ErrRolloutInvalid
 		}
 	case RolloutPending, RolloutCandidateHealthy, RolloutSwitching:
-		if rollout.CandidateArtifactDigest == "" {
+		if rollout.CandidateArtifactDigest == "" || rollout.Failure != nil {
+			return Rollout{}, ErrRolloutInvalid
+		}
+	case RolloutCandidateFailed, RolloutRollingBack, RolloutRolledBack:
+		if rollout.CandidateArtifactDigest == "" || !validRolloutFailure(rollout.Failure) {
 			return Rollout{}, ErrRolloutInvalid
 		}
 	default:
@@ -514,7 +546,22 @@ func decodeRollout(key string, value []byte) (Rollout, error) {
 }
 
 func equalRollout(a, b Rollout) bool {
-	return a.ApplicationID == b.ApplicationID && a.ClusterID == b.ClusterID && a.RolloutID == b.RolloutID && a.Generation == b.Generation && a.CurrentArtifactDigest == b.CurrentArtifactDigest && a.CandidateArtifactDigest == b.CandidateArtifactDigest && a.Phase == b.Phase && slices.Equal(a.Nodes, b.Nodes)
+	return a.ApplicationID == b.ApplicationID && a.ClusterID == b.ClusterID && a.RolloutID == b.RolloutID && a.Generation == b.Generation && a.CurrentArtifactDigest == b.CurrentArtifactDigest && a.CandidateArtifactDigest == b.CandidateArtifactDigest && a.Phase == b.Phase && slices.Equal(a.Nodes, b.Nodes) && equalRolloutFailure(a.Failure, b.Failure)
+}
+
+func equalRolloutFailure(a, b *RolloutFailure) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+func cloneRolloutFailure(failure *RolloutFailure) *RolloutFailure {
+	if failure == nil {
+		return nil
+	}
+	cloned := *failure
+	return &cloned
 }
 
 // Snapshot returns an isolated, deterministically ordered deployment view.
@@ -527,6 +574,7 @@ func (d *Deployments) Snapshot() DeploymentView {
 	for i, rollout := range d.view.Rollouts {
 		rollouts[i] = rollout
 		rollouts[i].Nodes = append([]RolloutNodeProgress(nil), rollout.Nodes...)
+		rollouts[i].Failure = cloneRolloutFailure(rollout.Failure)
 	}
 	return DeploymentView{Ready: d.view.Ready, Artifacts: artifacts, Rollouts: rollouts, Error: d.view.Error}
 }
@@ -542,6 +590,7 @@ func (d *Deployments) setReady(artifacts map[string]DeploymentArtifact, rollouts
 	}
 	for _, rollout := range rollouts {
 		rollout.Nodes = append([]RolloutNodeProgress(nil), rollout.Nodes...)
+		rollout.Failure = cloneRolloutFailure(rollout.Failure)
 		view.Rollouts = append(view.Rollouts, rollout)
 	}
 	sort.Slice(view.Artifacts, func(i, j int) bool { return view.Artifacts[i].ArtifactDigest < view.Artifacts[j].ArtifactDigest })
