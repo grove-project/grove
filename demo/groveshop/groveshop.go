@@ -238,6 +238,18 @@ type Orders struct {
 	orderIDs  []string
 }
 
+// NewDistributedOrders creates an Orders service that invokes Inventory,
+// Payment, and Shipping through Grove. It panics if client is nil.
+func NewDistributedOrders(client *grove.Client) *Orders {
+	if client == nil {
+		panic("groveshop: distributed Orders client must be non-nil")
+	}
+	return &Orders{
+		client: client,
+		orders: make(map[string]Order),
+	}
+}
+
 // NewGroveOrders creates an Orders service that invokes Inventory through
 // Grove. It panics if client, payment, or shipping is nil.
 func NewGroveOrders(client *grove.Client, payment *Payment, shipping *Shipping) *Orders {
@@ -315,20 +327,44 @@ func (s *Orders) Create(ctx context.Context, req CreateOrderRequest) (Order, err
 	order.Reservation = reservation
 	advance(&order, OrderReserved)
 
-	payment, err := s.payment.Charge(ctx, ChargeRequest{
+	chargeRequest := ChargeRequest{
 		OrderID:     req.OrderID,
 		AmountCents: req.AmountCents,
-	})
+	}
+	var payment PaymentResult
+	if s.payment == nil {
+		payment, err = grove.Call[ChargeRequest, PaymentResult](
+			ctx,
+			s.client,
+			ServicePayment,
+			MethodCharge,
+			chargeRequest,
+		)
+	} else {
+		payment, err = s.payment.Charge(ctx, chargeRequest)
+	}
 	if err != nil {
 		return Order{}, fmt.Errorf("charge payment: %w", err)
 	}
 	order.Payment = payment
 	advance(&order, OrderPaid)
 
-	shipment, err := s.shipping.Arrange(ctx, ShippingRequest{
+	shippingRequest := ShippingRequest{
 		OrderID: req.OrderID,
 		Address: req.ShippingAddress,
-	})
+	}
+	var shipment Shipment
+	if s.shipping == nil {
+		shipment, err = grove.Call[ShippingRequest, Shipment](
+			ctx,
+			s.client,
+			ServiceShipping,
+			MethodArrangeShipping,
+			shippingRequest,
+		)
+	} else {
+		shipment, err = s.shipping.Arrange(ctx, shippingRequest)
+	}
 	if err != nil {
 		return Order{}, fmt.Errorf("arrange shipping: %w", err)
 	}

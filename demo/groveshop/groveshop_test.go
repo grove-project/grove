@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/demo/groveshop"
 )
 
@@ -205,6 +206,46 @@ func TestOrdersCreate(t *testing.T) {
 	if _, err := orders.Create(t.Context(), req); !errors.Is(err, groveshop.ErrOrderExists) {
 		t.Errorf("duplicate Create() error = %v; want %v", err, groveshop.ErrOrderExists)
 	}
+}
+
+func TestDistributedOrdersInvokesEveryDependencyThroughGrove(t *testing.T) {
+	registry := &grove.Registry{}
+	if err := groveshop.RegisterInventory(registry, &groveshop.Inventory{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := groveshop.RegisterPayment(registry, &groveshop.Payment{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := groveshop.RegisterShipping(registry, &groveshop.Shipping{}); err != nil {
+		t.Fatal(err)
+	}
+	client, err := grove.NewClient(registry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	orders := groveshop.NewDistributedOrders(client)
+	order, err := orders.Create(t.Context(), groveshop.CreateOrderRequest{
+		OrderID:         "distributed-order",
+		SKU:             "coffee-beans",
+		Quantity:        1,
+		AmountCents:     1200,
+		ShippingAddress: "32 Grove Lane",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if order.Status != groveshop.OrderCompleted || order.Reservation.ID != "reservation-distributed-order" || order.Payment.ID != "payment-distributed-order" || order.Shipment.ID != "shipment-distributed-order" {
+		t.Errorf("distributed order = %#v", order)
+	}
+}
+
+func TestNewDistributedOrdersRejectsNilClient(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("NewDistributedOrders() did not panic")
+		}
+	}()
+	groveshop.NewDistributedOrders(nil)
 }
 
 func TestOrdersCreatePropagatesComponentErrors(t *testing.T) {

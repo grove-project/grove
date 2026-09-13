@@ -35,6 +35,7 @@ var (
 	errGroveShopEndpoint             = errors.New("reference application service placement requires a System NATS endpoint")
 	errGroveShopPlacementCluster     = errors.New("placed Grove Shop components require System NATS membership")
 	errGroveShopOrdersConflict       = errors.New("orders placement and explicit Inventory destination are mutually exclusive")
+	errGroveShopDistributedOrders    = errors.New("distributed Orders requires Orders placement")
 	errGroveShopWebListenRequired    = errors.New("Grove Shop Web requires an HTTP listen address")
 	errNodeIdentityPair              = errors.New("node ID and advertised endpoint must be configured together")
 	errNodeIDInvalid                 = errors.New("node ID is invalid")
@@ -42,24 +43,27 @@ var (
 )
 
 type config struct {
-	runtimeDir                string
-	systemNATSListen          string
-	systemNATSRouteListen     string
-	systemNATSSeed            string
-	systemNATSMembership      bool
-	systemNATSRecovery        bool
-	systemNATSURL             string
-	systemNATSSubject         string
-	groveShopOrders           bool
-	groveShopInventory        bool
-	groveShopInventorySubject string
-	groveShopWeb              bool
-	groveShopWebListen        string
-	groveShopConfiguration    groveshop.Configuration
-	groveShopConfigDigest     string
-	groveShopArtifactDigest   string
-	nodeID                    string
-	advertisedEndpoint        string
+	runtimeDir                 string
+	systemNATSListen           string
+	systemNATSRouteListen      string
+	systemNATSSeed             string
+	systemNATSMembership       bool
+	systemNATSRecovery         bool
+	systemNATSURL              string
+	systemNATSSubject          string
+	groveShopOrders            bool
+	groveShopDistributedOrders bool
+	groveShopInventory         bool
+	groveShopInventorySubject  string
+	groveShopWeb               bool
+	groveShopPayment           bool
+	groveShopShipping          bool
+	groveShopWebListen         string
+	groveShopConfiguration     groveshop.Configuration
+	groveShopConfigDigest      string
+	groveShopArtifactDigest    string
+	nodeID                     string
+	advertisedEndpoint         string
 }
 
 type lifecycleEvent struct {
@@ -180,7 +184,10 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.StringVar(&cfg.systemNATSURL, "system-nats-url", "", "System NATS server URL")
 	flags.StringVar(&cfg.systemNATSSubject, "system-nats-subject", "", "System NATS transport endpoint subject")
 	flags.BoolVar(&cfg.groveShopOrders, "grove-shop-orders", false, "place Grove Shop Orders on this Grovlet")
+	flags.BoolVar(&cfg.groveShopDistributedOrders, "grove-shop-distributed-orders", false, "invoke every Orders dependency through Grove")
 	flags.BoolVar(&cfg.groveShopInventory, "grove-shop-inventory", false, "host Grove Shop Inventory on this Grovlet")
+	flags.BoolVar(&cfg.groveShopPayment, "grove-shop-payment", false, "host Grove Shop Payment on this Grovlet")
+	flags.BoolVar(&cfg.groveShopShipping, "grove-shop-shipping", false, "host Grove Shop Shipping on this Grovlet")
 	flags.StringVar(&cfg.groveShopInventorySubject, "grove-shop-orders-inventory-subject", "", "explicit Inventory endpoint for Grove Shop Orders")
 	flags.BoolVar(&cfg.groveShopWeb, "grove-shop-web", false, "place Grove Shop Web on this Grovlet")
 	flags.StringVar(&cfg.groveShopWebListen, "grove-shop-web-listen", "", "HTTP listen address for Grove Shop Web")
@@ -222,11 +229,14 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	if cfg.systemNATSSubject != "" && cfg.systemNATSListen == "" && cfg.systemNATSURL == "" {
 		return config{}, errSystemNATSRequired
 	}
-	if (cfg.groveShopOrders || cfg.groveShopInventory || cfg.groveShopInventorySubject != "" || cfg.groveShopWeb || cfg.systemNATSRecovery) && cfg.systemNATSSubject == "" {
+	if (cfg.groveShopOrders || cfg.groveShopInventory || cfg.groveShopPayment || cfg.groveShopShipping || cfg.groveShopInventorySubject != "" || cfg.groveShopWeb || cfg.systemNATSRecovery) && cfg.systemNATSSubject == "" {
 		return config{}, errGroveShopEndpoint
 	}
-	if (cfg.groveShopOrders || cfg.groveShopWeb) && !cfg.systemNATSMembership {
+	if (cfg.groveShopOrders || cfg.groveShopPayment || cfg.groveShopShipping || cfg.groveShopWeb) && !cfg.systemNATSMembership {
 		return config{}, errGroveShopPlacementCluster
+	}
+	if cfg.groveShopDistributedOrders && !cfg.groveShopOrders {
+		return config{}, errGroveShopDistributedOrders
 	}
 	if cfg.groveShopOrders && cfg.groveShopInventorySubject != "" {
 		return config{}, errGroveShopOrdersConflict
@@ -497,7 +507,7 @@ func systemNATSStateExists(runtimeDir string) bool {
 }
 
 func groveShopPlacements(cfg config) []systemnats.PlacementRecord {
-	placements := make([]systemnats.PlacementRecord, 0, 3)
+	placements := make([]systemnats.PlacementRecord, 0, 5)
 	if cfg.groveShopOrders {
 		placements = append(placements, systemnats.PlacementRecord{
 			ServiceID:         groveshop.ServiceOrders,
@@ -514,6 +524,22 @@ func groveShopPlacements(cfg config) []systemnats.PlacementRecord {
 			ArtifactDigest:    cfg.groveShopArtifactDigest,
 		})
 	}
+	if cfg.groveShopPayment {
+		placements = append(placements, systemnats.PlacementRecord{
+			ServiceID:         groveshop.ServicePayment,
+			NodeID:            cfg.nodeID,
+			InvocationSubject: componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServicePayment),
+			ArtifactDigest:    cfg.groveShopArtifactDigest,
+		})
+	}
+	if cfg.groveShopShipping {
+		placements = append(placements, systemnats.PlacementRecord{
+			ServiceID:         groveshop.ServiceShipping,
+			NodeID:            cfg.nodeID,
+			InvocationSubject: componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceShipping),
+			ArtifactDigest:    cfg.groveShopArtifactDigest,
+		})
+	}
 	if cfg.groveShopWeb {
 		placements = append(placements, systemnats.PlacementRecord{
 			ServiceID:         groveshop.ServiceWeb,
@@ -526,13 +552,34 @@ func groveShopPlacements(cfg config) []systemnats.PlacementRecord {
 }
 
 func groveShopComponentSpecs(cfg config) []componentSpec {
-	components := make([]componentSpec, 0, 3)
+	components := make([]componentSpec, 0, 5)
 	if cfg.groveShopOrders {
+		var workerArgs []string
+		if cfg.groveShopDistributedOrders {
+			workerArgs = []string{"--distributed-orders"}
+		}
 		components = append(components, componentSpec{
-			serviceID: groveshop.ServiceOrders,
-			name:      "Orders",
-			kind:      workerOrders,
-			subject:   componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceOrders),
+			serviceID:  groveshop.ServiceOrders,
+			name:       "Orders",
+			kind:       workerOrders,
+			subject:    componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceOrders),
+			workerArgs: workerArgs,
+		})
+	}
+	if cfg.groveShopPayment {
+		components = append(components, componentSpec{
+			serviceID: groveshop.ServicePayment,
+			name:      "Payment",
+			kind:      workerPayment,
+			subject:   componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServicePayment),
+		})
+	}
+	if cfg.groveShopShipping {
+		components = append(components, componentSpec{
+			serviceID: groveshop.ServiceShipping,
+			name:      "Shipping",
+			kind:      workerShipping,
+			subject:   componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceShipping),
 		})
 	}
 	if cfg.groveShopInventory {
@@ -583,12 +630,18 @@ func groveShopRecoveryComponentSpecs(cfg config) []componentSpec {
 }
 
 func groveShopPlacedServiceIDs(cfg config) []grove.ServiceID {
-	serviceIDs := make([]grove.ServiceID, 0, 3)
+	serviceIDs := make([]grove.ServiceID, 0, 5)
 	if cfg.groveShopOrders {
 		serviceIDs = append(serviceIDs, groveshop.ServiceOrders)
 	}
 	if cfg.groveShopInventory {
 		serviceIDs = append(serviceIDs, groveshop.ServiceInventory)
+	}
+	if cfg.groveShopPayment {
+		serviceIDs = append(serviceIDs, groveshop.ServicePayment)
+	}
+	if cfg.groveShopShipping {
+		serviceIDs = append(serviceIDs, groveshop.ServiceShipping)
 	}
 	if cfg.groveShopWeb {
 		serviceIDs = append(serviceIDs, groveshop.ServiceWeb)

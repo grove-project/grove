@@ -23,16 +23,19 @@ import (
 const (
 	workerOrders    = "orders"
 	workerInventory = "inventory"
+	workerPayment   = "payment"
+	workerShipping  = "shipping"
 	workerWeb       = "web"
 )
 
 type workerConfig struct {
-	component       string
-	systemNATSURL   string
-	subject         string
-	placementNodeID string
-	parentFD        int
-	webListen       string
+	component         string
+	systemNATSURL     string
+	subject           string
+	placementNodeID   string
+	parentFD          int
+	webListen         string
+	distributedOrders bool
 }
 
 type workerProcess struct {
@@ -206,6 +209,9 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			return err
 		}
 		orders := groveshop.NewGroveOrders(client, &groveshop.Payment{}, &groveshop.Shipping{})
+		if cfg.distributedOrders {
+			orders = groveshop.NewDistributedOrders(client)
+		}
 		if err := groveshop.RegisterOrders(registry, orders); err != nil {
 			return fmt.Errorf("register Grove Shop Orders: %w", err)
 		}
@@ -213,6 +219,14 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		inventory := groveshop.NewInventory(applicationConfig.Inventory.ReservationBuffer)
 		if err := groveshop.RegisterInventory(registry, inventory); err != nil {
 			return fmt.Errorf("register Grove Shop Inventory: %w", err)
+		}
+	case workerPayment:
+		if err := groveshop.RegisterPayment(registry, &groveshop.Payment{}); err != nil {
+			return fmt.Errorf("register Grove Shop Payment: %w", err)
+		}
+	case workerShipping:
+		if err := groveshop.RegisterShipping(registry, &groveshop.Shipping{}); err != nil {
+			return fmt.Errorf("register Grove Shop Shipping: %w", err)
 		}
 	case workerWeb:
 		client, err := transport.ObservedPlacementClient(cfg.placementNodeID)
@@ -296,6 +310,7 @@ func parseWorkerConfig(args []string, stderr io.Writer) (workerConfig, error) {
 	flags.StringVar(&cfg.placementNodeID, "placement-node-id", "", "parent placement observer node ID")
 	flags.IntVar(&cfg.parentFD, "parent-fd", 0, "parent-lifetime file descriptor")
 	flags.StringVar(&cfg.webListen, "web-listen", "", "Grove Shop Web HTTP listen address")
+	flags.BoolVar(&cfg.distributedOrders, "distributed-orders", false, "invoke every Orders dependency through Grove")
 	if err := flags.Parse(args); err != nil {
 		return workerConfig{}, fmt.Errorf("parse worker flags: %w", err)
 	}
@@ -304,6 +319,9 @@ func parseWorkerConfig(args []string, stderr io.Writer) (workerConfig, error) {
 	}
 	if (cfg.component == workerWeb) != (cfg.webListen != "") {
 		return workerConfig{}, errors.New("Web worker listen configuration is invalid")
+	}
+	if cfg.distributedOrders && cfg.component != workerOrders {
+		return workerConfig{}, errors.New("distributed Orders is only valid for the Orders worker")
 	}
 	return cfg, nil
 }

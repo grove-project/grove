@@ -289,6 +289,37 @@ func TestGroveShopStartupStateUsesRestoredIntent(t *testing.T) {
 	}
 }
 
+func TestGroveShopDebugTopologyIncludesFiveDedicatedWorkers(t *testing.T) {
+	cfgs := []config{
+		{nodeID: "node-1", systemNATSSubject: "debug.node-1", groveShopWeb: true, groveShopWebListen: "127.0.0.1:8080", groveShopArtifactDigest: grovletArtifactDigest},
+		{nodeID: "node-2", systemNATSSubject: "debug.node-2", groveShopOrders: true, groveShopDistributedOrders: true, groveShopArtifactDigest: grovletArtifactDigest},
+		{nodeID: "node-3", systemNATSSubject: "debug.node-3", groveShopInventory: true, groveShopArtifactDigest: grovletArtifactDigest},
+		{nodeID: "node-4", systemNATSSubject: "debug.node-4", groveShopPayment: true, groveShopArtifactDigest: grovletArtifactDigest},
+		{nodeID: "node-5", systemNATSSubject: "debug.node-5", groveShopShipping: true, groveShopArtifactDigest: grovletArtifactDigest},
+	}
+	wantServices := []grove.ServiceID{
+		groveshop.ServiceWeb,
+		groveshop.ServiceOrders,
+		groveshop.ServiceInventory,
+		groveshop.ServicePayment,
+		groveshop.ServiceShipping,
+	}
+	for i, cfg := range cfgs {
+		placements := groveShopPlacements(cfg)
+		specs := groveShopComponentSpecs(cfg)
+		serviceIDs := groveShopPlacedServiceIDs(cfg)
+		if len(placements) != 1 || len(specs) != 1 || len(serviceIDs) != 1 {
+			t.Fatalf("node-%d topology = placements %#v specs %#v services %v", i+1, placements, specs, serviceIDs)
+		}
+		if placements[0].ServiceID != wantServices[i] || placements[0].NodeID != cfg.nodeID || specs[0].serviceID != wantServices[i] || serviceIDs[0] != wantServices[i] {
+			t.Errorf("node-%d topology = placement %#v spec %#v services %v; want service %d", i+1, placements[0], specs[0], serviceIDs, wantServices[i])
+		}
+	}
+	if got := groveShopComponentSpecs(cfgs[1])[0].workerArgs; !slices.Equal(got, []string{"--distributed-orders"}) {
+		t.Errorf("Orders worker arguments = %q; want distributed Orders", got)
+	}
+}
+
 func TestSystemNATSStateExists(t *testing.T) {
 	runtimeDir := t.TempDir()
 	if systemNATSStateExists(runtimeDir) {
