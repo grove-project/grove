@@ -215,12 +215,36 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			return fmt.Errorf("register Grove Shop Inventory: %w", err)
 		}
 	case workerWeb:
+		client, err := transport.ObservedPlacementClient(cfg.placementNodeID)
+		if err != nil {
+			return err
+		}
 		listener, err := net.Listen("tcp", cfg.webListen)
 		if err != nil {
 			return fmt.Errorf("listen for Grove Shop Web: %w", err)
 		}
+		localArtifact := groveshop.ArtifactStatusView{
+			ApplicationID:  inspection.Manifest.ApplicationID,
+			CodeVersion:    inspection.Manifest.CodeVersion,
+			ArtifactDigest: inspection.ArtifactDigest,
+			ConfigRevision: applicationConfig.Revision,
+			ConfigDigest:   inspection.Config.Digest,
+		}
 		webServer = &http.Server{
-			Handler:           groveshop.WebHandlerWithConfiguration(applicationConfig, inspection.Config.Digest),
+			Handler: groveshop.WebHandlerWithRuntime(
+				applicationConfig,
+				inspection.Config.Digest,
+				newGroveShopStatusReader(transport, cfg.placementNodeID, localArtifact),
+				func(ctx context.Context, request groveshop.CreateOrderRequest) (groveshop.Order, error) {
+					return grove.Call[groveshop.CreateOrderRequest, groveshop.Order](
+						ctx,
+						client,
+						groveshop.ServiceOrders,
+						groveshop.MethodCreateOrder,
+						request,
+					)
+				},
+			),
 			ReadHeaderTimeout: 5 * time.Second,
 		}
 		defer webServer.Close()

@@ -57,7 +57,7 @@ rollout engine, scheduler, or deployment daemon.
 
 ## Sub-Tasks
 
-- [ ] 1. Expose the live Grove Shop Web contract.
+- [x] 1. Expose the live Grove Shop Web contract.
   **Context:** Add typed status/order HTTP endpoints, embedded UI interaction
   and 750 ms polling, unit tests, and the Grovlet adapter over real control
   views.
@@ -80,3 +80,7 @@ rollout engine, scheduler, or deployment daemon.
 - 2026-09-13: Confirmed that all lifecycle mechanisms exist independently;
   Task 031 will add the missing Web read-model adapter and one composed proof,
   not parallel runtime implementations.
+- 2026-09-13: Added the embedded order API, 750 ms browser polling, typed
+  cluster/deployment status contract, and Grovlet adapter. Status health follows
+  authoritative placement, so intentionally stopped recovery slots do not
+  report a false degradation.

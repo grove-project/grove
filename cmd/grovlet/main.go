@@ -556,7 +556,7 @@ func groveShopComponentSpecs(cfg config) []componentSpec {
 }
 
 func groveShopRecoveryComponentSpecs(cfg config) []componentSpec {
-	return []componentSpec{
+	components := []componentSpec{
 		{
 			serviceID: groveshop.ServiceOrders,
 			name:      "Orders",
@@ -570,6 +570,16 @@ func groveShopRecoveryComponentSpecs(cfg config) []componentSpec {
 			subject:   componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceInventory),
 		},
 	}
+	if cfg.groveShopWeb {
+		components = append(components, componentSpec{
+			serviceID:  groveshop.ServiceWeb,
+			name:       "Web",
+			kind:       workerWeb,
+			subject:    componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceWeb),
+			workerArgs: []string{"--web-listen", cfg.groveShopWebListen},
+		})
+	}
+	return components
 }
 
 func groveShopPlacedServiceIDs(cfg config) []grove.ServiceID {
