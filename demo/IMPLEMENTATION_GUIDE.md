@@ -43,9 +43,20 @@ Use deterministic test conditions for MVP rather than depending on external netw
 - A candidate with broken Inventory config must fail deterministically and cause Grove to return to the previous complete known-good artifact.
 - Candidate placement must obey the same placement eligibility contract as normal deployment.
 
-### Final MVP proof
-- Tasks 029-031: automate the exact lifecycle in `DEMO_FLOW.md` using Go tests and the Grove test harness.
-- Final acceptance must prove order success before the bad deployment and again after rollback.
+### Final lifecycle proof
+- Tasks 029-031: automate the lifecycle in `DEMO_FLOW.md` using Go tests and the Grove test harness.
+- Task 031 proves order success before the bad deployment and again after rollback.
+
+### Final debugging proof
+- Task 032 adds Delve/DAP as the final MVP task.
+- Read `docs/adr/009-dap-debugging-interface.md`, `docs/developer-experience/debugging.md`, and `demo/DEBUGGING_DEMO.md` before implementing it.
+- Run Grove Shop for this scenario as five Grovlets with one service per node: Web, Orders, Inventory, Payment, Shipping.
+- Every service must execute in a dedicated worker process for the debugging scenario.
+- The demo must attach **two independent debugger sessions concurrently** to workers on different nodes. The canonical targets are Orders on node-2 and Payment on node-4.
+- Grove must resolve service -> node -> worker itself. The user must not find or supply PIDs, remote node addresses, or remote Delve ports.
+- The first implementation is a discovery/tunnel layer around ordinary Delve DAP sessions. Do not build a stateful multi-process DAP multiplexer for the MVP.
+- While a worker is intentionally paused by a debugger, Grove supervision must use explicit deterministic debug-session semantics so the breakpoint is not mistaken for an ordinary worker failure.
+- Task 032 is not DONE until the exact human commands documented in `demo/DEBUGGING_DEMO.md` have been executed successfully against the implementation in addition to the automated DAP E2E and `go test ./...`.
 
 ## UI implementation guidance
 The Web UI is part of Grove Shop and must be served by a Grove-managed Web component.
@@ -63,7 +74,7 @@ The UI must be able to observe candidate rollout and rollback without controllin
 When placement eligibility is exposed in the read model, the cluster view should preserve the distinction between `ineligible for this service` and generic node/service failure.
 
 ## Minimal CLI target
-The final demo should converge on:
+The deployment/rollback portion of the demo should converge on:
 
 ```bash
 grove deploy --config configs/acme.yaml
@@ -72,9 +83,18 @@ grove deploy --config configs/acme-broken.yaml
 
 Do not force the user through separate cluster-create, config-compile, config-embed, artifact-create, or upgrade commands for the headline demo. Lower-level commands may exist for diagnostics/testing.
 
-## Scope discipline
-Do not add debugging/DAP to MVP v1. That belongs to a later demo evolution.
+The debugging portion should converge on service-oriented commands such as:
 
-Do not implement general-purpose placement scoring, affinity/anti-affinity, or a sophisticated scheduler merely to support placement validation. MVP only needs the hard eligibility boundary and enough explicit placement logic to prove it.
+```bash
+grove debug --service orders --listen 127.0.0.1:40000
+grove debug --service payment --listen 127.0.0.1:40001
+```
+
+These are the Task 032 CLI contract, not permission to skip validation. The exact final commands must be kept in `demo/DEBUGGING_DEMO.md` and tested as written before Task 032 is marked DONE.
+
+## Scope discipline
+Do not implement general-purpose placement scoring, affinity/anti-affinity, or a sophisticated scheduler merely to support placement validation or the one-service-per-node debug demo. MVP only needs the hard eligibility boundary plus deterministic demo placement.
+
+For debugging, do not implement DAP multiplexing, cross-service single-step semantics, global breakpoint fan-out, or an IDE-specific plugin. Two independent ordinary DAP sessions are enough for the MVP proof.
 
 Do not add storefront complexity, authentication, external payment providers, databases, or frontend frameworks merely to make the sample feel realistic. The demo should remain deterministic, fast, and easy to E2E test.
