@@ -31,3 +31,22 @@ func TestGroveTestCommandReturnsFailure(t *testing.T) {
 		t.Errorf("failed grove test output = %q", output)
 	}
 }
+
+func TestGroveTestResilienceCommand(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	output, err := runGroveCommand(ctx, "test", "--binary", grovletPath, "--resilience")
+	if err != nil {
+		t.Fatalf("grove test --resilience: %v; output=%q", err, output)
+	}
+	want := "Grove Shop E2E\n" +
+		"✓ baseline\n" +
+		"Killed service 2 host node-2\n" +
+		"✓ failure detected\n" +
+		"✓ service 2 recovered on node-1\n" +
+		"✓ flow after recovery\n" +
+		"PASS\n"
+	if output != want {
+		t.Errorf("grove test --resilience output = %q; want %q", output, want)
+	}
+}

@@ -56,7 +56,7 @@ control APIs.
   a survivor, wait for health/placement/component convergence, rerun the flow,
   and clean up the already-dead child safely.
 
-- [ ] 3. Prove the real resilience command.
+- [x] 3. Prove the real resilience command.
   **Context:** Assert exact baseline, injection, recovery, rerun, and PASS output
   from the built CLI with real Grovlet processes.
 
@@ -74,3 +74,6 @@ control APIs.
 - 2026-09-13: Added bounded resilience selection, production recovery startup,
   authoritative host resolution, a real Grovlet kill, survivor reconnection,
   and convergence checks across all surviving placement observers.
+- 2026-09-13: The default Inventory scenario passed three consecutive
+  real-process runs and the focused race run; baseline command output remains
+  unchanged.
