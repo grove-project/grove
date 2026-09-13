@@ -1,81 +1,82 @@
-# Plan: Rerun `grove test` after one controlled node loss
+# Plan: Prove the complete Grove Shop MVP lifecycle
 
 ## Goal
 
-Complete Task 030 by extending `grove test` with one bounded resilience mode:
-run the normal Grove Shop flow, kill the node currently hosting a selected
-stateless service, wait for production recovery to move that service, and run
-the same functional flow again. Do not add a scenario matrix, SLA enforcement,
-or any other fault type.
+Complete Task 031 with one automated, production-shaped Grove Shop lifecycle:
+build and configure immutable artifacts, run the embedded Web experience on a
+real three-Grovlet cluster, prove distributed orders, node recovery and durable
+restart, observe a broken candidate and rollback through the Web status
+contract, rerun the application and resilience flow, and clean up every child.
 
 ## Context
 
-Task 029 launches the exact artifact in an isolated three-Grovlet cluster and
-executes a cross-process order flow. Existing Grovlet recovery already detects
-node loss and compare-and-set moves affected placement. Task 030 activates that
-production path from the command and observes it through the same System NATS
-control APIs.
+Tasks 001–030 already implement each underlying runtime capability. Task 031
+connects the existing System NATS cluster, placement, component, deployment,
+rollout, artifact, recovery, and desired-state APIs into the Web observer and a
+single regression scenario. It does not introduce another control store,
+rollout engine, scheduler, or deployment daemon.
 
 ### Key Files
 
-- `tasks/030-resilience-scenario-execution.md` — current acceptance contract.
-- `docs/developer-experience/testing.md` — reuse the developer's functional
-  flow instead of authoring a separate chaos suite.
-- `cmd/grove/main.go` — `--resilience` and selected service parsing.
-- `cmd/grove/test.go` — baseline/recovery flow reuse, node kill, survivor
-  reconnect, bounded recovery observation, diagnostics, and output.
-- `cmd/grove/test_test.go` — real command resilience proof.
-- `cmd/grovlet/recovery.go` — existing production recovery behavior invoked by
-  the test cluster.
+- `tasks/031-final-mvp-lifecycle-e2e.md` — final acceptance contract.
+- `demo/groveshop/web.go` and `demo/groveshop/web/index.html` — embedded order
+  API/UI and structured polling contract.
+- `cmd/grovlet/worker.go` and a small status adapter under `cmd/grovlet/` — map
+  production System NATS views into the Grove Shop Web read model.
+- `cmd/grovlet/main.go` — retain the configured Web component when recovery is
+  enabled.
+- `cmd/grove/mvp_test.go` — one complete real-process MVP lifecycle proof.
 
 ### Decisions Made
 
-- Add `--resilience` and optional `--service-id`; default to Grove Shop
-  Inventory. Baseline `grove test` output and behavior remain unchanged.
-- Enable `--system-nats-recovery` on the isolated Grovlets only for resilience
-  mode. Determine the target process from authoritative placement rather than
-  assuming the initial topology.
-- Kill the complete hosting Grovlet through `grovetest.Node.Kill`, then reconnect
-  to System NATS through a surviving process so the command works even when the
-  selected service was on the original client node.
-- Wait until the failed node is unavailable, selected service placement names a
-  healthy survivor, and the replacement component reports healthy. Do not use
-  fixed sleeps.
-- Invoke the same order helper before and after failure with distinct order IDs.
-  Print the failed and recovered node IDs so the deterministic transcript shows
-  the action and result.
+- Keep Grove Shop free of control-plane dependencies. It owns public JSON view
+  types and HTTP handlers; the Grovlet worker adapts `internal/systemnats`
+  views into those types.
+- Serve `POST /api/orders`, `GET /api/orders`, `/grove/config`, and
+  `/grove/status` from the embedded Web component. The browser polls status
+  every 750 ms and remains an observer only.
+- Derive cluster health from authoritative membership plus the components
+  selected by placement. Recovery-only fallback slots that are intentionally
+  stopped do not make the application appear degraded.
+- Build Artifact A through the existing target-owned config compiler/embed
+  path, record its desired deployment and active rollout, and place Web with
+  Orders while Inventory runs on another Grovlet so the HTTP order proof must
+  cross a Grovlet boundary.
+- Kill Inventory's hosting Grovlet, wait for the existing recovery coordinator,
+  update durable desired intent to the recovered placement, restart the full
+  cluster from the same runtime directories, and verify reconstruction.
+- Build Artifact B from the same code with the documented negative Inventory
+  buffer. Observe pending and rolled-back states through repeated HTTP status
+  reads, while candidate startup failure and rollback remain runtime/control
+  plane responsibilities.
+- Invoke the Task 030 `grove test --resilience` workflow against Artifact A at
+  the end. The final E2E composes existing lower-level APIs because a
+  long-lived local deployment daemon and state discovery contract for the
+  headline `grove deploy --config ...` syntax were not defined by Tasks
+  021–030; Task 031 will not invent that architecture implicitly.
 
 ## Sub-Tasks
 
-- [x] 1. Parse the bounded resilience mode.
-  **Context:** Add the flag/default service, validate the service ID, and keep
-  baseline invocation compatibility.
+- [ ] 1. Expose the live Grove Shop Web contract.
+  **Context:** Add typed status/order HTTP endpoints, embedded UI interaction
+  and 750 ms polling, unit tests, and the Grovlet adapter over real control
+  views.
 
-- [x] 2. Execute node loss and observe production recovery.
-  **Context:** Enable recovery, resolve and kill the hosting node, reconnect via
-  a survivor, wait for health/placement/component convergence, rerun the flow,
-  and clean up the already-dead child safely.
+- [ ] 2. Compose the final real-process lifecycle E2E.
+  **Context:** Prove Artifact A, Web/status/config, cross-node order history,
+  Inventory node recovery, durable full-cluster restart, Artifact B rejection,
+  structured rollback observation, post-rollback order, and Task 030
+  resilience execution without sleeps.
 
-- [x] 3. Prove the real resilience command.
-  **Context:** Assert exact baseline, injection, recovery, rerun, and PASS output
-  from the built CLI with real Grovlet processes.
-
-- [x] 4. Verify and close Task 030.
-  **Context:** Run formatting, diff checks, focused repetitions, vet, full
-  uncached tests, and full race tests; mark DONE only after all prior E2Es pass,
-  then rebase and push directly to `main`.
+- [ ] 3. Verify and close the Grove MVP.
+  **Context:** Run formatting, diff checks, focused repetitions, vet, the full
+  uncached suite, and the full race suite. Mark Task 031 DONE only after all
+  earlier E2Es remain green, then rebase and push directly to `main`.
 
 ## Log
 
-- 2026-09-12: Task 029 passed focused, full uncached, and race gates and was
-  pushed to `main` at `9272bab`.
-- 2026-09-12: Kept the action to one hosting-node kill. Network, disk, CPU,
-  latency, scenario generation, and SLA evaluation remain out of scope.
-- 2026-09-13: Added bounded resilience selection, production recovery startup,
-  authoritative host resolution, a real Grovlet kill, survivor reconnection,
-  and convergence checks across all surviving placement observers.
-- 2026-09-13: The default Inventory scenario passed three consecutive
-  real-process runs and the focused race run; baseline command output remains
-  unchanged.
-- 2026-09-13: Task 030 passed `go vet ./...`, `go test -count=1 ./...`,
-  and `go test -race -count=1 ./...`; all prior E2Es remained green.
+- 2026-09-13: Task 030 passed all focused, uncached, and race gates and was
+  pushed to `main` at `4145e12`.
+- 2026-09-13: Confirmed that all lifecycle mechanisms exist independently;
+  Task 031 will add the missing Web read-model adapter and one composed proof,
+  not parallel runtime implementations.
