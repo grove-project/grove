@@ -60,7 +60,7 @@ control APIs.
   **Context:** Assert exact baseline, injection, recovery, rerun, and PASS output
   from the built CLI with real Grovlet processes.
 
-- [ ] 4. Verify and close Task 030.
+- [x] 4. Verify and close Task 030.
   **Context:** Run formatting, diff checks, focused repetitions, vet, full
   uncached tests, and full race tests; mark DONE only after all prior E2Es pass,
   then rebase and push directly to `main`.
@@ -77,3 +77,5 @@ control APIs.
 - 2026-09-13: The default Inventory scenario passed three consecutive
   real-process runs and the focused race run; baseline command output remains
   unchanged.
+- 2026-09-13: Task 030 passed `go vet ./...`, `go test -count=1 ./...`,
+  and `go test -race -count=1 ./...`; all prior E2Es remained green.

@@ -1,6 +1,6 @@
 # Task 030 — Resilience scenario execution
 
-Status: TODO
+Status: DONE
 Depends on: 018, 029
 
 ## Goal
