@@ -62,7 +62,7 @@ rollout engine, scheduler, or deployment daemon.
   and 750 ms polling, unit tests, and the Grovlet adapter over real control
   views.
 
-- [ ] 2. Compose the final real-process lifecycle E2E.
+- [x] 2. Compose the final real-process lifecycle E2E.
   **Context:** Prove Artifact A, Web/status/config, cross-node order history,
   Inventory node recovery, durable full-cluster restart, Artifact B rejection,
   structured rollback observation, post-rollback order, and Task 030
@@ -84,3 +84,8 @@ rollout engine, scheduler, or deployment daemon.
   cluster/deployment status contract, and Grovlet adapter. Status health follows
   authoritative placement, so intentionally stopped recovery slots do not
   report a false degradation.
+- 2026-09-13: The complete lifecycle passed twice consecutively and under the
+  race detector. It proves exact embedded UI/config identity, HTTP-driven
+  cross-Grovlet orders, node recovery, durable restart, pending and rolled-back
+  Web status, broken Inventory rejection, post-rollback health, and the Task
+  030 resilience transcript.
