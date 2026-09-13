@@ -1,10 +1,12 @@
 package groveshop_test
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -39,8 +41,82 @@ func TestWebAsset(t *testing.T) {
 	if !strings.Contains(string(asset), "Grove Cluster Status") {
 		t.Errorf("embedded index = %q", asset)
 	}
+	for _, contract := range []string{`fetch("/grove/status"`, `fetch("/api/orders"`, "statusIntervalMilliseconds = 750"} {
+		if !strings.Contains(string(asset), contract) {
+			t.Errorf("embedded index does not contain %q", contract)
+		}
+	}
 	if _, err := groveshop.WebAsset("missing.html"); err == nil {
 		t.Fatal("missing embedded asset returned nil error")
+	}
+}
+
+func TestWebHandlerExposesOrdersAndClusterStatus(t *testing.T) {
+	status := groveshop.ClusterStatusView{
+		Health: "healthy",
+		Ready:  true,
+		Nodes:  []groveshop.NodeStatusView{{NodeID: "node-1", Health: "healthy", Components: []groveshop.ComponentStatusView{}}},
+		Placements: []groveshop.PlacementStatusView{{
+			ServiceID: 1, Name: "Orders", NodeID: "node-1", ArtifactDigest: "sha256:artifact", Health: "healthy",
+		}},
+		ActiveArtifact: &groveshop.ArtifactStatusView{ApplicationID: "grove-shop", ConfigRevision: "acme-r42"},
+		Rollout:        &groveshop.RolloutStatusView{Generation: 1, Phase: "active"},
+	}
+	wantOrder := groveshop.Order{
+		ID: "web-order", Status: groveshop.OrderCompleted,
+		History: []groveshop.OrderStatus{groveshop.OrderCreated, groveshop.OrderReserved, groveshop.OrderPaid, groveshop.OrderShipping, groveshop.OrderCompleted},
+	}
+	handler := groveshop.WebHandlerWithRuntime(
+		groveshop.DefaultConfiguration(),
+		"sha256:config",
+		func(_ context.Context) (groveshop.ClusterStatusView, error) { return status, nil },
+		func(_ context.Context, request groveshop.CreateOrderRequest) (groveshop.Order, error) {
+			if request.OrderID != wantOrder.ID {
+				t.Errorf("order request = %#v", request)
+			}
+			return wantOrder, nil
+		},
+	)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	response, err := http.Get(server.URL + "/grove/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotStatus groveshop.ClusterStatusView
+	if err := json.NewDecoder(response.Body).Decode(&gotStatus); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !reflect.DeepEqual(gotStatus, status) {
+		t.Errorf("GET /grove/status = %d %#v; want %#v", response.StatusCode, gotStatus, status)
+	}
+
+	response, err = http.Post(server.URL+"/api/orders", "application/json", strings.NewReader(`{"OrderID":"web-order","SKU":"coffee-beans","Quantity":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var created groveshop.Order
+	if err := json.NewDecoder(response.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusCreated || !reflect.DeepEqual(created, wantOrder) {
+		t.Errorf("POST /api/orders = %d %#v; want %#v", response.StatusCode, created, wantOrder)
+	}
+
+	response, err = http.Get(server.URL + "/api/orders")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var orders []groveshop.Order
+	if err := json.NewDecoder(response.Body).Decode(&orders); err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if !reflect.DeepEqual(orders, []groveshop.Order{wantOrder}) {
+		t.Errorf("GET /api/orders = %#v; want %#v", orders, []groveshop.Order{wantOrder})
 	}
 }
 
