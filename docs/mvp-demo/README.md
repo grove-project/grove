@@ -5,7 +5,7 @@ Grove Shop is the permanent reference/demo application for the MVP. It must demo
 
 The demo proves this lifecycle:
 
-`normal Go app -> embedded customer config -> immutable artifact -> multi-node Grove deployment -> live observation -> candidate upgrade -> config-induced failure -> automatic rollback -> healthy application`
+`normal Go app -> embedded customer config -> immutable artifact -> multi-node Grove deployment -> live observation -> candidate upgrade -> config-induced failure -> automatic rollback -> healthy application -> distributed debugging through Grove`
 
 ## Demo application
 Grove Shop is a small order-processing application with these logical components:
@@ -31,7 +31,7 @@ The deployable Grove Shop artifact contains:
 There must be no separately deployed dashboard, frontend server, or loose production configuration file required to run the demo.
 
 ## Minimal user workflow
-The intended public demo workflow is:
+The intended public deployment/rollback demo workflow is:
 
 ```bash
 grove deploy --config configs/acme.yaml
@@ -53,9 +53,9 @@ A diagnostic command may also exist:
 grove status
 ```
 
-Do not require the user to manually create a cluster, add nodes, compile config, embed config, create an artifact, or orchestrate upgrade steps for the demo.
+Do not require the user to manually create a cluster, add nodes, compile config, embed config, create an artifact, or orchestrate upgrade steps for the headline deployment demo.
 
-## Required demo sequence
+## Required deployment/rollback sequence
 1. Build/package Grove Shop.
 2. Embed `acme.yaml` into the artifact.
 3. Start a local multi-Grovlet cluster using real Grovlet OS processes.
@@ -83,6 +83,15 @@ The Inventory component may reject the value during startup or fail deterministi
 
 Do not make rollback depend on the Web UI. The UI is only an observer.
 
+## Final distributed-debugging sequence
+Task 032 extends the completed lifecycle demo with Delve/DAP debugging.
+
+For this scenario Grove Shop runs on five dedicated Grovlets, one service per node, with each service in its own worker process. Grove must then expose two concurrent independent debugger sessions to workers on different nodes without requiring the user to discover PIDs, remote node addresses, or Delve ports.
+
+The canonical targets are Orders and Payment. During one order flow the developer must be able to hit an Orders breakpoint, continue, then hit a Payment breakpoint, inspect application state in both sessions, continue execution, disconnect both sessions, and finish with a healthy cluster.
+
+See `demo/DEBUGGING_DEMO.md` and `tasks/032-delve-multi-worker-debugging.md` for the exact acceptance contract.
+
 ## What the demo proves
 - normal Go application code;
 - explicit Grove service communication;
@@ -95,7 +104,10 @@ Do not make rollback depend on the Web UI. The UI is only an observer.
 - live cluster/deployment visibility;
 - candidate deployment and health validation;
 - automatic rejection/rollback of a bad candidate;
-- restoration/preservation of the previous known-good artifact and configuration.
+- restoration/preservation of the previous known-good artifact and configuration;
+- service-aware worker discovery for debugging;
+- ordinary Delve/DAP sessions tunneled through Grove;
+- simultaneous debugging of workers on different Grovlets.
 
-## Not MVP v1
-Do not add debugging/DAP/Delve to this demo for MVP v1. Debugging is a natural MVP v2 extension: select a Grove component, inspect it, and attach through Grove without manually locating its process/node/debugger endpoint.
+## Debugging scope boundary
+The MVP debugging proof uses two independent Delve/DAP sessions. It does not require a stateful DAP multiplexer, cross-service single-step behavior, global breakpoint fan-out, or an IDE-specific Grove plugin.
