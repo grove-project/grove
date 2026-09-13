@@ -4,7 +4,7 @@ Status: DONE
 Depends on: 020, 024, 028, 030
 
 ## Goal
-Create one automated regression test demonstrating the complete Grove MVP demo contract.
+Create one automated regression test demonstrating the complete Grove MVP deployment/recovery/rollback lifecycle contract. Task 032 builds on this completed baseline with distributed debugging.
 
 ## Required reading
 - `demo/README.md`
@@ -61,7 +61,7 @@ The browser remains open between commands and requires no manual refresh to obse
 - All child processes are launched by the Go harness.
 - Failures dump useful node, placement, deployment, artifact/config, and component diagnostics.
 - The UI is an observer only; health detection and rollback must work with no browser connected.
-- Do not add debugging/DAP; that is outside MVP v1.
+- Do not add debugging/DAP in this task; Task 032 owns that scope.
 
 ## Done
-`go test ./...` passes. This marks the planned Grove MVP complete.
+`go test ./...` passes. This marks the deployment/recovery/rollback lifecycle baseline complete; Task 032 is the final planned MVP task.
