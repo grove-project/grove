@@ -68,7 +68,7 @@ rollout engine, scheduler, or deployment daemon.
   structured rollback observation, post-rollback order, and Task 030
   resilience execution without sleeps.
 
-- [ ] 3. Verify and close the Grove MVP.
+- [x] 3. Verify and close the Grove MVP.
   **Context:** Run formatting, diff checks, focused repetitions, vet, the full
   uncached suite, and the full race suite. Mark Task 031 DONE only after all
   earlier E2Es remain green, then rebase and push directly to `main`.
@@ -89,3 +89,6 @@ rollout engine, scheduler, or deployment daemon.
   cross-Grovlet orders, node recovery, durable restart, pending and rolled-back
   Web status, broken Inventory rejection, post-rollback health, and the Task
   030 resilience transcript.
+- 2026-09-13: Task 031 passed `go vet ./...`, `go test -count=1 ./...`, and
+  `go test -race -count=1 ./...`. Every earlier task E2E remained green; the
+  planned Grove MVP is complete.

@@ -1,6 +1,6 @@
 # Task 031 — Final Grove Shop MVP lifecycle E2E
 
-Status: TODO
+Status: DONE
 Depends on: 020, 024, 028, 030
 
 ## Goal
