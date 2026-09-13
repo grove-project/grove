@@ -47,11 +47,11 @@ control APIs.
 
 ## Sub-Tasks
 
-- [ ] 1. Parse the bounded resilience mode.
+- [x] 1. Parse the bounded resilience mode.
   **Context:** Add the flag/default service, validate the service ID, and keep
   baseline invocation compatibility.
 
-- [ ] 2. Execute node loss and observe production recovery.
+- [x] 2. Execute node loss and observe production recovery.
   **Context:** Enable recovery, resolve and kill the hosting node, reconnect via
   a survivor, wait for health/placement/component convergence, rerun the flow,
   and clean up the already-dead child safely.
@@ -71,3 +71,6 @@ control APIs.
   pushed to `main` at `9272bab`.
 - 2026-09-12: Kept the action to one hosting-node kill. Network, disk, CPU,
   latency, scenario generation, and SLA evaluation remain out of scope.
+- 2026-09-13: Added bounded resilience selection, production recovery startup,
+  authoritative host resolution, a real Grovlet kill, survivor reconnection,
+  and convergence checks across all surviving placement observers.

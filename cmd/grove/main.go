@@ -35,6 +35,7 @@ var (
 	errConfigPathRequired    = errors.New("config path is required")
 	errOutputPathRequired    = errors.New("output path is required")
 	errTestApplication       = errors.New("test artifact must contain Grove Shop")
+	errResilienceRequired    = errors.New("service selection requires resilience mode")
 )
 
 type commandName string
@@ -74,6 +75,7 @@ type invocation struct {
 	binaryPath    string
 	configPath    string
 	outputPath    string
+	resilience    bool
 }
 
 type controlClient interface {
@@ -136,10 +138,12 @@ func parseInvocation(args []string, stderr io.Writer) (invocation, error) {
 }
 
 func parseTestInvocation(args []string, stderr io.Writer) (invocation, error) {
-	parsed := invocation{command: commandTest}
+	parsed := invocation{command: commandTest, serviceID: defaultResilienceServiceID}
 	flags := flag.NewFlagSet("test", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.StringVar(&parsed.binaryPath, "binary", "", "Grove application artifact to test")
+	flags.BoolVar(&parsed.resilience, "resilience", false, "kill one service-hosting node and rerun the flow after recovery")
+	serviceID := flags.Uint64("service-id", uint64(defaultResilienceServiceID), "stateless service to target in resilience mode")
 	if err := flags.Parse(args); err != nil {
 		return invocation{}, fmt.Errorf("parse test flags: %w", err)
 	}
@@ -149,6 +153,17 @@ func parseTestInvocation(args []string, stderr io.Writer) (invocation, error) {
 	if parsed.binaryPath == "" {
 		return invocation{}, errBinaryPathRequired
 	}
+	if *serviceID == 0 || *serviceID > uint64(^grove.ServiceID(0)) {
+		return invocation{}, errServiceIDRequired
+	}
+	serviceSelected := false
+	flags.Visit(func(option *flag.Flag) {
+		serviceSelected = serviceSelected || option.Name == "service-id"
+	})
+	if serviceSelected && !parsed.resilience {
+		return invocation{}, errResilienceRequired
+	}
+	parsed.serviceID = grove.ServiceID(*serviceID)
 	return parsed, nil
 }
 

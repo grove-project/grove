@@ -48,18 +48,20 @@ func Example() {
 
 func TestParseInvocation(t *testing.T) {
 	valid := []struct {
-		args    []string
-		command commandName
-		action  componentAction
-		service grove.ServiceID
-		binary  string
+		args       []string
+		command    commandName
+		action     componentAction
+		service    grove.ServiceID
+		binary     string
+		resilience bool
 	}{
 		{args: []string{"status", "--system-nats-url", "nats://control", "--node-id", "node-1"}, command: commandStatus},
 		{args: []string{"nodes", "--system-nats-url", "nats://control", "--node-id", "node-1"}, command: commandNodes},
 		{args: []string{"components", "--system-nats-url", "nats://control", "--node-id", "node-1"}, command: commandComponents},
 		{args: []string{"component", "start", "--system-nats-url", "nats://control", "--node-id", "node-2", "--service-id", "2"}, command: commandComponent, action: componentStart, service: 2},
 		{args: []string{"component", "stop", "--system-nats-url", "nats://control", "--node-id", "node-2", "--service-id", "2"}, command: commandComponent, action: componentStop, service: 2},
-		{args: []string{"test", "--binary", "./grove-shop"}, command: commandTest, binary: "./grove-shop"},
+		{args: []string{"test", "--binary", "./grove-shop"}, command: commandTest, service: defaultResilienceServiceID, binary: "./grove-shop"},
+		{args: []string{"test", "--binary", "./grove-shop", "--resilience", "--service-id", "1"}, command: commandTest, service: 1, binary: "./grove-shop", resilience: true},
 	}
 	for _, test := range valid {
 		parsed, err := parseInvocation(test.args, io.Discard)
@@ -67,8 +69,8 @@ func TestParseInvocation(t *testing.T) {
 			t.Errorf("parseInvocation(%q): %v", test.args, err)
 			continue
 		}
-		if parsed.command != test.command || parsed.action != test.action || parsed.serviceID != test.service || parsed.binaryPath != test.binary {
-			t.Errorf("parseInvocation(%q) = %#v; want command %q, action %q, service %d, binary %q", test.args, parsed, test.command, test.action, test.service, test.binary)
+		if parsed.command != test.command || parsed.action != test.action || parsed.serviceID != test.service || parsed.binaryPath != test.binary || parsed.resilience != test.resilience {
+			t.Errorf("parseInvocation(%q) = %#v; want command %q, action %q, service %d, binary %q, resilience %t", test.args, parsed, test.command, test.action, test.service, test.binary, test.resilience)
 		}
 	}
 
@@ -87,6 +89,8 @@ func TestParseInvocation(t *testing.T) {
 		{args: []string{"component", "stop", "--system-nats-url", "nats://control", "--node-id", "node-1", "--service-id", "4294967296"}, err: errServiceIDRequired},
 		{args: []string{"test"}, err: errBinaryPathRequired},
 		{args: []string{"test", "--binary", "./grove-shop", "extra"}, err: errUnexpectedArguments},
+		{args: []string{"test", "--binary", "./grove-shop", "--service-id", "2"}, err: errResilienceRequired},
+		{args: []string{"test", "--binary", "./grove-shop", "--resilience", "--service-id", "0"}, err: errServiceIDRequired},
 	}
 	for _, test := range invalid {
 		_, err := parseInvocation(test.args, io.Discard)
