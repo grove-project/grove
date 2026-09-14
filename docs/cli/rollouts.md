@@ -4,26 +4,48 @@ Status: Design / evolving
 
 ## Principle
 
-Grove configuration is immutable at runtime. The CLI can inspect configuration and can initiate, observe, diagnose, or roll back a deployment, but it does not edit the configuration of a running node.
+Grove configuration is immutable at runtime. The application console can inspect configuration and can initiate, observe, diagnose, or roll back a deployment, but it does not edit the configuration of a running node.
 
-A configuration change therefore means rolling out another binary artifact.
+A configuration change therefore means rolling out another application artifact.
 
 ## Basic workflow
 
+Human workflow from the application binary:
+
 ```bash
-grove config inspect --binary ./grove-cloud-v2
-grove rollout ./grove-cloud-v2
-grove rollout status
-grove rollout inspect <rollout-id>
+./groveshop
+```
+
+```text
+Deployments
+  ├─ Current artifact
+  ├─ New rollout
+  ├─ Rollout history
+  └─ Configuration
+```
+
+Starting a rollout is contextual:
+
+```text
+Deployments > New rollout > ./groveshop-next
+```
+
+Automation uses structured actions exposed by the same application binary:
+
+```bash
+./groveshop action config.inspect ./groveshop-next
+./groveshop action rollout.start ./groveshop-next
+./groveshop action rollout.status
+./groveshop action rollout.inspect <rollout-id>
 ```
 
 A rollback is also an artifact transition, not configuration mutation:
 
 ```bash
-grove rollout rollback <rollout-id>
+./groveshop action rollout.rollback <rollout-id>
 ```
 
-Exact command names are evolving; the behavioral contract is the important part.
+Exact action names are evolving; the behavioral contract is the important part.
 
 ## Binary handoff
 
@@ -33,17 +55,18 @@ The old process remains authoritative while the candidate is proving itself. Can
 
 ## Rollout phases
 
-The CLI should expose a stable state machine such as:
+The TUI should expose a stable state machine such as:
 
 ```text
 pending -> transferring -> verifying -> starting -> joining -> handoff -> healthy
                                                            \-> failed
 ```
 
-`grove rollout status` should provide a concise cluster-wide view:
+The Deployments view should provide a concise cluster-wide view:
 
 ```text
-Rollout: 2026-09-09-001
+Deployments > 2026-09-09-001
+
 Artifact: sha256:...
 Target class: cloud
 Status: progressing
@@ -66,7 +89,7 @@ grove-v2-edge     edge     8/8     0         0
 
 ## Diagnostics
 
-`grove rollout inspect` should explain why progress stopped rather than merely expose a failed state. Examples include:
+The rollout detail view should explain why progress stopped rather than merely expose a failed state. Examples include:
 
 - artifact integrity/signature failure,
 - cluster identity mismatch,
@@ -81,16 +104,18 @@ The operator should see state, change, cause, action, and result.
 
 ## Configuration inspection
 
-Configuration inspection is read-only:
+Configuration inspection is read-only and should be reachable from the artifact/rollout context in the TUI.
+
+For automation:
 
 ```bash
-grove config inspect --binary ./grove-edge-v2
-grove node inspect edge-07
+./groveshop action config.inspect ./groveshop-edge-v2
+./groveshop action node.inspect edge-07
 ```
 
 Useful output includes code digest, config revision/digest, final artifact digest, cluster identity, node class/zone, embedded config format, and integrity status.
 
-There is intentionally no normal `grove node set-zone` or live `grove config set` operation. To change an immutable value, create another configured artifact and roll it out.
+There is intentionally no normal live `node.set-zone` or `config.set` operation. To change an immutable value, create another configured artifact and roll it out.
 
 ## Compatibility guard
 
@@ -105,4 +130,4 @@ A candidate whose embedded cluster identity or node class is incompatible with t
 
 ## Control state
 
-Rollout state is durable Grove control-plane state. Any CLI connected to a healthy cluster node should observe the same rollout ID, artifact identities, target set, per-node phase, health, and failure reasons.
+Rollout state is durable Grove control-plane state. Any instance of the same application console connected to a healthy cluster node should observe the same rollout ID, artifact identities, target set, per-node phase, health, and failure reasons.
