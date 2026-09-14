@@ -267,14 +267,12 @@ Grove handles durable bookkeeping, retry identity, result persistence, replay, r
 
 ## Operational visibility
 
-SDK semantics should automatically become CLI semantics. A service using persistent state and durable execution should expose those capabilities without additional instrumentation.
+SDK semantics should automatically become application-console semantics. A service using persistent state and durable execution should expose those capabilities without additional instrumentation.
 
-For example:
+From the built-in TUI:
 
 ```text
-$ grove inspect orders
-
-Service: orders
+Services > orders
 
 Capabilities
   ✓ Persistent state
@@ -288,12 +286,14 @@ Executions
   completed       48,291
   recovering            1
   failed                0
+
+[Executions] [Storage] [Logs] [Debug]
 ```
 
-And execution inspection should expose step-level recovery state:
+Drilling into executions should expose step-level recovery state:
 
 ```text
-$ grove executions orders
+Services > orders > Executions
 
 ID                  STATE        STEP       NODE
 fulfill:8912        running      ship       node-2
@@ -301,4 +301,11 @@ fulfill:8913        recovering   charge     node-3
 fulfill:8914        completed    done       node-1
 ```
 
-The DevEx principle is simple: **what the developer expresses through the SDK becomes observable and operable through Grove automatically.**
+For automation, the same information is available from the application binary's structured action registry:
+
+```bash
+./groveshop action service.inspect orders
+./groveshop action executions.list orders
+```
+
+The DevEx principle is simple: **what the developer expresses through the SDK becomes observable and operable through the application itself automatically.**
