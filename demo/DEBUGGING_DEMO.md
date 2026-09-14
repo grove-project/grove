@@ -3,7 +3,9 @@
 ## Purpose
 This is the human-facing walkthrough for Task 032. It demonstrates that Grove can resolve application services to their real distributed workers and expose ordinary Delve/DAP debugging locally without SSH, PID discovery, node discovery, or remote debugger ports.
 
-This guide is a **Task 032 acceptance artifact**. Do not mark Task 032 DONE until every command below has been executed successfully against a clean local checkout.
+The human workflow is TUI-first and is exposed by the Grove Shop application binary itself. Structured actions from the same binary are used where the demo needs deterministic, scriptable debugger endpoints.
+
+This guide is a **Task 032 acceptance artifact**. Do not mark Task 032 DONE until every action below has been executed successfully against a clean local checkout.
 
 ## Required topology
 The debug demo runs one Grove Shop service per Grovlet:
@@ -18,74 +20,97 @@ The debug demo runs one Grove Shop service per Grovlet:
 
 Orders and Payment therefore live in different worker processes on different nodes.
 
-## 1. Build the CLI and debug-capable Grove Shop artifact
+## 1. Build the debug-capable Grove Shop application binary
 
 ```bash
-go build -o ./bin/grove ./cmd/grove
-go build -gcflags="all=-N -l" -o ./bin/grove-shop ./cmd/grovlet
+go build -gcflags="all=-N -l" -o ./bin/groveshop ./demo/groveshop
 ```
 
-Task 032 may replace the second command with a dedicated Grove artifact-build command if that becomes the implemented artifact workflow. The final accepted guide must contain the exact command that actually works.
+If the implemented Grove Shop entry point differs, update this guide to the exact command that actually works. The important contract is that the produced application binary contains both the Grove runtime and the Grove operational console; no separate `grove` CLI binary is required.
 
-## 2. Deploy the debug demo
-
-The final Task 032 implementation must expose one minimal command that starts/uses the local five-node cluster, applies the dedicated demo placement, and deploys the debug-capable Grove Shop artifact. The intended UX is:
+## 2. Start the Grove Shop console
 
 ```bash
-./bin/grove deploy --config configs/acme.yaml --debug-demo
+./bin/groveshop
 ```
 
-After implementation, this section must be updated to the exact tested command if the final CLI differs.
+The application opens the Grove TUI in an interactive terminal.
+
+Navigate to the deployment/debug-demo flow and start the five-node demo topology. The intended experience is:
+
+```text
+Deployments > Debug demo > Start
+```
+
+The final implementation may refine labels, but the human should not need to construct a generic command/flag tree.
 
 ## 3. Verify placement before debugging
 
-```bash
-./bin/grove status
-./bin/grove components
+From the TUI:
+
+```text
+Services
+
+Web         node-1   healthy
+Orders      node-2   healthy
+Inventory   node-3   healthy
+Payment     node-4   healthy
+Shipping    node-5   healthy
 ```
 
-Confirm that the structured output shows:
+Confirm all five workers are healthy and that Orders and Payment are hosted on different nodes.
 
-- Web on node-1;
-- Orders on node-2;
-- Inventory on node-3;
-- Payment on node-4;
-- Shipping on node-5;
-- all five workers healthy.
-
-The human operator must not need to copy a PID or node address into the debugger commands below.
-
-## 4. Start the Orders debugger tunnel
-
-Terminal A:
+For automated verification, use the structured action exposed by the same application binary:
 
 ```bash
-./bin/grove debug --service orders --listen 127.0.0.1:40000
+./bin/groveshop action cluster.status
 ```
 
-The command should print the resolved Orders service, node, worker identity, artifact/version, and:
+The human operator must not need to copy a PID or remote node address into the debugger flow.
+
+## 4. Attach the Orders debugger
+
+Human workflow:
+
+```text
+Services > Orders > Instances > node-2 > Debug > Attach
+```
+
+For the deterministic demo endpoint used by the IDE, Terminal A runs:
+
+```bash
+./bin/groveshop action debug.attach orders --listen 127.0.0.1:40000
+```
+
+The action should print the resolved Orders service, node, worker identity, artifact/version, and:
 
 ```text
 DAP listening locally on 127.0.0.1:40000
 ```
 
-Keep this command running.
+Keep this action running.
 
-## 5. Start the Payment debugger tunnel
+## 5. Attach the Payment debugger
 
-Terminal B:
+Human workflow:
 
-```bash
-./bin/grove debug --service payment --listen 127.0.0.1:40001
+```text
+Services > Payment > Instances > node-4 > Debug > Attach
 ```
 
-The command should resolve Payment independently and print:
+For the deterministic demo endpoint, Terminal B runs:
+
+```bash
+./bin/groveshop action debug.attach payment --listen 127.0.0.1:40001
+```
+
+The action should resolve Payment independently and print:
 
 ```text
 DAP listening locally on 127.0.0.1:40001
 ```
 
-Keep this command running too.
+Keep this action running too.
 
 ## 6. Attach two IDE debugger sessions
 
@@ -100,7 +125,7 @@ Set one breakpoint in the Orders request/order-flow path and one in the Payment 
 
 ## 7. Trigger one order
 
-Use the Grove Shop Web UI opened by the deployment command and create an order.
+Use the Grove Shop Web UI and create an order.
 
 Expected sequence:
 
@@ -114,26 +139,36 @@ The two debugger sessions remain independent; Grove is not multiplexing them int
 
 ## 8. Disconnect and verify health
 
-Disconnect both IDE sessions, then stop the two `grove debug` commands if they have not exited automatically.
+Disconnect both IDE sessions, then stop the two `debug.attach` actions if they have not exited automatically.
 
-Run:
+Return to the TUI and verify:
+
+```text
+Cluster
+
+Health      healthy
+Services    5 / 5 healthy
+```
+
+For automated verification:
 
 ```bash
-./bin/grove status
-./bin/grove components
+./bin/groveshop action cluster.status
 ```
 
 All five Grove Shop services must be back under normal supervision and healthy.
 
 ## Acceptance rule
-The commands in this guide are not documentation-only examples. Task 032 is incomplete until the implementation agent has:
+The actions in this guide are not documentation-only examples. Task 032 is incomplete until the implementation agent has:
 
-- run them on a clean checkout;
+- built one debug-capable Grove Shop application binary containing the runtime and operational console;
+- opened the TUI and verified the five-node service placement;
+- run the two application-binary `debug.attach` actions;
 - proven both local DAP endpoints target the intended remote workers;
 - hit both breakpoints during one order flow;
 - continued the order to completion;
 - disconnected both sessions;
-- rerun status/health checks successfully;
+- rerun cluster health checks successfully;
 - run `go test ./...` successfully.
 
-If any command changes during implementation, update this guide first and retest the exact final text.
+If any action or TUI path changes during implementation, update this guide first and retest the exact final text.
