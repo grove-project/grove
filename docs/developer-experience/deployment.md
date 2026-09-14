@@ -6,7 +6,7 @@ Goal
 Deploy the same Grove application code from development into standalone or clustered environments while keeping deployment configuration explicit, immutable, and inspectable.
 
 Deployment Model  
-A Grove release is a versioned binary artifact containing application code, Grove runtime, and an embedded configuration section. A running artifact never mutates its configuration. A configuration change creates a new artifact and therefore a new rollout.
+A Grove release is a versioned binary artifact containing application code, Grove runtime, the application operational console/action registry, and an embedded configuration section. A running artifact never mutates its configuration. A configuration change creates a new artifact and therefore a new rollout.
 
 Different node classes may use different configured variants of the same code binary. For example, one artifact may embed `node.zone: cloud` while another embeds `node.zone: edge`. Grove does not infer these authoritative placement-domain facts from IP addresses or network heuristics; the running Grovlet reads them from its embedded configuration.
 
@@ -16,7 +16,8 @@ Desired Experience
 • Run those immutable artifacts as Grove nodes.  
 • Let Grove place workers/services according to hard eligibility and policy.  
 • Roll configuration or software changes out as successor artifacts over the existing Grove mesh.  
-• Observe health, handoff, failure reasons, and rollback through the CLI.
+• Observe health, handoff, failure reasons, and rollback through the application binary's TUI.  
+• Use structured actions from that same binary for CI, scripts, tests, and reproducible automation.
 
 Core Invariant  
 **Grove never mutates the configuration of a running binary. A configuration change produces a new immutable artifact, and the running cluster rolls that artifact out through binary handoff.**
@@ -70,16 +71,16 @@ edge-v1  -> edge-v2
 A successor whose immutable node class does not match the target node should be rejected by the handoff contract. Changing a machine's fundamental node class is explicit reprovisioning, not an accidental side effect of a rollout.
 
 Rollout Observability  
-Rollout progress is durable cluster state and should be inspectable from any healthy Grove CLI connection. Useful phases include:
+Rollout progress is durable cluster state and should be inspectable from any healthy application console connected to the cluster. Useful phases include:
 
 ```text
 pending -> transferring -> verifying -> starting -> joining -> handoff -> healthy
                                                            \-> failed
 ```
 
-The CLI should show per-node old/new artifact identity, target node class, current phase, health, timestamps, and actionable failure reason. Operators should be able to distinguish artifact/config incompatibility, failed startup, failed placement validation, join failure, and health failure.
+The TUI should show per-node old/new artifact identity, target node class, current phase, health, timestamps, and actionable failure reason. Operators should be able to distinguish artifact/config incompatibility, failed startup, failed placement validation, join failure, and health failure.
 
-The CLI boundary is deliberate: **the CLI may inspect configuration and control/observe rollouts; it does not edit the configuration of running nodes.**
+The operational boundary is deliberate: **the console may inspect configuration and control/observe rollouts; it does not edit the configuration of running nodes.**
 
 Upgrade Direction  
 New and old application versions remain isolated by default. Grove coordinates rollout and ingress transition without assuming mixed-version service compatibility.
@@ -122,34 +123,34 @@ Operational Invariants
 • Code identity, configuration identity, and artifact identity are separate and independently verifiable.  
 • The current Grove mesh bootstraps the successor artifact.  
 • The old process remains authoritative until side-by-side handoff succeeds.  
-• The CLI inspects configuration and observes/controls rollout; it does not mutate running configuration.  
+• The application console inspects configuration and observes/controls rollout; it does not mutate running configuration.  
 • Given an artifact digest, Grove can identify the exact code and configuration combination used to reproduce a deployment.
 
-Embedded Configuration Format and CLI  
-At build time, the Grove binary reserves a fixed-capacity configuration section. The executable is built once with this empty/reserved region; configuration is subsequently written only into that region. Post-build embedding must not resize or restructure the executable.
+Embedded Configuration Format and Application Tooling  
+At build time, the Grove application binary reserves a fixed-capacity configuration section. The executable is built once with this empty/reserved region; configuration is subsequently written only into that region. Post-build embedding must not resize or restructure the executable.
 
-The Grove CLI accepts human-editable YAML as the authoring format. During embedding it validates and decodes YAML into the application's typed configuration model, serializes the configuration using Go gob, compresses the payload, calculates integrity metadata, and writes the payload into the reserved section.
+The application binary accepts human-editable YAML as the authoring format through its structured artifact/config operations. During embedding Grove validates and decodes YAML into the application's typed configuration model, serializes the configuration using Go gob, compresses the payload, calculates integrity metadata, and writes the payload into the reserved section.
 
 Conceptual flow:  
 YAML -> typed validation/decode -> gob -> compression -> reserved binary config section
 
-Example:  
-`grove config embed --binary grove-v1.8.0 --config cloud.yaml --output grove-v1.8.0-cloud`
+Automation example:  
+`./groveshop action config.embed --binary ./groveshop --config cloud.yaml --output ./groveshop-cloud`
 
 The embedded section should contain a versioned header including format/encoding version, payload lengths, compression, config revision/digest, and integrity/signature information where applicable.
 
 Reserved Capacity  
-Embedding succeeds only when the compressed configuration and metadata fit in the capacity chosen at build time. The CLI must not silently enlarge the section. If it does not fit, Grove reports the required size and requires rebuilding the canonical executable with larger capacity.
+Embedding succeeds only when the compressed configuration and metadata fit in the capacity chosen at build time. The tooling must not silently enlarge the section. If it does not fit, Grove reports the required size and requires rebuilding the canonical executable with larger capacity.
 
 Extraction and Inspection  
-Configuration embedding is reversible for investigation and artifact construction. The CLI can extract configuration from an artifact and inspect metadata:
+Configuration embedding is reversible for investigation and artifact construction. The same application binary can extract configuration from an artifact and inspect metadata:
 
 ```text
-grove config extract --binary grove-v1.8.0-cloud --output cloud.yaml
-grove config inspect --binary grove-v1.8.0-cloud
+./groveshop action config.extract --binary ./groveshop-cloud --output cloud.yaml
+./groveshop action config.inspect --binary ./groveshop-cloud
 ```
 
-These commands operate on artifacts; they do not mutate a running node. Runtime inspection should expose the effective embedded configuration/config identity of each node without offering a `set` operation.
+These actions operate on artifacts; they do not mutate a running node. Runtime inspection should expose the effective embedded configuration/config identity of each node without offering a `set` operation.
 
 Artifact Hashing  
 Grove distinguishes a code digest that excludes/normalizes the reserved configuration section from the complete artifact digest. This lets cloud and edge artifacts prove identical executable code while retaining distinct configuration and artifact identities.
