@@ -1,129 +1,113 @@
-# Plan: Debug two Grove Shop workers through ordinary DAP
+# Plan: Move the Grove Shop lifecycle into its application console
 
 ## Goal
 
-Complete Task 032 with a five-Grovlet Grove Shop deployment where every
-service runs in its own worker process and two independent `grove debug`
-commands resolve Orders and Payment by service name, expose local DAP
-listeners, tunnel to node-local Delve sessions, hit and inspect both workers
-during one order, disconnect cleanly, and leave the cluster healthy.
+Complete the reopened Task 031 by making the Grove Shop application binary its
+own operational console. The same binary must provide a TUI and structured
+actions over one registry, drive the existing deployment, recovery, durable
+restart, rollback, and resilience behavior, expose the authoritative Grove read
+model, and pass one production-shaped real-process lifecycle E2E.
 
 ## Context
 
-Task 031 completed the lifecycle baseline. The existing runtime already owns
-authoritative service placement in JetStream/KV and worker subprocesses in the
-selected Grovlet. Task 032 connects those two facts through ephemeral System
-NATS messaging. Delve remains the DAP implementation; Grove supplies target
-selection, attach identity, transport, lifecycle state, and diagnostics.
+`origin/main` reopened Task 031 and replaced the separate-CLI MVP experience
+with an application-owned console. The already implemented Task 032 debugger
+transport is preserved on this branch, but Task 032 is pending again and its
+console adaptation is explicitly outside this task. Task 031 may reuse existing
+runtime/control-plane mechanisms; it must not create another rollout engine,
+control store, scheduler, or same-host test shortcut.
 
 ### Key Files
 
-- `tasks/032-delve-multi-worker-debugging.md` and
-  `docs/adr/009-dap-debugging-interface.md` — accepted behavior and scope.
-- `internal/systemnats/debug.go` — ephemeral debug-session control and ordered
-  byte transport between the CLI and selected Grovlet.
-- `cmd/grovlet/component.go`, `cmd/grovlet/worker.go`, and a focused debug
-  controller — worker identity, explicit debugging state, and node-local Delve
-  lifecycle.
-- `demo/groveshop/groveshop.go` and `cmd/grovlet/main.go` — make Inventory,
-  Payment, Shipping, Orders, and Web five genuine distributed workers.
-- `cmd/grove/debug.go` — service resolution, local DAP listener, attach target
-  injection, stream forwarding, cleanup, and actionable output.
-- `cmd/grove/deploy.go` — the deliberately narrow, foreground five-node local
-  debug-demo launcher and discoverable local connection metadata.
-- `cmd/grove/debug_test.go` — deterministic real-process two-worker DAP proof.
-- `demo/DEBUGGING_DEMO.md` and `configs/acme.yaml` — executable human flow.
+- `tasks/031-final-mvp-lifecycle-e2e.md` — current acceptance contract.
+- `docs/cli/README.md` and `demo/DEMO_FLOW.md` — application-console and
+  operator experience contracts.
+- A focused Grove console package — typed action registration/invocation and
+  deterministic TUI rendering shared by built-in and application actions.
+- `cmd/grovlet/main.go` and focused console files — make the deployed Grove
+  Shop/Grovlet executable select console, structured-action, or node-runtime
+  mode without requiring another executable.
+- `cmd/grove/mvp_test.go` — existing complete lifecycle proof to migrate from
+  direct control-plane composition to Grove Shop binary actions.
+- `demo/groveshop/web.go` — existing Web and structured status contract shared
+  by the browser and console.
+- `grovetest/` — real process ownership, readiness waits, isolation, cleanup,
+  and diagnostics.
 
 ### Decisions Made
 
-- Keep placement authoritative in existing JetStream/KV. Debug sessions are
-  ephemeral and use System NATS core messaging; no debugger state is written
-  as durable cluster truth.
-- Run one ordinary `dlv dap` process per selected worker. Each Delve listener
-  is a node-local Unix socket and only its byte stream crosses System NATS, so
-  no remote Delve port is exposed.
-- Rewrite only the selected DAP `attach` request's process ID at the local Grove
-  gateway. This hides PID discovery while leaving initialize, breakpoints,
-  stack/variable requests, continue, events, and disconnect as ordinary Delve
-  DAP traffic. Grove does not multiplex or reinterpret debugger state.
-- Give every worker an observable generation-derived identity and record its
-  artifact/version. Add an explicit `debugging` component state; normal exit
-  supervision remains active, while intentional debugger pauses remain
-  healthy and do not trigger recovery.
-- Preserve the existing `NewGroveOrders` contract and add a separate fully
-  distributed constructor for the debug topology. Payment and Shipping become
-  explicitly registered workers without changing ordinary business types.
-- Implement `grove deploy --config ... --debug-demo` as a foreground local-demo
-  owner. It builds a configured copy of `./bin/grove-shop`, starts five real
-  Grovlets through production command paths, writes local discovery metadata,
-  prints the Web endpoint, and cleans up all children on interruption. This is
-  deterministic demo placement, not a general deployment daemon or scheduler.
-- Let status/components/debug commands use explicit connection flags as before
-  or the local debug-demo metadata when flags are omitted. The metadata is only
-  CLI discovery data; cluster truth continues to come from System NATS.
-- Build Delve once inside the E2E from the pinned Go module dependency and pass
-  its path to Grovlets. Human runs use `dlv` from `PATH` and fail immediately
-  with an actionable diagnostic when it is unavailable.
+- Keep `cmd/grovlet` as the application-runtime entry point and build it as
+  `groveshop`; node flags retain headless Grovlet behavior while no arguments
+  open the application console and `action ...` invokes structured operations.
+- Use one typed action registry for both TUI selections and non-interactive
+  actions. Grove Shop registers at least one application-specific action so the
+  extension contract is exercised, not merely sketched.
+- Let one foreground console process own local Grovlet children and lifecycle
+  state. Short-lived action invocations reach that owner through a local Unix
+  control endpoint discovered from an explicit state file; only connection
+  metadata is local, while authoritative cluster state remains in System NATS
+  JetStream/KV.
+- Reuse the existing artifact, desired-state, placement, rollout, recovery,
+  restart, rollback, and resilience paths. The application operation layer
+  sequences them and reports structured results; it does not duplicate them.
+- Keep the Web UI read-only. Browser polling, TUI rendering, and
+  `cluster.status` consume the same `groveshop.ClusterStatusView`.
+- Do not expose or adapt DAP/debug actions in Task 031. The preserved debugger
+  machinery will be connected to this registry only when Task 032 resumes.
 
 ## Sub-Tasks
 
-- [x] 1. Make the five-worker topology real.
-  **Context:** Register Payment and Shipping workers, route all Orders
-  dependencies through the existing Grove call path in the dedicated topology,
-  expose worker/artifact identity, and cover the behavior with focused tests.
-  **Acceptance:** Five explicit placements start five distinct healthy worker
-  PIDs on node-1 through node-5, and an order crosses all four service calls.
+- [ ] 1. Define the shared application-console registry and TUI model.
+  **Context:** Introduce the smallest Go package that registers typed Grove and
+  application actions, dispatches them with structured arguments/results, and
+  renders application-first navigation plus authoritative status. Unit tests
+  must prove duplicate/unknown action errors and that TUI selection invokes the
+  exact same registered handler as automation.
+  **Acceptance:** Focused package tests and `go vet` pass; public API has full
+  Go documentation and no runtime/control-plane dependency.
 
-- [x] 2. Carry one selected Delve DAP stream through Grove.
-  **Context:** Add the ephemeral System NATS session protocol, node-local Delve
-  startup/cleanup, component `debugging` state, local CLI listener, attach PID
-  injection, worker-exit handling, and diagnostics for missing/ambiguous/down
-  targets or Delve failures.
-  **Acceptance:** Focused protocol, lifecycle, and CLI tests prove independent
-  streams, deterministic state transitions, cleanup, and error contracts.
+- [ ] 2. Make the Grove Shop artifact own console and node modes.
+  **Context:** Extend the current Grovlet/Grove Shop entry point so the built
+  artifact runs headlessly with node flags, opens the TUI without arguments,
+  and dispatches `action ...`. Add foreground ownership, local action transport,
+  connection discovery, signal cleanup, and one registered Grove Shop action.
+  **Acceptance:** Real subprocess tests use one built binary for console,
+  action, and Grovlet roles; all children and local discovery state disappear
+  on exit.
 
-- [x] 3. Prove two concurrent workers with real DAP.
-  **Context:** Use `grovetest` to launch five real Grovlet processes and a small
-  Go DAP test client to initialize, attach, set breakpoints, inspect variables,
-  continue, and disconnect from Orders and Payment during one HTTP order.
-  **Acceptance:** Both endpoints hit only their intended worker on distinct
-  nodes/PIDs, non-target workers remain healthy, the order completes after both
-  continues, sessions disappear, and all five components return healthy.
+- [ ] 3. Drive good and broken rollouts through application actions.
+  **Context:** Implement `rollout.start` and `cluster.status` over the existing
+  artifact/config and System NATS lifecycle. The good configuration must start
+  three real nodes, publish desired placement and active artifact/config state,
+  and serve Web. The broken Inventory candidate must expose pending/failure/
+  rollback through the shared read model while Artifact A stays known-good.
+  **Acceptance:** Action-level tests observe structured placement, health,
+  artifact/config identity, candidate failure, rollback reason, and post-
+  rollback order success without reading process logs as state.
 
-- [x] 4. Ship and execute the human debug demo.
-  **Context:** Add the narrow foreground debug-demo deploy command, canonical
-  Acme config, local command discovery, and update the guide to exact output and
-  cleanup behavior.
-  **Acceptance:** Every documented shell command is run from a clean checkout;
-  two ordinary DAP clients hit Orders and Payment and final status is healthy.
+- [ ] 4. Expose recovery, durable restart, and resilience operations.
+  **Context:** Add application-native operations used by the final E2E to kill
+  a service-hosting node, wait for normal recovery, restart the cluster from
+  the same durable directories, and run the existing Task 030 resilience flow.
+  Keep bounded condition waits and return diagnostics from the operation.
+  **Acceptance:** Each operation is invoked through the registry/action path,
+  preserves cross-Grovlet orders, and ends with the shared status healthy.
 
-- [x] 5. Verify and close Task 032.
-  **Context:** Run formatting, diff checks, focused repetitions, vet, uncached
-  full tests, and the race suite. Mark the task DONE only after the automated
-  and human contracts both pass, then rebase and push directly to `main`.
+- [ ] 5. Prove and document the reopened Task 031 contract.
+  **Context:** Migrate the complete MVP E2E so all lifecycle mutations enter
+  through the Grove Shop binary. Assert TUI and Web render the same structured
+  state, run the final documented application-console flow, update affected
+  docs with implemented behavior, and mark only Task 031 DONE.
+  **Acceptance:** Formatting, diff checks, focused repetitions, `go vet ./...`,
+  `go test -count=1 ./...`, and `go test -race -count=1 ./...` all pass with
+  useful real-process diagnostics and no fixed sleeps.
 
 ## Log
 
-- 2026-09-13: Rebased onto `origin/main` at `1bfb704`; upstream added the final
-  Task 032 contract and clarified Task 031 as its lifecycle baseline.
-- 2026-09-13: Confirmed Delve 1.27.2 is available locally and supports DAP over
-  Unix sockets. Existing placement provides service-to-node resolution, while
-  the component manager is the sole owner of the target worker process.
-- 2026-09-13: Preserved Task 031's completed plan in git history. Task 032 will
-  not introduce durable debug state, a general scheduler, SSH, remote Delve
-  ports, a DAP multiplexer, or cross-service stepping.
-- 2026-09-14: Added the topology-explicit five-worker deployment. Orders now
-  reaches Inventory, Payment, and Shipping through Grove calls in the debug
-  topology, while the existing SDK-facing constructor remains unchanged.
-- 2026-09-14: Added ephemeral System NATS debug streams, node-local Delve DAP
-  sessions over Unix sockets, explicit component debugging state, service-name
-  resolution, and local DAP endpoints. The automated E2E attached two ordinary
-  DAP clients to Orders and Payment, hit and inspected both breakpoints during
-  one order, continued it to completion, and verified all five workers healthy.
-- 2026-09-14: Ran every shell command in `demo/DEBUGGING_DEMO.md` against the
-  foreground five-node deployment. Orders resolved to node-2 and Payment to
-  node-4; both manual DAP sessions inspected `order.ID`/`req.OrderID`, the order
-  completed, the sessions disconnected, and cleanup left no child processes.
-- 2026-09-14: Passed `go vet ./...`, `go test -count=1 ./...`, and
-  `go test -race -count=1 ./...`, including all prior distributed lifecycle
-  E2Es. `git diff --check origin/main...HEAD` also passed.
+- 2026-09-14: `origin/main` advanced to `a02664f` and reopened Task 031 after
+  adopting an application-console/TUI product contract. The old Task 032
+  completion marker was reset; its implementation remains preserved for later
+  adaptation.
+- 2026-09-14: Rebased cleanly onto the new console-oriented `origin/main`, with
+  upstream documentation taking precedence where the former separate-CLI
+  debugging walkthrough conflicted.
