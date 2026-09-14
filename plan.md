@@ -95,13 +95,18 @@ control store, scheduler, or same-host test shortcut.
   A real subprocess test completed orders before and after rollback and asserted
   structured artifact/config identities and failure reason.
 
-- [ ] 4. Expose recovery, durable restart, and resilience operations.
+- [x] 4. Expose recovery, durable restart, and resilience operations.
   **Context:** Add application-native operations used by the final E2E to kill
   a service-hosting node, wait for normal recovery, restart the cluster from
   the same durable directories, and run the existing Task 030 resilience flow.
   Keep bounded condition waits and return diagnostics from the operation.
-  **Acceptance:** Each operation is invoked through the registry/action path,
-  preserves cross-Grovlet orders, and ends with the shared status healthy.
+  **Outcome:** Added `resilience.run` and `cluster.restart` to the application
+  registry. The resilience action kills the active Inventory host, waits for
+  existing recovery/placement convergence, persists recovered desired state,
+  and proves another HTTP order. Restart reuses every Grovlet runtime directory,
+  discovers the new System NATS URL, reconstructs durable intent, and returns
+  the shared status healthy. The real-process action test passed through the
+  full recovery/restart/rollback sequence.
 
 - [ ] 5. Prove and document the reopened Task 031 contract.
   **Context:** Migrate the complete MVP E2E so all lifecycle mutations enter
@@ -131,3 +136,7 @@ control store, scheduler, or same-host test shortcut.
   binary. `cluster.status`, Web polling, and TUI model conversion share the
   existing `groveshop.ClusterStatusView`; the rollback operation records the
   Inventory validation field and retains Artifact A.
+- 2026-09-14: `resilience.run` and `cluster.restart` now exercise recovery and
+  durable reconstruction through the same console registry. Restart now selects
+  the latest ready-event NATS URL from each reused node log, avoiding stale
+  connection metadata after an embedded server restarts.

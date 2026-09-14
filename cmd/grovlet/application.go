@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -51,6 +52,7 @@ type applicationCluster struct {
 	systemNATSURL string
 	webAddress    string
 	artifact      artifact.Inspection
+	failedNodeID  string
 }
 
 type rolloutActionResult struct {
@@ -58,6 +60,13 @@ type rolloutActionResult struct {
 	WebURL      string                        `json:"web_url"`
 	Transitions []groveshop.ClusterStatusView `json:"transitions"`
 	Status      groveshop.ClusterStatusView   `json:"status"`
+}
+
+type resilienceActionResult struct {
+	FailedNodeID    string                      `json:"failed_node_id"`
+	RecoveredNodeID string                      `json:"recovered_node_id"`
+	Order           groveshop.Order             `json:"order"`
+	Status          groveshop.ClusterStatusView `json:"status"`
 }
 
 func newApplicationController(binaryPath, runtimeDir string) *applicationController {
@@ -80,6 +89,16 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 			Name: "rollout.start", Label: "New rollout", Section: "Deployments",
 			Description: "Build and roll out an immutable configured Grove Shop artifact.",
 			Handler:     controller.startRollout,
+		},
+		{
+			Name: "cluster.restart", Label: "Restart cluster", Section: "Cluster",
+			Description: "Restart every Grovlet from its durable runtime state.",
+			Handler:     controller.restartCluster,
+		},
+		{
+			Name: "resilience.run", Label: "Run resilience scenario", Section: "Application",
+			Description: "Recover Inventory after its hosting Grovlet fails, then rerun an order.",
+			Handler:     controller.runResilience,
 		},
 	}
 	for _, action := range actions {
@@ -124,6 +143,120 @@ func parseRolloutArguments(args []string) (string, error) {
 		return "", errApplicationConfigRequired
 	}
 	return configPath, nil
+}
+
+func (c *applicationController) runResilience(ctx context.Context, args []string) (any, error) {
+	if len(args) != 0 {
+		return nil, errConsoleArguments
+	}
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
+	c.mu.RLock()
+	cluster := c.cluster
+	c.mu.RUnlock()
+	if cluster == nil {
+		return nil, errApplicationNotDeployed
+	}
+	if cluster.failedNodeID != "" {
+		return nil, errors.New("restart the cluster before running another resilience scenario")
+	}
+	transport, err := systemnats.Connect(ctx, cluster.systemNATSURL)
+	if err != nil {
+		return nil, fmt.Errorf("connect to Grove Shop cluster: %w", err)
+	}
+	placement, err := transport.RequestPlacement(ctx, "node-3")
+	if err != nil {
+		transport.Close()
+		return nil, fmt.Errorf("read Inventory placement: %w", err)
+	}
+	failedNodeID := applicationPlacementNode(placement.Placements, groveshop.ServiceInventory)
+	failedIndex := applicationNodeIndex(failedNodeID)
+	if failedIndex < 0 || failedIndex >= len(cluster.nodes) {
+		transport.Close()
+		return nil, fmt.Errorf("Inventory host %q is not a managed Grovlet", failedNodeID)
+	}
+	transport.Close()
+	if err := cluster.nodes[failedIndex].Kill(ctx); err != nil {
+		return nil, fmt.Errorf("kill Inventory host %s: %w", failedNodeID, err)
+	}
+	transport, err = systemnats.Connect(ctx, cluster.systemNATSURL)
+	if err != nil {
+		return nil, fmt.Errorf("reconnect after Inventory host failure: %w", err)
+	}
+	defer transport.Close()
+	recoveredNodeID, err := waitForApplicationRecovery(ctx, transport, failedNodeID, cluster.artifact.ArtifactDigest)
+	if err != nil {
+		return nil, fmt.Errorf("recover Inventory after node loss: %w\n%s", err, applicationDiagnostics(cluster.nodes))
+	}
+	if err := putApplicationDesired(ctx, transport, applicationDesiredDeployment(cluster.artifact, recoveredNodeID)); err != nil {
+		return nil, err
+	}
+	order, err := createApplicationOrder(ctx, cluster.webAddress, "resilience-order")
+	if err != nil {
+		return nil, fmt.Errorf("run order after Inventory recovery: %w", err)
+	}
+	if !applicationOrderCompleted(order) {
+		return nil, fmt.Errorf("recovered order did not complete: %#v", order)
+	}
+	c.mu.Lock()
+	cluster.failedNodeID = failedNodeID
+	c.lastEvent = "Inventory recovered from " + failedNodeID + " on " + recoveredNodeID
+	c.mu.Unlock()
+	status, err := c.status(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read recovered application status: %w", err)
+	}
+	return resilienceActionResult{
+		FailedNodeID: failedNodeID, RecoveredNodeID: recoveredNodeID, Order: order, Status: status,
+	}, nil
+}
+
+func (c *applicationController) restartCluster(ctx context.Context, args []string) (any, error) {
+	if len(args) != 0 {
+		return nil, errConsoleArguments
+	}
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
+	c.mu.RLock()
+	cluster := c.cluster
+	c.mu.RUnlock()
+	if cluster == nil {
+		return nil, errApplicationNotDeployed
+	}
+	for i := len(cluster.nodes) - 1; i >= 0; i-- {
+		if fmt.Sprintf("node-%d", i+1) == cluster.failedNodeID {
+			continue
+		}
+		if err := cluster.nodes[i].Stop(ctx); err != nil {
+			return nil, fmt.Errorf("stop node-%d for durable restart: %w\n%s", i+1, err, applicationDiagnostics(cluster.nodes))
+		}
+	}
+	for i, node := range cluster.nodes {
+		if err := node.Restart(); err != nil {
+			return nil, fmt.Errorf("restart node-%d: %w\n%s", i+1, err, applicationDiagnostics(cluster.nodes))
+		}
+	}
+	for i, node := range cluster.nodes {
+		if err := node.WaitReady(ctx); err != nil {
+			return nil, fmt.Errorf("wait for restarted node-%d: %w\n%s", i+1, err, applicationDiagnostics(cluster.nodes))
+		}
+	}
+	systemNATSURL, err := applicationSystemNATSURL(cluster.nodes[0].Logs())
+	if err != nil {
+		return nil, fmt.Errorf("read restarted System NATS URL: %w", err)
+	}
+	c.mu.Lock()
+	cluster.systemNATSURL = systemNATSURL
+	cluster.failedNodeID = ""
+	c.lastEvent = "reconstructed deployment from durable state"
+	c.mu.Unlock()
+	status, err := c.waitForStatus(ctx, func(status groveshop.ClusterStatusView) bool {
+		return applicationStatusHealthy(status, cluster.artifact.ArtifactDigest)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("wait for reconstructed application status: %w\n%s", err, applicationDiagnostics(cluster.nodes))
+	}
+	return status, nil
 }
 
 func (c *applicationController) startKnownGood(ctx context.Context, configPath string) (rolloutActionResult, error) {
@@ -412,13 +545,17 @@ func reserveApplicationPorts(count int) ([]int, error) {
 
 func applicationSystemNATSURL(logs string) (string, error) {
 	decoder := json.NewDecoder(strings.NewReader(logs))
+	url := ""
 	for {
 		var event lifecycleEvent
 		if err := decoder.Decode(&event); err != nil {
+			if errors.Is(err, io.EOF) && url != "" {
+				return url, nil
+			}
 			return "", err
 		}
 		if event.Event == "ready" && event.SystemNATSURL != "" {
-			return event.SystemNATSURL, nil
+			url = event.SystemNATSURL
 		}
 	}
 }
@@ -553,6 +690,92 @@ func applicationUpgradeRoutes(current []systemnats.PlacementRecord, candidateDig
 	return routes
 }
 
+func applicationPlacementNode(placements []systemnats.PlacementRecord, serviceID grove.ServiceID) string {
+	for _, placement := range placements {
+		if placement.ServiceID == serviceID {
+			return placement.NodeID
+		}
+	}
+	return ""
+}
+
+func applicationNodeIndex(nodeID string) int {
+	if !strings.HasPrefix(nodeID, "node-") {
+		return -1
+	}
+	index, err := strconv.Atoi(strings.TrimPrefix(nodeID, "node-"))
+	if err != nil || index <= 0 {
+		return -1
+	}
+	return index - 1
+}
+
+func waitForApplicationRecovery(
+	ctx context.Context,
+	transport *systemnats.Transport,
+	failedNodeID string,
+	artifactDigest string,
+) (string, error) {
+	ticker := time.NewTicker(applicationConditionInterval)
+	defer ticker.Stop()
+	var lastCluster systemnats.ClusterView
+	var lastPlacement systemnats.PlacementView
+	var lastErr error
+	for {
+		attemptCtx, cancel := context.WithTimeout(ctx, time.Second)
+		cluster, clusterErr := transport.RequestClusterView(attemptCtx, "node-3")
+		placement, placementErr := transport.RequestPlacement(attemptCtx, "node-3")
+		cancel()
+		if clusterErr == nil {
+			lastCluster = cluster
+		}
+		if placementErr == nil {
+			lastPlacement = placement
+		}
+		healthyNodes := make(map[string]bool, len(cluster.Nodes))
+		failedObserved := false
+		clusterRecovered := clusterErr == nil && cluster.Ready && len(cluster.Nodes) == applicationNodeCount
+		for _, node := range cluster.Nodes {
+			if node.NodeID == failedNodeID {
+				failedObserved = node.Health == systemnats.HealthUnavailable
+				continue
+			}
+			healthyNodes[node.NodeID] = node.Health == systemnats.HealthHealthy
+			clusterRecovered = clusterRecovered && node.Health == systemnats.HealthHealthy
+		}
+		var recovered systemnats.PlacementRecord
+		if placementErr == nil && placement.Ready {
+			for _, record := range placement.Placements {
+				if record.ServiceID == groveshop.ServiceInventory && record.NodeID != failedNodeID &&
+					record.ArtifactDigest == artifactDigest && healthyNodes[record.NodeID] {
+					recovered = record
+					break
+				}
+			}
+		}
+		if clusterRecovered && failedObserved && recovered.NodeID != "" {
+			componentCtx, componentCancel := context.WithTimeout(ctx, time.Second)
+			view, err := transport.RequestComponents(componentCtx, recovered.NodeID)
+			componentCancel()
+			if err == nil {
+				for _, component := range view.Components {
+					if component.ServiceID == groveshop.ServiceInventory && component.State == systemnats.ComponentHealthy {
+						return recovered.NodeID, nil
+					}
+				}
+			} else {
+				lastErr = errors.Join(lastErr, err)
+			}
+		}
+		lastErr = errors.Join(lastErr, clusterErr, placementErr)
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return "", fmt.Errorf("cluster=%#v placement=%#v: %w", lastCluster, lastPlacement, errors.Join(lastErr, ctx.Err()))
+		}
+	}
+}
+
 func (c *applicationController) status(ctx context.Context) (groveshop.ClusterStatusView, error) {
 	c.mu.RLock()
 	cluster := c.cluster
@@ -608,6 +831,35 @@ func readApplicationJSON(ctx context.Context, url string, output any) error {
 	return json.NewDecoder(response.Body).Decode(output)
 }
 
+func createApplicationOrder(ctx context.Context, webAddress, orderID string) (groveshop.Order, error) {
+	requestBody, err := json.Marshal(groveshop.CreateOrderRequest{
+		OrderID: orderID, SKU: "coffee-beans", Quantity: 1,
+		AmountCents: 1200, ShippingAddress: "31 Grove Lane",
+	})
+	if err != nil {
+		return groveshop.Order{}, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+webAddress+"/api/orders", bytes.NewReader(requestBody))
+	if err != nil {
+		return groveshop.Order{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return groveshop.Order{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(response.Body)
+		return groveshop.Order{}, fmt.Errorf("POST /api/orders: %s: %s", response.Status, body)
+	}
+	var order groveshop.Order
+	if err := json.NewDecoder(response.Body).Decode(&order); err != nil {
+		return groveshop.Order{}, err
+	}
+	return order, nil
+}
+
 func applicationStatusHealthy(status groveshop.ClusterStatusView, digest string) bool {
 	if !status.Ready || status.Health != "healthy" || len(status.Nodes) != applicationNodeCount || len(status.Placements) != 3 ||
 		status.ActiveArtifact == nil || status.ActiveArtifact.ArtifactDigest != digest {
@@ -624,6 +876,16 @@ func applicationStatusHealthy(status groveshop.ClusterStatusView, digest string)
 		}
 	}
 	return true
+}
+
+func applicationOrderCompleted(order groveshop.Order) bool {
+	return order.Status == groveshop.OrderCompleted && slices.Equal(order.History, []groveshop.OrderStatus{
+		groveshop.OrderCreated,
+		groveshop.OrderReserved,
+		groveshop.OrderPaid,
+		groveshop.OrderShipping,
+		groveshop.OrderCompleted,
+	})
 }
 
 func (c *applicationController) readModel(ctx context.Context) (console.Model, error) {

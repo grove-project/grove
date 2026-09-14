@@ -5,17 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/systemnats"
@@ -163,6 +161,29 @@ func TestGroveShopBinaryRollsBackBrokenConfiguration(t *testing.T) {
 	if !applicationStatusHealthy(actionStatus, active.Status.ActiveArtifact.ArtifactDigest) {
 		t.Errorf("cluster.status = %#v", actionStatus)
 	}
+	resilienceOutput := runGroveShopAction(t, ctx, statePath, "resilience.run")
+	var resilience resilienceActionResult
+	if err := json.Unmarshal(resilienceOutput, &resilience); err != nil {
+		t.Fatalf("decode resilience result %q: %v", resilienceOutput, err)
+	}
+	if resilience.FailedNodeID != "node-2" || resilience.RecoveredNodeID != "node-1" || !applicationOrderCompleted(resilience.Order) {
+		t.Errorf("resilience result = %#v", resilience)
+	}
+	if resilience.Status.Health != "degraded" {
+		t.Errorf("resilience status health = %q; want degraded while node-2 is unavailable", resilience.Status.Health)
+	}
+	restartOutput := runGroveShopAction(t, ctx, statePath, "cluster.restart")
+	var restarted groveshop.ClusterStatusView
+	if err := json.Unmarshal(restartOutput, &restarted); err != nil {
+		t.Fatalf("decode restart status %q: %v", restartOutput, err)
+	}
+	if !applicationStatusHealthy(restarted, active.Status.ActiveArtifact.ArtifactDigest) || applicationPlacementNodeFromStatus(restarted, groveshop.ServiceInventory) != "node-1" {
+		t.Errorf("restarted status = %#v", restarted)
+	}
+	afterRestart, err := createApplicationOrder(ctx, strings.TrimPrefix(active.WebURL, "http://"), "console-after-restart")
+	if err != nil || !applicationOrderCompleted(afterRestart) {
+		t.Fatalf("order after restart = %#v, %v", afterRestart, err)
+	}
 
 	brokenConfig := filepath.Join("..", "..", "configs", "acme-broken.yaml")
 	rollbackOutput := runGroveShopAction(t, ctx, statePath, "rollout.start", "--config", brokenConfig)
@@ -207,43 +228,13 @@ func runGroveShopAction(t *testing.T, ctx context.Context, statePath string, arg
 	return output
 }
 
-func createApplicationOrder(ctx context.Context, webAddress, orderID string) (groveshop.Order, error) {
-	requestBody, err := json.Marshal(groveshop.CreateOrderRequest{
-		OrderID: orderID, SKU: "coffee-beans", Quantity: 1,
-		AmountCents: 1200, ShippingAddress: "31 Grove Lane",
-	})
-	if err != nil {
-		return groveshop.Order{}, err
+func applicationPlacementNodeFromStatus(status groveshop.ClusterStatusView, serviceID grove.ServiceID) string {
+	for _, placement := range status.Placements {
+		if placement.ServiceID == serviceID {
+			return placement.NodeID
+		}
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+webAddress+"/api/orders", bytes.NewReader(requestBody))
-	if err != nil {
-		return groveshop.Order{}, err
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return groveshop.Order{}, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(response.Body)
-		return groveshop.Order{}, fmt.Errorf("POST /api/orders: %s: %s", response.Status, body)
-	}
-	var order groveshop.Order
-	if err := json.NewDecoder(response.Body).Decode(&order); err != nil {
-		return groveshop.Order{}, err
-	}
-	return order, nil
-}
-
-func applicationOrderCompleted(order groveshop.Order) bool {
-	return order.Status == groveshop.OrderCompleted && slices.Equal(order.History, []groveshop.OrderStatus{
-		groveshop.OrderCreated,
-		groveshop.OrderReserved,
-		groveshop.OrderPaid,
-		groveshop.OrderShipping,
-		groveshop.OrderCompleted,
-	})
+	return ""
 }
 
 func waitForConsoleState(t *testing.T, path string) {
