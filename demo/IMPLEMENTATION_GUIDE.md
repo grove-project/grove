@@ -34,8 +34,11 @@ MVP tests must cover the semantics even if the public Grove Shop demo does not y
 Use deterministic test conditions for MVP rather than depending on external networking. A LAN-reachability validator is the motivating production example, not a requirement for the public demo environment.
 
 ### Developer workflow and artifact
-- Task 021-022: keep CLI interaction minimal and suitable for the final two-command demo.
-- Task 023: define one immutable artifact containing application code, embedded UI assets, deployment metadata, and reserved config region.
+- Tasks 021-022: expose Grove's operational capabilities through Grove Shop itself rather than through a separately distributed generic CLI.
+- The human-facing surface is a TUI embedded in the Grove Shop application binary.
+- The TUI is backed by a structured action registry that can also be invoked non-interactively for CI, tests, scripts, and reproducible demos.
+- The same action registry must support Grove built-in actions and application-specific actions registered by Grove Shop.
+- Task 023: define one immutable artifact containing application code, Grove runtime, embedded TUI/operational actions, embedded UI assets, deployment metadata, and reserved config region.
 - Task 024: implement customer config embedding/extraction and support distinct artifact identity when config differs.
 
 ### Upgrade and rollback
@@ -56,7 +59,7 @@ Use deterministic test conditions for MVP rather than depending on external netw
 - Grove must resolve service -> node -> worker itself. The user must not find or supply PIDs, remote node addresses, or remote Delve ports.
 - The first implementation is a discovery/tunnel layer around ordinary Delve DAP sessions. Do not build a stateful multi-process DAP multiplexer for the MVP.
 - While a worker is intentionally paused by a debugger, Grove supervision must use explicit deterministic debug-session semantics so the breakpoint is not mistaken for an ordinary worker failure.
-- Task 032 is not DONE until the exact human commands documented in `demo/DEBUGGING_DEMO.md` have been executed successfully against the implementation in addition to the automated DAP E2E and `go test ./...`.
+- Task 032 is not DONE until the exact human workflow documented in `demo/DEBUGGING_DEMO.md` has been executed successfully against the implementation in addition to the automated DAP E2E and `go test ./...`.
 
 ## UI implementation guidance
 The Web UI is part of Grove Shop and must be served by a Grove-managed Web component.
@@ -73,24 +76,66 @@ The UI must be able to observe candidate rollout and rollback without controllin
 
 When placement eligibility is exposed in the read model, the cluster view should preserve the distinction between `ineligible for this service` and generic node/service failure.
 
-## Minimal CLI target
-The deployment/rollback portion of the demo should converge on:
+## Application console target
+The headline human workflow is:
 
 ```bash
-grove deploy --config configs/acme.yaml
-grove deploy --config configs/acme-broken.yaml
+./bin/groveshop
 ```
 
-Do not force the user through separate cluster-create, config-compile, config-embed, artifact-create, or upgrade commands for the headline demo. Lower-level commands may exist for diagnostics/testing.
+The TUI should expose at least:
 
-The debugging portion should converge on service-oriented commands such as:
+```text
+GroveShop
+├── Cluster
+├── Services
+├── Nodes
+├── Deployments
+├── Configuration
+├── Logs
+├── Debug
+└── Application
+```
+
+Do not force the user through separate cluster-create, config-compile, config-embed, artifact-create, upgrade, status, or debugger-discovery command trees for the headline demo.
+
+For deterministic automation and acceptance tests, the same application binary may invoke the underlying structured actions directly. The intended shape is:
 
 ```bash
-grove debug --service orders --listen 127.0.0.1:40000
-grove debug --service payment --listen 127.0.0.1:40001
+./bin/groveshop action rollout.start --config configs/acme.yaml
+./bin/groveshop action rollout.start --config configs/acme-broken.yaml
+./bin/groveshop action cluster.status
 ```
 
-These are the Task 032 CLI contract, not permission to skip validation. The exact final commands must be kept in `demo/DEBUGGING_DEMO.md` and tested as written before Task 032 is marked DONE.
+The exact action names may evolve, but there must not be a separately required `grove` executable for normal application operation.
+
+The debugging portion should be TUI-first:
+
+```text
+Services > orders > Instances > node-2 > Debug > Attach
+Services > payment > Instances > node-4 > Debug > Attach
+```
+
+For automated acceptance, use the equivalent application-binary actions:
+
+```bash
+./bin/groveshop action debug.attach orders --listen 127.0.0.1:40000
+./bin/groveshop action debug.attach payment --listen 127.0.0.1:40001
+```
+
+These are the Task 032 automation contract, not permission to skip validation. The exact final workflow and commands must be kept in `demo/DEBUGGING_DEMO.md` and tested as written before Task 032 is marked DONE.
+
+## Developer-defined application actions
+The same registry used by Grove's built-in TUI entries must allow Grove Shop to contribute application-specific operations, for example:
+
+```text
+Application
+├── Seed demo orders
+├── Generate load
+└── Run integrity check
+```
+
+These actions should execute using the application's own packages, embedded configuration, credentials, and Grove connectivity. Do not create a second admin binary for them.
 
 ## Scope discipline
 Do not implement general-purpose placement scoring, affinity/anti-affinity, or a sophisticated scheduler merely to support placement validation or the one-service-per-node debug demo. MVP only needs the hard eligibility boundary plus deterministic demo placement.
