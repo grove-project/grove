@@ -136,8 +136,10 @@ func serveDebugStream(
 	}
 	var closeOnce sync.Once
 	var upstream *nats.Subscription
+	closed := make(chan struct{})
 	closeStream := func() {
 		closeOnce.Do(func() {
+			close(closed)
 			if upstream != nil {
 				_ = upstream.Unsubscribe()
 			}
@@ -189,8 +191,11 @@ func serveDebugStream(
 		}
 	}()
 	go func() {
-		<-ctx.Done()
-		closeStream()
+		select {
+		case <-ctx.Done():
+			closeStream()
+		case <-closed:
+		}
 	}()
 	return servedDebugStream{target: target}, nil
 }
