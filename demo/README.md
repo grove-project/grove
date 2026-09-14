@@ -26,6 +26,8 @@ A customer configuration is embedded into the artifact after compilation. The ar
 9. A bad embedded configuration can make a candidate component fail.
 10. Grove detects the failed candidate and automatically restores the previous known-good deployment.
 11. The business application is healthy after rollback.
+12. Two ordinary Delve/DAP sessions can debug Orders and Payment workers on
+    different Grovlets without PID, node, or remote-port discovery.
 
 ## Minimal operator flow
 
@@ -45,13 +47,14 @@ The browser should be enough to observe the full upgrade, failure, and rollback 
 - `CONFIGURATION.md` — embedded config and intentional failure scenario.
 - `DEMO_FLOW.md` — exact end-to-end demo sequence and expected observable states.
 - `IMPLEMENTATION_GUIDE.md` — how the demo contracts map onto the numbered tasks without violating incremental scope.
+- `DEBUGGING_DEMO.md` — exact five-node, two-worker Delve walkthrough.
 
 ## Non-goals for MVP v1
-- Debugger/DAP integration.
 - Firecracker live migration.
 - Kubernetes integration.
 - Edge-specific deployment.
 - Sophisticated application behavior.
 - Production storefront features.
 
-Debugging is a natural MVP v2 extension, but must not complicate the first demo.
+The debugging proof is a topology-explicit final MVP scenario. It does not add
+DAP multiplexing, cross-service stepping, or general scheduling policy.

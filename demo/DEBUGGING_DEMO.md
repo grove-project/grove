@@ -121,6 +121,10 @@ Create two ordinary Go/DAP attach configurations:
 
 The IDE is speaking DAP to Delve through Grove. There is no Grove-specific IDE plugin requirement for MVP.
 
+Send a standard DAP `attach` request to each endpoint. Grove fills in the
+already-resolved node-local process ID, so the client configuration does not
+contain a PID.
+
 Set one breakpoint in the Orders request/order-flow path and one in the Payment charge path.
 
 ## 7. Trigger one order
@@ -157,6 +161,9 @@ For automated verification:
 ```
 
 All five Grove Shop services must be back under normal supervision and healthy.
+
+Finally, stop Terminal C with Ctrl-C. The deployment command removes its local
+discovery file and every child Grovlet.
 
 ## Acceptance rule
 The actions in this guide are not documentation-only examples. Task 032 is incomplete until the implementation agent has:

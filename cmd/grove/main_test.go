@@ -58,6 +58,7 @@ func TestParseInvocation(t *testing.T) {
 		resilience  bool
 		serviceName string
 		listen      string
+		debugDemo   bool
 	}{
 		{args: []string{"status", "--system-nats-url", "nats://control", "--node-id", "node-1"}, command: commandStatus},
 		{args: []string{"nodes", "--system-nats-url", "nats://control", "--node-id", "node-1"}, command: commandNodes},
@@ -67,6 +68,7 @@ func TestParseInvocation(t *testing.T) {
 		{args: []string{"test", "--binary", "./grove-shop"}, command: commandTest, service: defaultResilienceServiceID, binary: "./grove-shop"},
 		{args: []string{"test", "--binary", "./grove-shop", "--resilience", "--service-id", "1"}, command: commandTest, service: 1, binary: "./grove-shop", resilience: true},
 		{args: []string{"debug", "--system-nats-url", "nats://control", "--node-id", "node-1", "--service", "orders", "--listen", "127.0.0.1:40000"}, command: commandDebug, serviceName: "orders", listen: "127.0.0.1:40000"},
+		{args: []string{"deploy", "--config", "configs/acme.yaml", "--debug-demo"}, command: commandDeploy, binary: "./bin/grove-shop", debugDemo: true},
 	}
 	for _, test := range valid {
 		parsed, err := parseInvocation(test.args, io.Discard)
@@ -74,7 +76,7 @@ func TestParseInvocation(t *testing.T) {
 			t.Errorf("parseInvocation(%q): %v", test.args, err)
 			continue
 		}
-		if parsed.command != test.command || parsed.action != test.action || parsed.serviceID != test.service || parsed.binaryPath != test.binary || parsed.resilience != test.resilience || parsed.serviceName != test.serviceName || parsed.listenAddress != test.listen {
+		if parsed.command != test.command || parsed.action != test.action || parsed.serviceID != test.service || parsed.binaryPath != test.binary || parsed.resilience != test.resilience || parsed.serviceName != test.serviceName || parsed.listenAddress != test.listen || parsed.debugDemo != test.debugDemo {
 			t.Errorf("parseInvocation(%q) = %#v; want command %q, action %q, service %d, binary %q, resilience %t", test.args, parsed, test.command, test.action, test.service, test.binary, test.resilience)
 		}
 	}
@@ -84,7 +86,9 @@ func TestParseInvocation(t *testing.T) {
 		err  error
 	}{
 		{err: errCommandRequired},
-		{args: []string{"deploy"}, err: errCommandUnknown},
+		{args: []string{"unknown"}, err: errCommandUnknown},
+		{args: []string{"deploy", "--debug-demo"}, err: errConfigPathRequired},
+		{args: []string{"deploy", "--config", "configs/acme.yaml"}, err: errDebugDemoRequired},
 		{args: []string{"status", "--node-id", "node-1"}, err: errSystemNATSURLRequired},
 		{args: []string{"nodes", "--system-nats-url", "nats://control"}, err: errNodeIDRequired},
 		{args: []string{"components", "--system-nats-url", "nats://control", "--node-id", "node-1", "extra"}, err: errUnexpectedArguments},

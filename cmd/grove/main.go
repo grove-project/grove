@@ -38,6 +38,7 @@ var (
 	errResilienceRequired    = errors.New("service selection requires resilience mode")
 	errServiceNameRequired   = errors.New("service name is required")
 	errDebugListenRequired   = errors.New("local DAP listen address is required")
+	errDebugDemoRequired     = errors.New("deploy currently requires --debug-demo")
 )
 
 type commandName string
@@ -50,6 +51,7 @@ const (
 	commandConfig     commandName = "config"
 	commandTest       commandName = "test"
 	commandDebug      commandName = "debug"
+	commandDeploy     commandName = "deploy"
 )
 
 type componentAction string
@@ -81,6 +83,7 @@ type invocation struct {
 	resilience    bool
 	serviceName   string
 	listenAddress string
+	debugDemo     bool
 }
 
 type controlClient interface {
@@ -95,7 +98,7 @@ func main() {
 	defer stop()
 	ctx := signalCtx
 	cancel := func() {}
-	if len(os.Args) <= 1 || commandName(os.Args[1]) != commandDebug {
+	if len(os.Args) <= 1 || (commandName(os.Args[1]) != commandDebug && commandName(os.Args[1]) != commandDeploy) {
 		timeout := commandTimeout
 		if len(os.Args) > 1 && commandName(os.Args[1]) == commandTest {
 			timeout = testCommandTimeout
@@ -119,6 +122,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	if invocation.command == commandTest {
 		return executeTest(ctx, invocation, stdout)
+	}
+	if invocation.command == commandDeploy {
+		return executeDeploy(ctx, invocation, stdout)
 	}
 	client, err := systemnats.Connect(ctx, invocation.systemNATSURL)
 	if err != nil {
@@ -146,6 +152,8 @@ func parseInvocation(args []string, stderr io.Writer) (invocation, error) {
 		return parseTestInvocation(args[1:], stderr)
 	case commandDebug:
 		return parseDebugInvocation(args[1:], stderr)
+	case commandDeploy:
+		return parseDeployInvocation(args[1:], stderr)
 	default:
 		return invocation{}, fmt.Errorf("parse command %q: %w", args[0], errCommandUnknown)
 	}
@@ -165,6 +173,7 @@ func parseDebugInvocation(args []string, stderr io.Writer) (invocation, error) {
 	if flags.NArg() != 0 {
 		return invocation{}, fmt.Errorf("parse debug: %w: %q", errUnexpectedArguments, flags.Args())
 	}
+	applyLocalConnection(&parsed)
 	if err := validateConnection(parsed); err != nil {
 		return invocation{}, err
 	}
@@ -173,6 +182,31 @@ func parseDebugInvocation(args []string, stderr io.Writer) (invocation, error) {
 	}
 	if parsed.listenAddress == "" {
 		return invocation{}, errDebugListenRequired
+	}
+	return parsed, nil
+}
+
+func parseDeployInvocation(args []string, stderr io.Writer) (invocation, error) {
+	parsed := invocation{command: commandDeploy, binaryPath: "./bin/grove-shop"}
+	flags := flag.NewFlagSet("deploy", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.StringVar(&parsed.configPath, "config", "", "application YAML configuration path")
+	flags.StringVar(&parsed.binaryPath, "binary", parsed.binaryPath, "debug-capable Grove Shop artifact path")
+	flags.BoolVar(&parsed.debugDemo, "debug-demo", false, "run the foreground five-node debugging demo")
+	if err := flags.Parse(args); err != nil {
+		return invocation{}, fmt.Errorf("parse deploy flags: %w", err)
+	}
+	if flags.NArg() != 0 {
+		return invocation{}, fmt.Errorf("parse deploy: %w: %q", errUnexpectedArguments, flags.Args())
+	}
+	if parsed.configPath == "" {
+		return invocation{}, errConfigPathRequired
+	}
+	if parsed.binaryPath == "" {
+		return invocation{}, errBinaryPathRequired
+	}
+	if !parsed.debugDemo {
+		return invocation{}, errDebugDemoRequired
 	}
 	return parsed, nil
 }
@@ -219,6 +253,7 @@ func parseReadInvocation(command commandName, args []string, stderr io.Writer) (
 	if flags.NArg() != 0 {
 		return invocation{}, fmt.Errorf("parse %s: %w: %q", command, errUnexpectedArguments, flags.Args())
 	}
+	applyLocalConnection(&parsed)
 	if err := validateConnection(parsed); err != nil {
 		return invocation{}, err
 	}

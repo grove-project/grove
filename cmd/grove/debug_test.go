@@ -156,8 +156,12 @@ func TestGroveDebugsOrdersAndPaymentWorkers(t *testing.T) {
 	debugPorts := reserveRoutePorts(t, 2)
 	ordersAddress := "127.0.0.1:" + strconv.Itoa(debugPorts[0])
 	paymentAddress := "127.0.0.1:" + strconv.Itoa(debugPorts[1])
-	ordersCommand := startDebugCommand(t, ctx, cluster.systemNATSURL, "orders", ordersAddress)
-	paymentCommand := startDebugCommand(t, ctx, cluster.systemNATSURL, "payment", paymentAddress)
+	statePath := filepath.Join(t.TempDir(), "debug-demo.json")
+	if err := writeLocalConnectionFile(statePath, localConnection{SystemNATSURL: cluster.systemNATSURL, NodeID: "node-1", WebURL: "http://" + cluster.webAddress}); err != nil {
+		t.Fatal(err)
+	}
+	ordersCommand := startDebugCommand(t, ctx, statePath, "orders", ordersAddress)
+	paymentCommand := startDebugCommand(t, ctx, statePath, "payment", paymentAddress)
 	defer ordersCommand.stop()
 	defer paymentCommand.stop()
 	if err := ordersCommand.waitReady(ctx, "Node     node-2", "Worker   orders-1", "DAP listening locally on "+ordersAddress); err != nil {
@@ -397,18 +401,17 @@ type runningDebugCommand struct {
 	stopOnce sync.Once
 }
 
-func startDebugCommand(t *testing.T, ctx context.Context, systemNATSURL, service, listen string) *runningDebugCommand {
+func startDebugCommand(t *testing.T, ctx context.Context, statePath, service, listen string) *runningDebugCommand {
 	t.Helper()
 	running := &runningDebugCommand{done: make(chan error, 1)}
 	running.command = exec.CommandContext(
 		ctx,
 		grovePath,
 		"debug",
-		"--system-nats-url", systemNATSURL,
-		"--node-id", "node-1",
 		"--service", service,
 		"--listen", listen,
 	)
+	running.command.Env = append(os.Environ(), localStateEnvironment+"="+statePath)
 	running.command.Stdout = &running.output
 	running.command.Stderr = &running.output
 	if err := running.command.Start(); err != nil {

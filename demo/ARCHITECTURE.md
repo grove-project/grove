@@ -82,6 +82,18 @@ Orders           Shipping
 
 Placement may change as later tasks introduce recovery and upgrade behavior. The demo must never rely on same-process or same-host shortcuts for distributed behavior.
 
+## Debugging topology
+
+The final debugger proof uses one service worker per Grovlet:
+
+```text
+node-1      node-2      node-3      node-4      node-5
+Web         Orders      Inventory   Payment     Shipping
+```
+
+This deterministic layout proves two independent debugger targets on different
+nodes. It is a demo placement, not a general affinity scheduler.
+
 ## Grove control plane
 
 The demo follows the accepted Grove architecture:

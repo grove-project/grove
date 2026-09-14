@@ -1,6 +1,37 @@
 Debugging
 
-Status: Draft / evolving
+Status: Initial MVP implemented
+
+MVP Experience
+
+```bash
+grove debug --service orders --listen 127.0.0.1:40000
+grove debug --service payment --listen 127.0.0.1:40001
+```
+
+Each command resolves authoritative placement, selects the current worker,
+starts node-local Delve in DAP mode, and exposes only the requested local
+endpoint. The client sends ordinary DAP. It never supplies a remote node, PID,
+or Delve port.
+
+```text
+Service  orders (1)
+Node     node-2
+Worker   orders-1
+Artifact sha256:...
+Version  0.0.0-dev
+DAP listening locally on 127.0.0.1:40000
+```
+
+The MVP supports independent single-worker sessions. It does not multiplex
+debugger state, fan breakpoints across replicas, or step across services.
+
+Operational Behavior
+
+While attached, the selected worker reports `debugging`. Grove still monitors
+the process but treats an intentional breakpoint pause as healthy. Disconnect
+returns that exact worker generation to `healthy`; a worker exit still becomes
+`failed` and closes the session.
 
 Goal  
 Make debugging a Grove-native operational capability rather than a separate deployment-specific workflow.
