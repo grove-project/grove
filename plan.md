@@ -57,14 +57,17 @@ control store, scheduler, or same-host test shortcut.
 
 ## Sub-Tasks
 
-- [ ] 1. Define the shared application-console registry and TUI model.
+- [x] 1. Define the shared application-console registry and TUI model.
   **Context:** Introduce the smallest Go package that registers typed Grove and
   application actions, dispatches them with structured arguments/results, and
   renders application-first navigation plus authoritative status. Unit tests
   must prove duplicate/unknown action errors and that TUI selection invokes the
   exact same registered handler as automation.
-  **Acceptance:** Focused package tests and `go vet` pass; public API has full
-  Go documentation and no runtime/control-plane dependency.
+  **Outcome:** Added the dependency-free `console` package with a zero-value
+  action registry, typed errors, deterministic action ordering, a console model,
+  and TUI rendering/selection over the same handler. External-package tests and
+  a runnable example pass with `go test -count=1 ./console` and `go vet
+  ./console`.
 
 - [ ] 2. Make the Grove Shop artifact own console and node modes.
   **Context:** Extend the current Grovlet/Grove Shop entry point so the built
@@ -111,3 +114,5 @@ control store, scheduler, or same-host test shortcut.
 - 2026-09-14: Rebased cleanly onto the new console-oriented `origin/main`, with
   upstream documentation taking precedence where the former separate-CLI
   debugging walkthrough conflicted.
+- 2026-09-14: The shared `console` package now defines one public action and TUI
+  contract without importing Grove runtime or control-plane implementation.
