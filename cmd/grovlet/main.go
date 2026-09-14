@@ -95,10 +95,24 @@ func (e runtimeDirError) Unwrap() error {
 }
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	args := os.Args[1:]
+	if len(args) == 0 {
+		if err := runApplicationConsole(ctx, nil, os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "groveshop: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if args[0] == "action" {
+		if err := runApplicationAction(ctx, args[1:], os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "groveshop: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(args) != 0 && args[0] == "bootstrap-hello" {
 		if err := runBootstrapHello(args[1:], os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "grovlet: %v\n", err)

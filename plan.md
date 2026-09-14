@@ -69,14 +69,17 @@ control store, scheduler, or same-host test shortcut.
   a runnable example pass with `go test -count=1 ./console` and `go vet
   ./console`.
 
-- [ ] 2. Make the Grove Shop artifact own console and node modes.
+- [x] 2. Make the Grove Shop artifact own console and node modes.
   **Context:** Extend the current Grovlet/Grove Shop entry point so the built
   artifact runs headlessly with node flags, opens the TUI without arguments,
   and dispatches `action ...`. Add foreground ownership, local action transport,
   connection discovery, signal cleanup, and one registered Grove Shop action.
-  **Acceptance:** Real subprocess tests use one built binary for console,
-  action, and Grovlet roles; all children and local discovery state disappear
-  on exit.
+  **Outcome:** The `cmd/grovlet` artifact now opens the Grove Shop console with
+  no arguments, invokes `action ...` through a local Unix action server, and
+  retains its existing headless node/worker modes. Grove Shop registers an
+  application-owned order integrity action. Real subprocess tests exercised
+  console, structured-action, and node roles from the same built binary and
+  verified discovery cleanup; `go test -count=1 ./cmd/grovlet` passed.
 
 - [ ] 3. Drive good and broken rollouts through application actions.
   **Context:** Implement `rollout.start` and `cluster.status` over the existing
@@ -116,3 +119,6 @@ control store, scheduler, or same-host test shortcut.
   debugging walkthrough conflicted.
 - 2026-09-14: The shared `console` package now defines one public action and TUI
   contract without importing Grove runtime or control-plane implementation.
+- 2026-09-14: The Grove Shop artifact now owns the foreground TUI/action server
+  and the unchanged headless Grovlet runtime modes. Local state contains only
+  the Unix control endpoint and is removed when the console exits.
