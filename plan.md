@@ -67,14 +67,14 @@ selection, attach identity, transport, lifecycle state, and diagnostics.
 
 ## Sub-Tasks
 
-- [ ] 1. Make the five-worker topology real.
+- [x] 1. Make the five-worker topology real.
   **Context:** Register Payment and Shipping workers, route all Orders
   dependencies through the existing Grove call path in the dedicated topology,
   expose worker/artifact identity, and cover the behavior with focused tests.
   **Acceptance:** Five explicit placements start five distinct healthy worker
   PIDs on node-1 through node-5, and an order crosses all four service calls.
 
-- [ ] 2. Carry one selected Delve DAP stream through Grove.
+- [x] 2. Carry one selected Delve DAP stream through Grove.
   **Context:** Add the ephemeral System NATS session protocol, node-local Delve
   startup/cleanup, component `debugging` state, local CLI listener, attach PID
   injection, worker-exit handling, and diagnostics for missing/ambiguous/down
@@ -82,7 +82,7 @@ selection, attach identity, transport, lifecycle state, and diagnostics.
   **Acceptance:** Focused protocol, lifecycle, and CLI tests prove independent
   streams, deterministic state transitions, cleanup, and error contracts.
 
-- [ ] 3. Prove two concurrent workers with real DAP.
+- [x] 3. Prove two concurrent workers with real DAP.
   **Context:** Use `grovetest` to launch five real Grovlet processes and a small
   Go DAP test client to initialize, attach, set breakpoints, inspect variables,
   continue, and disconnect from Orders and Payment during one HTTP order.
@@ -90,14 +90,14 @@ selection, attach identity, transport, lifecycle state, and diagnostics.
   nodes/PIDs, non-target workers remain healthy, the order completes after both
   continues, sessions disappear, and all five components return healthy.
 
-- [ ] 4. Ship and execute the human debug demo.
+- [x] 4. Ship and execute the human debug demo.
   **Context:** Add the narrow foreground debug-demo deploy command, canonical
   Acme config, local command discovery, and update the guide to exact output and
   cleanup behavior.
   **Acceptance:** Every documented shell command is run from a clean checkout;
   two ordinary DAP clients hit Orders and Payment and final status is healthy.
 
-- [ ] 5. Verify and close Task 032.
+- [x] 5. Verify and close Task 032.
   **Context:** Run formatting, diff checks, focused repetitions, vet, uncached
   full tests, and the race suite. Mark the task DONE only after the automated
   and human contracts both pass, then rebase and push directly to `main`.
@@ -112,3 +112,18 @@ selection, attach identity, transport, lifecycle state, and diagnostics.
 - 2026-09-13: Preserved Task 031's completed plan in git history. Task 032 will
   not introduce durable debug state, a general scheduler, SSH, remote Delve
   ports, a DAP multiplexer, or cross-service stepping.
+- 2026-09-14: Added the topology-explicit five-worker deployment. Orders now
+  reaches Inventory, Payment, and Shipping through Grove calls in the debug
+  topology, while the existing SDK-facing constructor remains unchanged.
+- 2026-09-14: Added ephemeral System NATS debug streams, node-local Delve DAP
+  sessions over Unix sockets, explicit component debugging state, service-name
+  resolution, and local DAP endpoints. The automated E2E attached two ordinary
+  DAP clients to Orders and Payment, hit and inspected both breakpoints during
+  one order, continued it to completion, and verified all five workers healthy.
+- 2026-09-14: Ran every shell command in `demo/DEBUGGING_DEMO.md` against the
+  foreground five-node deployment. Orders resolved to node-2 and Payment to
+  node-4; both manual DAP sessions inspected `order.ID`/`req.OrderID`, the order
+  completed, the sessions disconnected, and cleanup left no child processes.
+- 2026-09-14: Passed `go vet ./...`, `go test -count=1 ./...`, and
+  `go test -race -count=1 ./...`, including all prior distributed lifecycle
+  E2Es. `git diff --check origin/main...HEAD` also passed.
