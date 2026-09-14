@@ -1,38 +1,56 @@
 # Grove Shop MVP Demo Flow
 
 ## Goal
-Prove Grove's core lifecycle in one short, repeatable scenario that requires minimal operator commands and can be automated as the final MVP E2E.
+Prove Grove's core lifecycle in one short, repeatable scenario using the Grove Shop application binary as the operator surface.
 
 ## Preconditions
-- Grove CLI available.
 - Grove Shop source available.
 - Good customer config at `configs/acme.yaml`.
 - Broken customer config at `configs/acme-broken.yaml`.
 - Local multi-Grovlet cluster behavior provided by the normal Grove developer workflow.
+- No separately installed `grove` CLI is required.
 
 ## Demo sequence
 
-### 1. Deploy the known-good artifact
+### 1. Start the Grove Shop application console
 
 ```bash
-grove deploy --config configs/acme.yaml
+./bin/groveshop
 ```
 
 Expected:
-- Grove builds/packages the application as needed.
-- The config is embedded into the artifact.
-- A local multi-Grovlet cluster is started or reused.
-- Grove Shop components become healthy.
-- Grove prints the Web UI URL.
+- the same binary contains Grove Shop, the Grove runtime integration, and the Grove operational console;
+- an interactive terminal opens the Grove TUI;
+- the local multi-Grovlet cluster is started or reused as required by the developer workflow.
 
-### 2. Open Grove Shop
+### 2. Deploy the known-good artifact
+
+From the TUI:
+
+```text
+Deployments > New rollout > configs/acme.yaml
+```
+
+Expected:
+- Grove builds/packages the application as needed;
+- the config is embedded into the candidate artifact;
+- Grove Shop components become healthy;
+- the console exposes the Web UI URL.
+
+For deterministic automation, the equivalent structured action is invoked from the same binary:
+
+```bash
+./bin/groveshop action rollout.start --config configs/acme.yaml
+```
+
+### 3. Open Grove Shop
 The browser shows one page with two areas:
 - Orders UI.
 - Grove Cluster Status.
 
-The Cluster Status pane is already polling Grove continuously.
+The Cluster Status pane is already polling Grove continuously. The TUI may remain open at the same time and should show the same authoritative cluster state.
 
-### 3. Exercise the application
+### 4. Exercise the application
 Create an order.
 
 Expected business progression:
@@ -41,19 +59,25 @@ Expected business progression:
 Created -> Reserved -> Paid -> Shipping -> Completed
 ```
 
-The Cluster Status pane simultaneously shows healthy nodes, component placement, active artifact identity, and active config identity.
+The Cluster Status pane and terminal console simultaneously show healthy nodes, component placement, active artifact identity, and active config identity.
 
-### 4. Deploy the broken customer configuration
-Keep the browser open and run:
+### 5. Deploy the broken customer configuration
+Keep the browser open and use the TUI:
+
+```text
+Deployments > New rollout > configs/acme-broken.yaml
+```
+
+For automation:
 
 ```bash
-grove deploy --config configs/acme-broken.yaml
+./bin/groveshop action rollout.start --config configs/acme-broken.yaml
 ```
 
 No browser action should be required.
 
-### 5. Watch the candidate rollout
-The status pane should visibly move through the important states, conceptually:
+### 6. Watch the candidate rollout
+The status pane and TUI should visibly move through the important states, conceptually:
 
 ```text
 Artifact A ACTIVE
@@ -80,26 +104,38 @@ Artifact A ACTIVE
 CLUSTER HEALTHY
 ```
 
-The exact internal state names may differ, but these transitions must be observable through a structured Grove status read model.
+The exact internal state names may differ, but these transitions must be observable through a structured Grove status read model shared by the Web UI, TUI, and structured actions.
 
-### 6. Verify recovery
+### 7. Verify recovery
 Create another order after rollback.
 
 Expected:
-- order completes successfully,
-- previous known-good artifact remains active,
-- previous embedded config remains active,
+- order completes successfully;
+- previous known-good artifact remains active;
+- previous embedded config remains active;
 - no manual config repair or component restart is required.
 
 ## Headline demo contract
-The demo should require only these meaningful operator commands:
+The headline human interaction is one executable plus TUI navigation:
 
 ```bash
-grove deploy --config configs/acme.yaml
-grove deploy --config configs/acme-broken.yaml
+./bin/groveshop
 ```
 
-`grove status` may exist as an optional terminal inspection command but is not required to understand the demo because the browser continuously visualizes cluster state.
+```text
+Deployments > New rollout > configs/acme.yaml
+Deployments > New rollout > configs/acme-broken.yaml
+```
+
+Human-facing docs should not replace these contextual TUI flows with generic flag trees.
+
+Automation uses the same application binary and underlying action registry:
+
+```bash
+./bin/groveshop action rollout.start --config configs/acme.yaml
+./bin/groveshop action rollout.start --config configs/acme-broken.yaml
+./bin/groveshop action cluster.status
+```
 
 ## Final E2E mapping
 The final MVP automated test should reproduce the same lifecycle programmatically:
