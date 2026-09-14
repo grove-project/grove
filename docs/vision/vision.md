@@ -18,18 +18,31 @@ On a laptop:
 ```bash
 $ go build -o shop .
 $ ./shop
-
-Grove cluster ready
-  nodes      1
-  services   api, orders, inventory
 ```
 
-In production, the application grows into a cluster without becoming a different product:
+```text
+┌ Shop ────────────────────────────────────────────────┐
+│ Cluster: healthy     Nodes: 1      Version: local   │
+├──────────────────────────────────────────────────────┤
+│ > Services                                           │
+│   Nodes                                              │
+│   Deployments                                        │
+│   Configuration                                      │
+│   Logs                                               │
+│   Debug                                              │
+└──────────────────────────────────────────────────────┘
+```
+
+In production, the application grows into a cluster without becoming a different product. The same binary remains the operational entry point:
 
 ```bash
-$ grove status
+$ ./shop
+```
 
-Cluster     healthy
+```text
+Cluster
+
+Health      healthy
 Version     v0.8.2
 Nodes       3 / 3 healthy
 Services    3 / 3 healthy
@@ -53,7 +66,14 @@ Field and solution engineers inherit both concerns, especially in customer and e
 ## Principles
 
 ### The application is the release unit
-Application code, Grove runtime behavior, and embedded configuration move together as one versioned artifact. Execution may span processes and machines; release identity remains coherent.
+Application code, Grove runtime behavior, embedded configuration, and the operational console move together as one versioned artifact. Execution may span processes and machines; release identity remains coherent.
+
+### The application binary is its operational tool
+Grove should not require a separately installed operational CLI for normal use. The application binary contains the runtime, built-in operational actions, debugging entry points, configuration tooling, and developer-defined administrative actions.
+
+The primary human interface is a live, contextual TUI. Structured actions exist underneath it for CI, scripts, tests, and other automation.
+
+This avoids a second versioning problem where operators must pair an external CLI release with the application/runtime release they are trying to manage.
 
 ### Configuration is artifact identity
 Grove configuration is immutable at runtime. Cluster, customer, environment, site, and node-class configuration is embedded into the binary artifact. If configuration changes, Grove creates a new artifact and rolls it out; it does not mutate the running binary.
@@ -79,8 +99,8 @@ binary handoff
 successor cluster generation
 ```
 
-### The CLI observes and controls; it does not rewrite runtime configuration
-The Grove CLI should make configuration, artifact identity, rollout phase, health, handoff, and failure reasons easy to investigate. It may initiate a rollout or rollback, but changing configuration means supplying another immutable artifact—not editing the configuration of a running node.
+### The console observes and controls; it does not rewrite runtime configuration
+The built-in Grove console should make configuration, artifact identity, rollout phase, health, handoff, and failure reasons easy to investigate. It may initiate a rollout or rollback, but changing configuration means supplying another immutable artifact—not editing the configuration of a running node.
 
 ### Distribution is explicit
 Grove should not make remote calls look accidentally local. Developers should be able to see distributed boundaries in their code without generated RPC clients or framework-owned service interfaces.
@@ -111,20 +131,30 @@ Grove should not become a smaller-looking general-purpose platform with the same
 ```text
 write Go
    ↓
-grove run
+build application binary
    ↓
-grove test --resilience
+./app → Test / Resilience
    ↓
-grove deploy / rollout
+./app → Deployments → Start rollout
    ↓
-grove status / rollout status / inspect
+./app → Cluster / Services / Deployments
    ↓
-grove debug
+./app → Services → target → Debug
    ↓
-grove rollback
+./app → Deployments → Roll back
 ```
 
-The exact CLI is evolving, but the desired property is stable: **the tools developers use to understand Grove should agree with the tools operators use to understand Grove.**
+For automation, those same operations are available as structured actions from the same artifact:
+
+```bash
+./app action test.resilience
+./app action rollout.start ./app-next
+./app action cluster.status
+./app action debug.attach orders
+./app action rollout.rollback
+```
+
+The exact action names are evolving, but the desired property is stable: **the tools developers use to understand Grove should agree with the tools operators use to understand Grove, and both travel with the application itself.**
 
 ## Why not just Kubernetes?
 Kubernetes is a general-purpose orchestrator for independently packaged workloads. Grove intentionally starts with a narrower assumption: these services belong to one application and can share a release, runtime model, tooling, and operational context.
@@ -138,7 +168,7 @@ Grove is not a universal workload orchestrator. It is not designed around indepe
 
 Instead, Grove takes responsibility for a coherent subset of those concerns so each application team does not have to assemble and operate them independently.
 
-Grove is also under active development. Vision examples describe the intended experience; they are not a claim that every command or capability shown here is implemented today.
+Grove is also under active development. Vision examples describe the intended experience; they are not a claim that every action or capability shown here is implemented today.
 
 ## Success looks like this
 A meaningful Grove application can run completely on a laptop, exercise realistic failure behavior in tests, deploy as one versioned application to multiple nodes, roll configuration/software changes through its own mesh, perform safe side-by-side binary handoff, recover from common failures, and tell an operator exactly what happened.
