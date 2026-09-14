@@ -17,11 +17,13 @@ var (
 )
 
 type componentSpec struct {
-	serviceID  grove.ServiceID
-	name       string
-	kind       string
-	subject    string
-	workerArgs []string
+	serviceID      grove.ServiceID
+	name           string
+	kind           string
+	subject        string
+	artifactDigest string
+	codeVersion    string
+	workerArgs     []string
 }
 
 type componentProcess interface {
@@ -29,6 +31,18 @@ type componentProcess interface {
 	Kill(context.Context) error
 	Done() <-chan struct{}
 	Err() error
+	PID() int
+}
+
+type componentDebugTarget struct {
+	serviceID      grove.ServiceID
+	serviceName    string
+	workerID       string
+	artifactDigest string
+	codeVersion    string
+	processID      int
+	generation     uint64
+	process        componentProcess
 }
 
 type componentStarter func(context.Context, componentSpec) (componentProcess, error)
@@ -72,7 +86,7 @@ func (m *componentManager) stopAll(ctx context.Context) error {
 		component.mu.Lock()
 		state := component.state
 		component.mu.Unlock()
-		if state != systemnats.ComponentHealthy {
+		if state != systemnats.ComponentHealthy && state != systemnats.ComponentDebugging {
 			continue
 		}
 		if err := m.StopComponent(ctx, serviceID); err != nil {
@@ -101,6 +115,9 @@ func (m *componentManager) SnapshotComponents() systemnats.ComponentView {
 			Name:              component.spec.name,
 			InvocationSubject: component.spec.subject,
 			Generation:        component.generation,
+			WorkerID:          componentWorkerID(component.spec, component.generation),
+			ArtifactDigest:    component.spec.artifactDigest,
+			CodeVersion:       component.spec.codeVersion,
 			State:             component.state,
 			Error:             component.err,
 		})
@@ -145,7 +162,7 @@ func (m *componentManager) watch(component *managedComponent, generation uint64,
 	<-process.Done()
 	component.mu.Lock()
 	defer component.mu.Unlock()
-	if component.generation != generation || component.state != systemnats.ComponentHealthy {
+	if component.generation != generation || (component.state != systemnats.ComponentHealthy && component.state != systemnats.ComponentDebugging) {
 		return
 	}
 	component.state = systemnats.ComponentFailed
@@ -163,7 +180,7 @@ func (m *componentManager) StopComponent(ctx context.Context, serviceID grove.Se
 		return errComponentNotHosted
 	}
 	component.mu.Lock()
-	if component.state != systemnats.ComponentHealthy {
+	if component.state != systemnats.ComponentHealthy && component.state != systemnats.ComponentDebugging {
 		component.mu.Unlock()
 		return errComponentTransition
 	}
@@ -192,7 +209,7 @@ func (m *componentManager) KillComponent(ctx context.Context, serviceID grove.Se
 		return errComponentNotHosted
 	}
 	component.mu.Lock()
-	if component.state != systemnats.ComponentHealthy {
+	if component.state != systemnats.ComponentHealthy && component.state != systemnats.ComponentDebugging {
 		component.mu.Unlock()
 		return errComponentTransition
 	}
@@ -210,4 +227,53 @@ func (m *componentManager) KillComponent(ctx context.Context, serviceID grove.Se
 		component.err = err.Error()
 	}
 	return err
+}
+
+func (m *componentManager) beginDebug(serviceID grove.ServiceID) (componentDebugTarget, error) {
+	component, ok := m.components[serviceID]
+	if !ok {
+		return componentDebugTarget{}, errComponentNotHosted
+	}
+	component.mu.Lock()
+	defer component.mu.Unlock()
+	if component.state != systemnats.ComponentHealthy || component.process == nil {
+		return componentDebugTarget{}, errComponentTransition
+	}
+	component.state = systemnats.ComponentDebugging
+	return componentDebugTarget{
+		serviceID:      component.spec.serviceID,
+		serviceName:    component.spec.name,
+		workerID:       componentWorkerID(component.spec, component.generation),
+		artifactDigest: component.spec.artifactDigest,
+		codeVersion:    component.spec.codeVersion,
+		processID:      component.process.PID(),
+		generation:     component.generation,
+		process:        component.process,
+	}, nil
+}
+
+func (m *componentManager) endDebug(serviceID grove.ServiceID, generation uint64) {
+	component, ok := m.components[serviceID]
+	if !ok {
+		return
+	}
+	component.mu.Lock()
+	defer component.mu.Unlock()
+	if component.generation != generation || component.state != systemnats.ComponentDebugging || component.process == nil {
+		return
+	}
+	select {
+	case <-component.process.Done():
+		return
+	default:
+		component.state = systemnats.ComponentHealthy
+		component.err = ""
+	}
+}
+
+func componentWorkerID(spec componentSpec, generation uint64) string {
+	if generation == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s-%d", spec.kind, generation)
 }

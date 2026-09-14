@@ -25,8 +25,10 @@ import (
 )
 
 var (
-	grovePath   string
-	grovletPath string
+	grovePath        string
+	grovletPath      string
+	debugGrovletPath string
+	delvePath        string
 )
 
 func Example() {
@@ -48,12 +50,14 @@ func Example() {
 
 func TestParseInvocation(t *testing.T) {
 	valid := []struct {
-		args       []string
-		command    commandName
-		action     componentAction
-		service    grove.ServiceID
-		binary     string
-		resilience bool
+		args        []string
+		command     commandName
+		action      componentAction
+		service     grove.ServiceID
+		binary      string
+		resilience  bool
+		serviceName string
+		listen      string
 	}{
 		{args: []string{"status", "--system-nats-url", "nats://control", "--node-id", "node-1"}, command: commandStatus},
 		{args: []string{"nodes", "--system-nats-url", "nats://control", "--node-id", "node-1"}, command: commandNodes},
@@ -62,6 +66,7 @@ func TestParseInvocation(t *testing.T) {
 		{args: []string{"component", "stop", "--system-nats-url", "nats://control", "--node-id", "node-2", "--service-id", "2"}, command: commandComponent, action: componentStop, service: 2},
 		{args: []string{"test", "--binary", "./grove-shop"}, command: commandTest, service: defaultResilienceServiceID, binary: "./grove-shop"},
 		{args: []string{"test", "--binary", "./grove-shop", "--resilience", "--service-id", "1"}, command: commandTest, service: 1, binary: "./grove-shop", resilience: true},
+		{args: []string{"debug", "--system-nats-url", "nats://control", "--node-id", "node-1", "--service", "orders", "--listen", "127.0.0.1:40000"}, command: commandDebug, serviceName: "orders", listen: "127.0.0.1:40000"},
 	}
 	for _, test := range valid {
 		parsed, err := parseInvocation(test.args, io.Discard)
@@ -69,7 +74,7 @@ func TestParseInvocation(t *testing.T) {
 			t.Errorf("parseInvocation(%q): %v", test.args, err)
 			continue
 		}
-		if parsed.command != test.command || parsed.action != test.action || parsed.serviceID != test.service || parsed.binaryPath != test.binary || parsed.resilience != test.resilience {
+		if parsed.command != test.command || parsed.action != test.action || parsed.serviceID != test.service || parsed.binaryPath != test.binary || parsed.resilience != test.resilience || parsed.serviceName != test.serviceName || parsed.listenAddress != test.listen {
 			t.Errorf("parseInvocation(%q) = %#v; want command %q, action %q, service %d, binary %q, resilience %t", test.args, parsed, test.command, test.action, test.service, test.binary, test.resilience)
 		}
 	}
@@ -91,6 +96,9 @@ func TestParseInvocation(t *testing.T) {
 		{args: []string{"test", "--binary", "./grove-shop", "extra"}, err: errUnexpectedArguments},
 		{args: []string{"test", "--binary", "./grove-shop", "--service-id", "2"}, err: errResilienceRequired},
 		{args: []string{"test", "--binary", "./grove-shop", "--resilience", "--service-id", "0"}, err: errServiceIDRequired},
+		{args: []string{"debug", "--node-id", "node-1", "--service", "orders", "--listen", "127.0.0.1:40000"}, err: errSystemNATSURLRequired},
+		{args: []string{"debug", "--system-nats-url", "nats://control", "--node-id", "node-1", "--listen", "127.0.0.1:40000"}, err: errServiceNameRequired},
+		{args: []string{"debug", "--system-nats-url", "nats://control", "--node-id", "node-1", "--service", "orders"}, err: errDebugListenRequired},
 	}
 	for _, test := range invalid {
 		_, err := parseInvocation(test.args, io.Discard)
@@ -463,17 +471,22 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	grovlet, grovletErr := grovetest.BuildGrovlet(ctx, buildDir)
+	debugGrovlet, debugGrovletErr := grovetest.BuildDebugGrovlet(ctx, buildDir)
 	grove, groveErr := buildGrove(ctx, buildDir)
+	delveCommand := exec.CommandContext(ctx, "go", "tool", "-n", "dlv")
+	delveOutput, delveErr := delveCommand.Output()
 	cancel()
-	if err := errors.Join(grovletErr, groveErr); err != nil {
+	if err := errors.Join(grovletErr, debugGrovletErr, groveErr, delveErr); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		_ = os.RemoveAll(buildDir)
 		os.Exit(1)
 	}
 	grovletPath = grovlet
+	debugGrovletPath = debugGrovlet
 	grovePath = grove
+	delvePath = strings.TrimSpace(string(delveOutput))
 
 	code := m.Run()
 	if err := os.RemoveAll(buildDir); err != nil && code == 0 {

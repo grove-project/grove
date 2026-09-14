@@ -70,7 +70,7 @@ func (r *serviceRecovery) reconcile(ctx context.Context) error {
 		if !ok || component.State != systemnats.ComponentHealthy {
 			return errRecoveryComponentUnavailable
 		}
-	case systemnats.ComponentHealthy:
+	case systemnats.ComponentHealthy, systemnats.ComponentDebugging:
 	case systemnats.ComponentStarting, systemnats.ComponentStopping:
 		return nil
 	default:

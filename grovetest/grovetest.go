@@ -64,6 +64,16 @@ func (e *ProcessError) Unwrap() error {
 // outputDir and should call BuildGrovlet once and reuse the result within a
 // test-package invocation.
 func BuildGrovlet(ctx context.Context, outputDir string) (string, error) {
+	return buildGrovlet(ctx, outputDir, false)
+}
+
+// BuildDebugGrovlet builds the Grovlet command with compiler optimizations and
+// inlining disabled so source breakpoints bind reliably.
+func BuildDebugGrovlet(ctx context.Context, outputDir string) (string, error) {
+	return buildGrovlet(ctx, outputDir, true)
+}
+
+func buildGrovlet(ctx context.Context, outputDir string, debug bool) (string, error) {
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return "", &ProcessError{Operation: "create build directory", Err: err}
 	}
@@ -72,8 +82,15 @@ func BuildGrovlet(ctx context.Context, outputDir string) (string, error) {
 	if err != nil {
 		return "", &ProcessError{Operation: "locate Grove module", Err: err}
 	}
-	binaryPath := filepath.Join(outputDir, "grovlet")
-	cmd := exec.CommandContext(ctx, "go", "build", "-o", binaryPath, "./cmd/grovlet")
+	binaryName := "grovlet"
+	arguments := []string{"build"}
+	if debug {
+		binaryName = "grovlet-debug"
+		arguments = append(arguments, "-gcflags=all=-N -l")
+	}
+	binaryPath := filepath.Join(outputDir, binaryName)
+	arguments = append(arguments, "-o", binaryPath, "./cmd/grovlet")
+	cmd := exec.CommandContext(ctx, "go", arguments...)
 	cmd.Dir = moduleDir
 	var output bytes.Buffer
 	cmd.Stdout = &output

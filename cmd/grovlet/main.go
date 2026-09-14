@@ -62,6 +62,8 @@ type config struct {
 	groveShopConfiguration     groveshop.Configuration
 	groveShopConfigDigest      string
 	groveShopArtifactDigest    string
+	groveShopCodeVersion       string
+	delvePath                  string
 	nodeID                     string
 	advertisedEndpoint         string
 }
@@ -134,6 +136,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	cfg.groveShopConfiguration = configuration
 	cfg.groveShopConfigDigest = inspection.Config.Digest
 	cfg.groveShopArtifactDigest = inspection.ArtifactDigest
+	cfg.groveShopCodeVersion = inspection.Manifest.CodeVersion
 	if err := prepareRuntimeDir(cfg.runtimeDir); err != nil {
 		return err
 	}
@@ -191,6 +194,7 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.StringVar(&cfg.groveShopInventorySubject, "grove-shop-orders-inventory-subject", "", "explicit Inventory endpoint for Grove Shop Orders")
 	flags.BoolVar(&cfg.groveShopWeb, "grove-shop-web", false, "place Grove Shop Web on this Grovlet")
 	flags.StringVar(&cfg.groveShopWebListen, "grove-shop-web-listen", "", "HTTP listen address for Grove Shop Web")
+	flags.StringVar(&cfg.delvePath, "delve-path", "", "path to the Delve executable used for worker debugging")
 	flags.StringVar(&cfg.nodeID, "node-id", "", "stable process-lifetime Grove node ID")
 	flags.StringVar(&cfg.advertisedEndpoint, "advertise-endpoint", "", "advertised Grove transport endpoint URL")
 	if err := flags.Parse(args); err != nil {
@@ -431,6 +435,10 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 			runtime.stop()
 			return nil, err
 		}
+		if err := transport.ServeDebug(ctx, cfg.nodeID, newDebugController(cfg.nodeID, cfg.runtimeDir, cfg.delvePath, runtime.components)); err != nil {
+			runtime.stop()
+			return nil, err
+		}
 		if err := runtime.components.start(ctx, initialServiceIDs); err != nil {
 			runtime.stop()
 			return nil, err
@@ -599,6 +607,10 @@ func groveShopComponentSpecs(cfg config) []componentSpec {
 			workerArgs: []string{"--web-listen", cfg.groveShopWebListen},
 		})
 	}
+	for i := range components {
+		components[i].artifactDigest = cfg.groveShopArtifactDigest
+		components[i].codeVersion = cfg.groveShopCodeVersion
+	}
 	return components
 }
 
@@ -625,6 +637,10 @@ func groveShopRecoveryComponentSpecs(cfg config) []componentSpec {
 			subject:    componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceWeb),
 			workerArgs: []string{"--web-listen", cfg.groveShopWebListen},
 		})
+	}
+	for i := range components {
+		components[i].artifactDigest = cfg.groveShopArtifactDigest
+		components[i].codeVersion = cfg.groveShopCodeVersion
 	}
 	return components
 }

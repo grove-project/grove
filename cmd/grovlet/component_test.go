@@ -137,6 +137,8 @@ func (p *fakeComponentProcess) Err() error {
 	return p.err
 }
 
+func (p *fakeComponentProcess) PID() int { return 42 }
+
 func (p *fakeComponentProcess) exit(err error) {
 	p.mu.Lock()
 	p.err = err
@@ -159,4 +161,43 @@ func TestComponentManagerRejectsInvalidTransitions(t *testing.T) {
 		t.Fatal("failed starter returned nil error")
 	}
 	assertComponentState(t, manager, systemnats.ComponentFailed)
+}
+
+func TestComponentManagerTracksExactDebuggedWorkerGeneration(t *testing.T) {
+	process := newFakeComponentProcess()
+	manager := newComponentManager([]componentSpec{{
+		serviceID: 3, name: "Payment", kind: workerPayment,
+		artifactDigest: "sha256:artifact", codeVersion: "v32",
+	}}, func(context.Context, componentSpec) (componentProcess, error) {
+		return process, nil
+	})
+	if err := manager.StartComponent(t.Context(), 3); err != nil {
+		t.Fatal(err)
+	}
+	target, err := manager.beginDebug(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.workerID != "payment-1" || target.processID != 42 || target.artifactDigest != "sha256:artifact" || target.codeVersion != "v32" {
+		t.Errorf("debug target = %#v", target)
+	}
+	assertComponentState(t, manager, systemnats.ComponentDebugging)
+	if _, err := manager.beginDebug(3); !errors.Is(err, errComponentTransition) {
+		t.Errorf("second debug session error = %v; want %v", err, errComponentTransition)
+	}
+	manager.endDebug(3, target.generation+1)
+	assertComponentState(t, manager, systemnats.ComponentDebugging)
+	manager.endDebug(3, target.generation)
+	assertComponentState(t, manager, systemnats.ComponentHealthy)
+
+	target, err = manager.beginDebug(3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	process.exit(errors.New("worker exited while debugging"))
+	failed := waitComponentState(t, manager, systemnats.ComponentFailed)
+	manager.endDebug(3, target.generation)
+	if failed.Error != "worker exited while debugging" {
+		t.Errorf("debugged worker failure = %#v", failed)
+	}
 }

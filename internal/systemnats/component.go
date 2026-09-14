@@ -31,6 +31,9 @@ const (
 	ComponentStarting ComponentState = "starting"
 	// ComponentHealthy means the worker is ready to receive calls.
 	ComponentHealthy ComponentState = "healthy"
+	// ComponentDebugging means an authorized debugger owns the live worker while
+	// ordinary failure supervision remains active.
+	ComponentDebugging ComponentState = "debugging"
 	// ComponentStopping means the worker is shutting down.
 	ComponentStopping ComponentState = "stopping"
 	// ComponentStopped means the worker is not running after an explicit stop.
@@ -49,6 +52,12 @@ type ComponentStatus struct {
 	InvocationSubject string `json:"invocation_subject"`
 	// Generation increments whenever this Grovlet starts a new worker.
 	Generation uint64 `json:"generation"`
+	// WorkerID is the stable identity of this worker generation.
+	WorkerID string `json:"worker_id,omitempty"`
+	// ArtifactDigest identifies the immutable artifact executing this worker.
+	ArtifactDigest string `json:"artifact_digest,omitempty"`
+	// CodeVersion identifies the application build executing this worker.
+	CodeVersion string `json:"code_version,omitempty"`
 	// State is the component's current locally observed lifecycle state.
 	State ComponentState `json:"state"`
 	// Error describes the latest startup or unexpected-exit failure.

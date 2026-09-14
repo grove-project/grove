@@ -171,6 +171,10 @@ func (p *workerProcess) Err() error {
 	return p.err
 }
 
+func (p *workerProcess) PID() int {
+	return p.cmd.Process.Pid
+}
+
 func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	cfg, err := parseWorkerConfig(args, stderr)
 	if err != nil {

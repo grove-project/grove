@@ -36,6 +36,8 @@ var (
 	errOutputPathRequired    = errors.New("output path is required")
 	errTestApplication       = errors.New("test artifact must contain Grove Shop")
 	errResilienceRequired    = errors.New("service selection requires resilience mode")
+	errServiceNameRequired   = errors.New("service name is required")
+	errDebugListenRequired   = errors.New("local DAP listen address is required")
 )
 
 type commandName string
@@ -47,6 +49,7 @@ const (
 	commandComponent  commandName = "component"
 	commandConfig     commandName = "config"
 	commandTest       commandName = "test"
+	commandDebug      commandName = "debug"
 )
 
 type componentAction string
@@ -76,6 +79,8 @@ type invocation struct {
 	configPath    string
 	outputPath    string
 	resilience    bool
+	serviceName   string
+	listenAddress string
 }
 
 type controlClient interface {
@@ -88,11 +93,15 @@ type controlClient interface {
 func main() {
 	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	timeout := commandTimeout
-	if len(os.Args) > 1 && commandName(os.Args[1]) == commandTest {
-		timeout = testCommandTimeout
+	ctx := signalCtx
+	cancel := func() {}
+	if len(os.Args) <= 1 || commandName(os.Args[1]) != commandDebug {
+		timeout := commandTimeout
+		if len(os.Args) > 1 && commandName(os.Args[1]) == commandTest {
+			timeout = testCommandTimeout
+		}
+		ctx, cancel = context.WithTimeout(signalCtx, timeout)
 	}
-	ctx, cancel := context.WithTimeout(signalCtx, timeout)
 	defer cancel()
 	if err := run(ctx, os.Args[1:], os.Stdout, os.Stderr); err != nil {
 		fmt.Fprintf(os.Stderr, "grove: %v\n", err)
@@ -116,6 +125,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	defer client.Close()
+	if invocation.command == commandDebug {
+		return executeDebug(ctx, invocation, client, stdout)
+	}
 	return execute(ctx, invocation, client, stdout)
 }
 
@@ -132,9 +144,37 @@ func parseInvocation(args []string, stderr io.Writer) (invocation, error) {
 		return parseConfigInvocation(args[1:], stderr)
 	case commandTest:
 		return parseTestInvocation(args[1:], stderr)
+	case commandDebug:
+		return parseDebugInvocation(args[1:], stderr)
 	default:
 		return invocation{}, fmt.Errorf("parse command %q: %w", args[0], errCommandUnknown)
 	}
+}
+
+func parseDebugInvocation(args []string, stderr io.Writer) (invocation, error) {
+	parsed := invocation{command: commandDebug}
+	flags := flag.NewFlagSet("debug", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	flags.StringVar(&parsed.systemNATSURL, "system-nats-url", "", "System NATS client URL")
+	flags.StringVar(&parsed.nodeID, "node-id", "", "Grovlet observer node ID")
+	flags.StringVar(&parsed.serviceName, "service", "", "application service name")
+	flags.StringVar(&parsed.listenAddress, "listen", "", "local DAP listen address")
+	if err := flags.Parse(args); err != nil {
+		return invocation{}, fmt.Errorf("parse debug flags: %w", err)
+	}
+	if flags.NArg() != 0 {
+		return invocation{}, fmt.Errorf("parse debug: %w: %q", errUnexpectedArguments, flags.Args())
+	}
+	if err := validateConnection(parsed); err != nil {
+		return invocation{}, err
+	}
+	if parsed.serviceName == "" {
+		return invocation{}, errServiceNameRequired
+	}
+	if parsed.listenAddress == "" {
+		return invocation{}, errDebugListenRequired
+	}
+	return parsed, nil
 }
 
 func parseTestInvocation(args []string, stderr io.Writer) (invocation, error) {
@@ -257,7 +297,7 @@ func writeStatus(ctx context.Context, client controlClient, nodeID string, outpu
 	}
 	healthyComponents := 0
 	for _, component := range components {
-		if component.status.State == systemnats.ComponentHealthy {
+		if component.status.State == systemnats.ComponentHealthy || component.status.State == systemnats.ComponentDebugging {
 			healthyComponents++
 		}
 	}

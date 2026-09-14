@@ -103,7 +103,7 @@ func buildGroveShopStatus(
 				break
 			}
 		}
-		if placementStatus.Health != string(systemnats.ComponentHealthy) {
+		if placementStatus.Health != string(systemnats.ComponentHealthy) && placementStatus.Health != string(systemnats.ComponentDebugging) {
 			status.Health = "degraded"
 		}
 		status.Placements = append(status.Placements, placementStatus)
