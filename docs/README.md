@@ -14,32 +14,49 @@ func (s *Inventory) Reserve(ctx context.Context, req ReserveRequest) (ReserveRes
 
 Register the distributed boundary explicitly and keep the business package directly testable.
 
-→ **[Grove SDK](../sdk/)** — services, invocation, serialization, and the canonical Shop example.
+→ **[Grove SDK](../sdk/)** — services, invocation, serialization, capabilities, and the canonical Shop example.
 
 ## Work with Grove
 
-The CLI is the shared surface for developers and operators.
+The application binary is also the shared operational surface for developers and operators.
 
 ```bash
-$ grove status
-
-Cluster     healthy
-Nodes       3 / 3 healthy
-Services    3 / 3 healthy
-Version     v0.8.2
-Config      production-42
+$ ./groveshop
 ```
 
-→ **[CLI](cli/)** — run, inspect, test, debug, deploy, and recover.
+```text
+┌ GroveShop ────────────────────────────────────────────┐
+│ Cluster: healthy     Nodes: 3      Version: v0.8.2   │
+├───────────────────────────────────────────────────────┤
+│ > Services                                            │
+│   Nodes                                               │
+│   Deployments                                         │
+│   Configuration                                       │
+│   Logs                                                │
+│   Debug                                               │
+│                                                       │
+│ ─ Application ─                                       │
+│   Seed demo orders                                    │
+│   Run integrity check                                 │
+└───────────────────────────────────────────────────────┘
+```
+
+Humans use the TUI. Scripts, CI, and reproducible automation invoke the same structured actions through the same application binary:
+
+```bash
+$ ./groveshop action cluster.status
+```
+
+→ **[Application Console](cli/)** — TUI, structured actions, debugging, rollouts, and application-specific operations.
 
 ## Operate Grove
 
 Grove should explain the system, not merely expose telemetry.
 
-```bash
-$ grove inspect orders
+```text
+Services > orders
 
-orders        degraded
+Health        degraded
 Cause         config production-43
 Observed      2 crash-looping instances
 Action        rollback to production-42
@@ -66,6 +83,6 @@ Result        recovered
 
 > **Show the experience. Explain only what the example cannot.**
 
-Feature docs should normally lead with code, commands, output, or a diagram. Prose should clarify guarantees, trade-offs, and internals rather than make readers imagine the experience.
+For human workflows, prefer TUI examples over generic command/flag trees. Use direct action invocations only where automation, CI, testing, or reproducibility is the point.
 
 See the **[documentation guide](DOCUMENTATION_GUIDE.md)** for the project-wide writing standard.
