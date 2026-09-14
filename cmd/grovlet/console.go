@@ -14,7 +14,6 @@ import (
 	"sync"
 
 	"github.com/grove-project/grove/console"
-	"github.com/grove-project/grove/demo/groveshop"
 )
 
 const consoleStateEnvironment = "GROVE_CONSOLE_STATE"
@@ -44,22 +43,25 @@ func runApplicationConsole(ctx context.Context, args []string, input io.Reader, 
 	if len(args) != 0 {
 		return fmt.Errorf("start application console: %w: %q", errConsoleArguments, args)
 	}
-	var registry console.Registry
-	if err := groveshop.RegisterActions(&registry); err != nil {
-		return fmt.Errorf("register Grove Shop actions: %w", err)
-	}
-	tui, err := console.NewTUI(&registry, func(context.Context) (console.Model, error) {
-		return console.Model{Application: "Grove Shop", Health: "not deployed"}, nil
-	})
-	if err != nil {
-		return fmt.Errorf("create Grove Shop TUI: %w", err)
-	}
-
 	runtimeDir, err := os.MkdirTemp("", "groveshop-console-")
 	if err != nil {
 		return fmt.Errorf("create application console directory: %w", err)
 	}
 	defer os.RemoveAll(runtimeDir)
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate Grove Shop artifact: %w", err)
+	}
+	controller := newApplicationController(executable, runtimeDir)
+	defer controller.close()
+	var registry console.Registry
+	if err := registerApplicationConsoleActions(&registry, controller); err != nil {
+		return err
+	}
+	tui, err := console.NewTUI(&registry, controller.readModel)
+	if err != nil {
+		return fmt.Errorf("create Grove Shop TUI: %w", err)
+	}
 	listener, err := net.Listen("unix", filepath.Join(runtimeDir, "actions.sock"))
 	if err != nil {
 		return fmt.Errorf("listen for application actions: %w", err)

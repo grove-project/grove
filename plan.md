@@ -81,15 +81,19 @@ control store, scheduler, or same-host test shortcut.
   console, structured-action, and node roles from the same built binary and
   verified discovery cleanup; `go test -count=1 ./cmd/grovlet` passed.
 
-- [ ] 3. Drive good and broken rollouts through application actions.
+- [x] 3. Drive good and broken rollouts through application actions.
   **Context:** Implement `rollout.start` and `cluster.status` over the existing
   artifact/config and System NATS lifecycle. The good configuration must start
   three real nodes, publish desired placement and active artifact/config state,
   and serve Web. The broken Inventory candidate must expose pending/failure/
   rollback through the shared read model while Artifact A stays known-good.
-  **Acceptance:** Action-level tests observe structured placement, health,
-  artifact/config identity, candidate failure, rollback reason, and post-
-  rollback order success without reading process logs as state.
+  **Outcome:** Registered `rollout.start` and `cluster.status` on the shared
+  registry. The foreground controller embeds immutable artifacts, starts three
+  real Grovlets, records desired/placement/deployment state in System NATS,
+  serves Web, captures pending candidate state, and invokes the existing failed
+  upgrade rollback path after the invalid Inventory process rejects its config.
+  A real subprocess test completed orders before and after rollback and asserted
+  structured artifact/config identities and failure reason.
 
 - [ ] 4. Expose recovery, durable restart, and resilience operations.
   **Context:** Add application-native operations used by the final E2E to kill
@@ -122,3 +126,8 @@ control store, scheduler, or same-host test shortcut.
 - 2026-09-14: The Grove Shop artifact now owns the foreground TUI/action server
   and the unchanged headless Grovlet runtime modes. Local state contains only
   the Unix control endpoint and is removed when the console exits.
+- 2026-09-14: `rollout.start --config` now drives both the known-good Acme
+  deployment and the deliberately broken candidate from the application
+  binary. `cluster.status`, Web polling, and TUI model conversion share the
+  existing `groveshop.ClusterStatusView`; the rollback operation records the
+  Inventory validation field and retains Artifact A.
