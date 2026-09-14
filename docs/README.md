@@ -71,6 +71,8 @@ Result        recovered
 
 **[Vision](vision/vision.md)** explains why Grove exists and the product principles behind the experience.
 
+**[Security](security/)** explains Grove's trust model, signed application identity, node enrollment, ephemeral workload identity, capability authorization, and how Grovlet secure endpoints keep secrets out of application memory.
+
 **[Architecture](architecture/system-architecture.md)** explains how Grove implements the runtime.
 
 **[ADRs](adr/README.md)** capture important architectural decisions and their trade-offs.
