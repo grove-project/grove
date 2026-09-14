@@ -1,44 +1,130 @@
-# Grove CLI
+# Grove Application Console
 
-**One interface for developing the application and understanding the running system.**
+**Every Grove application is its own operational tool.**
 
-The CLI is the bridge between Grove's developer and operator experiences. Commands should answer a human question first; implementation details come second.
+Grove does not require a separate `grove` executable for normal application operation. The Grove runtime, operational console, debugging entry points, configuration tooling, and developer-defined administrative actions are compiled into the application binary itself.
 
-> The examples below describe the intended CLI experience. Commands are being implemented incrementally.
-
-## Run locally
-
-```bash
-$ grove run .
-
-Building shop...
-Starting Grove cluster...
-
-✓ api
-✓ orders
-✓ inventory
-
-Cluster ready at http://localhost:8080
+```text
+groveshop
+├── application code
+├── Grove runtime
+├── Grove operational actions
+├── developer-defined application actions
+└── interactive TUI
 ```
 
-## See what is running
+The primary human experience is an interactive terminal UI, not a large tree of generic flags.
+
+> The examples below describe the intended Grove experience. Implementation is evolving.
+
+## Start the application console
 
 ```bash
-$ grove status
+$ ./groveshop
+```
 
-Cluster     healthy
+A Grove-aware application opens its interactive console when invoked in an interactive terminal:
+
+```text
+┌ GroveShop ────────────────────────────────────────────┐
+│ Cluster: healthy     Nodes: 3      Version: v0.8.2   │
+├───────────────────────────────────────────────────────┤
+│ > Services                                            │
+│   Nodes                                               │
+│   Deployments                                         │
+│   Configuration                                       │
+│   Logs                                                │
+│   Debug                                               │
+│   Storage                                             │
+│                                                       │
+│ ─ Application ─                                       │
+│   Seed demo orders                                    │
+│   Clear orders                                        │
+│   Generate load                                       │
+│   Run integrity check                                 │
+│                                                       │
+│ q Quit        / Search        ? Help                  │
+└───────────────────────────────────────────────────────┘
+```
+
+The same executable may also start the runtime directly when used as the deployed process. TUI activation must never make headless execution depend on a terminal.
+
+## Application-specific actions
+
+Developers can register actions from application code. Grove merges them into the same operational surface as built-in runtime actions.
+
+Conceptually:
+
+```go
+app := grove.New("groveshop")
+
+app.Service("orders", orders.Run)
+app.Service("payment", payment.Run)
+
+app.Action("Seed demo orders", seedOrders)
+app.Action("Generate load", generateLoad)
+app.Action("Run integrity check", verifyOrders)
+
+app.Run()
+```
+
+The important property is not the exact API shape. The application action runs with the application's own packages, types, embedded configuration, credentials, and Grove connectivity. Developers should not need to build and distribute a second admin utility.
+
+## TUI first, structured actions underneath
+
+The TUI is a view over a structured action registry:
+
+```text
+TUI
+ ↓
+Action registry
+ ├── cluster.status
+ ├── service.inspect
+ ├── config.inspect
+ ├── debug.attach
+ ├── rollout.start
+ ├── app.orders.seed
+ └── app.orders.verify
+```
+
+This separation gives Grove two interfaces without two products:
+
+- **Humans:** interactive, live, contextual, discoverable TUI.
+- **Automation:** stable structured actions exposed by the same application binary.
+
+A non-interactive form may look like:
+
+```bash
+$ ./groveshop action cluster.status
+$ ./groveshop action service.inspect orders
+$ ./groveshop action app.orders.verify
+```
+
+The exact action syntax is intentionally secondary to the TUI. Grove documentation should prefer TUI examples for human workflows and use action invocations only for scripts, CI, tests, or reproducible automation.
+
+## Inspect the cluster
+
+From the TUI:
+
+```text
+Cluster
+
+Health      healthy
 Version     v0.8.2
 Nodes       3 / 3 healthy
 Services    3 / 3 healthy
 Config      production-42
+
+Last event
+  orders recovered after config rollback
 ```
 
-A healthy system should be boring. When it is not healthy, the same command should immediately point toward the reason:
+A healthy system should be boring. When it is not healthy, the same view should explain the reason and the runtime response:
 
-```bash
-$ grove status
+```text
+Cluster
 
-Cluster     degraded
+Health      degraded
 Services    2 / 3 healthy
 
 orders      degraded
@@ -47,70 +133,77 @@ orders      degraded
 Last change
   config production-43 deployed 48s ago
 
-Suggested
-  grove inspect orders
+Recovery
+  restoring production-42
 ```
 
 ## Drill into a service
 
-```bash
-$ grove inspect orders
+```text
+Services > orders
 
-orders
-
-Instances
-  node-1    healthy
-  node-2    crash loop
-  node-3    healthy
+Health       degraded
+Instances    2 / 3 healthy
+Version      v0.8.2
+Config       production-43
 
 Cause
-  configuration production-43
   max_connections: -1
 
 Current action
   restoring production-42
+
+[Logs] [Executions] [Placement] [Debug]
 ```
 
-The goal is not to replace raw logs, metrics, or traces. It is to make the runtime's own state and decisions understandable before the operator has to correlate those lower-level signals.
-
-## Test failures deliberately
-
-```bash
-$ grove test --resilience
-
-Running application E2E suite...
-✓ baseline
-
-Injecting node failure...
-✓ failure detected
-✓ orders recovered on node-3
-✓ E2E suite remained healthy
-
-PASS
-```
-
-Resilience belongs in the normal development loop rather than a separate production-only discipline.
+The goal is not to replace raw logs, metrics, or traces. It is to make Grove's own state and decisions understandable before the operator has to correlate lower-level evidence manually.
 
 ## Debug where the code actually runs
 
-```bash
-$ grove debug orders
+```text
+Services > orders > Instances > node-2 > Debug
 
-orders is running on node-2
-DAP endpoint ready at localhost:4711
+Target       orders / node-2
+Worker       worker-17
+State        ready
+
+[Attach debugger]
+```
+
+After attach:
+
+```text
+DAP endpoint
+  127.0.0.1:4711
+
 Waiting for IDE...
 ```
 
-Grove resolves placement; the developer debugs the application.
+Grove resolves placement; the developer debugs the application. The same model applies when the target runs on another cluster node or customer edge.
+
+For automated debugger setup, the same application binary may expose the underlying action directly:
+
+```bash
+$ ./groveshop action debug.attach orders --listen 127.0.0.1:4711
+```
 
 ## Change configuration safely
 
-```bash
-$ grove config embed production.yaml ./shop
-Embedded configuration production-43
+Configuration remains part of immutable artifact identity. The console should present the operation as a rollout, not mutation of a running process.
 
-$ grove deploy ./shop
-Deploying shop v0.8.3
+```text
+Deployments > New candidate
+
+Artifact     groveshop v0.8.3
+Config       production-43
+
+[Start rollout]
+```
+
+During the rollout:
+
+```text
+Rollout production-43
 
 ✓ node-1 updated
 ✗ orders failed health check
@@ -120,11 +213,27 @@ Restoring production-42...
 ✓ cluster healthy
 ```
 
-The important output is not that an operation failed. It is **what changed, what Grove observed, what Grove did, and whether the system recovered**.
+The important output is **what changed, what Grove observed, what Grove did, and whether the system recovered**.
 
-## CLI design rule
+## Design rules
 
-Every operational command should help answer one of these questions:
+### One binary
+The application binary is the user-facing operational executable. Grove should not require operators to match an external CLI version to an application/runtime version.
+
+### Interactive by default, scriptable underneath
+The TUI is the primary human interface. Stable structured actions exist underneath for automation and reproducibility.
+
+### Application-aware
+The console can expose both Grove runtime capabilities and application-specific operations registered by the developer.
+
+### Live and contextual
+Cluster state, rollout progress, worker placement, health, logs, recovery, and debugger targets should update in place where useful rather than forcing repeated polling commands.
+
+### Progressive disclosure
+Start from the application and service. Reveal worker, Grovlet, node, routing, storage, and control-plane details only when useful.
+
+### The runtime explains itself
+Every operational surface should help answer:
 
 - What is running?
 - What changed?
@@ -133,4 +242,10 @@ Every operational command should help answer one of these questions:
 - What is Grove doing about it?
 - Did recovery succeed?
 
-Raw runtime detail should remain available for deeper investigation, but it should not be the first thing a human must decode.
+Raw runtime detail remains available for deeper investigation, but it should not be the first thing a human must decode.
+
+## Core principle
+
+> **The same binary you build and deploy is also the tool you use to inspect, operate, debug, and administer the application.**
+
+That extends Grove's "same binary from dev to prod" principle beyond packaging: the artifact carries its own operational vocabulary with it.
