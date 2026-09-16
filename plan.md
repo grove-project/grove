@@ -141,13 +141,19 @@ operational ownership to `cmd/grovlet`, built and run as `groveshop`.
   workflow. `go vet ./...`, `go test -count=1 ./...`, and `go test -race
   -count=1 ./...` pass.
 
-- [ ] 6. Extract the reusable service-aware DAP gateway.
+- [x] 6. Extract the reusable service-aware DAP gateway.
   **Context:** Move the existing placement resolution, local listener, attach
   PID injection, and DAP proxy logic from `cmd/grove/debug.go` behind a focused
   internal package usable by both command entry points. Preserve the current
   generic CLI for compatibility, but do not extend its product surface.
   **Acceptance:** Gateway unit tests cover service resolution, DAP framing/PID
   injection, cancellation, and cleanup; existing `cmd/grove` debug tests pass.
+  **Outcome:** Added `internal/debuggateway`, which owns authoritative service
+  selection, local listener and remote stream lifetime, DAP framing, and attach
+  PID injection. `cmd/grove` now delegates its compatibility command to this
+  package, and the former gateway unit cases moved with the implementation.
+  `go test -count=1 ./internal/debuggateway` and a compile-only
+  `go test -run '^$' -count=1 ./cmd/grove` pass.
 
 - [ ] 7. Start the five-node debug topology from Grove Shop.
   **Context:** Register an application action for the debug demo and a matching
@@ -212,3 +218,6 @@ operational ownership to `cmd/grovlet`, built and run as `groveshop`.
   existing Delve controller, System NATS byte tunnel, supervision state, and DAP
   E2E remain the implementation baseline; only their separate-CLI ownership is
   being replaced by the application console contract.
+- 2026-09-16: Extracted the service-aware local DAP gateway from `cmd/grove`
+  into `internal/debuggateway` so Grove Shop can own sessions without copying
+  service-resolution or DAP protocol adaptation logic.
