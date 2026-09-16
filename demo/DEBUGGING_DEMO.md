@@ -1,56 +1,38 @@
-# Grove Shop Delve Debugging Demo
+# Debug Grove Shop across two workers
 
-## Purpose
-This is the human-facing walkthrough for Task 032. It demonstrates that Grove can resolve application services to their real distributed workers and expose ordinary Delve/DAP debugging locally without SSH, PID discovery, node discovery, or remote debugger ports.
+Build one Grove Shop binary, start its application console, and attach ordinary
+DAP clients to Orders and Payment. Grove resolves both services to their real
+workers; you do not provide a PID, remote node address, or Delve port.
 
-The human workflow is TUI-first and is exposed by the Grove Shop application binary itself. Structured actions from the same binary are used where the demo needs deterministic, scriptable debugger endpoints.
+## Build the debug application
 
-This guide is a **Task 032 acceptance artifact**. Do not mark Task 032 DONE until every action below has been executed successfully against a clean local checkout.
-
-## Required topology
-The debug demo runs one Grove Shop service per Grovlet:
-
-| Node | Service |
-| --- | --- |
-| node-1 | Web |
-| node-2 | Orders |
-| node-3 | Inventory |
-| node-4 | Payment |
-| node-5 | Shipping |
-
-Orders and Payment therefore live in different worker processes on different nodes.
-
-## 1. Build the debug-capable Grove Shop application binary
+From the repository root:
 
 ```bash
-go build -gcflags="all=-N -l" -o ./bin/groveshop ./demo/groveshop
+mkdir -p bin
+go build -gcflags="all=-N -l" -o ./bin/groveshop ./cmd/grovlet
 ```
 
-If the implemented Grove Shop entry point differs, update this guide to the exact command that actually works. The important contract is that the produced application binary contains both the Grove runtime and the Grove operational console; no separate `grove` CLI binary is required.
+The resulting binary contains the Grove Shop services, Grove runtime, and
+operational console. It requires `dlv` on `PATH` when starting the debug demo.
 
-## 2. Start the Grove Shop console
+## Start the five-node demo
+
+Open the application console in Terminal C:
 
 ```bash
 ./bin/groveshop
 ```
 
-The application opens the Grove TUI in an interactive terminal.
-
-Navigate to the deployment/debug-demo flow and start the five-node demo topology. The intended experience is:
+Enter this TUI path:
 
 ```text
 Deployments > Debug demo > Start
 ```
 
-The final implementation may refine labels, but the human should not need to construct a generic command/flag tree.
-
-## 3. Verify placement before debugging
-
-From the TUI:
+Grove starts one service worker on each node:
 
 ```text
-Services
-
 Web         node-1   healthy
 Orders      node-2   healthy
 Inventory   node-3   healthy
@@ -58,124 +40,108 @@ Payment     node-4   healthy
 Shipping    node-5   healthy
 ```
 
-Confirm all five workers are healthy and that Orders and Payment are hosted on different nodes.
-
-For automated verification, use the structured action exposed by the same application binary:
+Inspect the same read model from another terminal:
 
 ```bash
 ./bin/groveshop action cluster.status
 ```
 
-The human operator must not need to copy a PID or remote node address into the debugger flow.
+The JSON output includes five healthy placements. Orders reports `node-2` and
+`orders-1`; Payment reports `node-4` and `payment-1`.
 
-## 4. Attach the Orders debugger
+## Attach Orders
 
-Human workflow:
+The contextual TUI operation is:
 
 ```text
 Services > Orders > Instances > node-2 > Debug > Attach
 ```
 
-For the deterministic demo endpoint used by the IDE, Terminal A runs:
+For a deterministic IDE endpoint, run the same underlying action in Terminal A:
 
 ```bash
 ./bin/groveshop action debug.attach orders --listen 127.0.0.1:40000
 ```
 
-The action should print the resolved Orders service, node, worker identity, artifact/version, and:
+It prints the resolved target before waiting for a DAP client:
 
-```text
-DAP listening locally on 127.0.0.1:40000
+```json
+{"service_id":1,"service_name":"Orders","node_id":"node-2","worker_id":"orders-1","artifact_digest":"sha256:...","code_version":"...","dap_endpoint":"127.0.0.1:40000"}
 ```
 
-Keep this action running.
+Keep Terminal A running.
 
-## 5. Attach the Payment debugger
+## Attach Payment
 
-Human workflow:
+The contextual TUI operation is:
 
 ```text
 Services > Payment > Instances > node-4 > Debug > Attach
 ```
 
-For the deterministic demo endpoint, Terminal B runs:
+Run the structured action in Terminal B:
 
 ```bash
 ./bin/groveshop action debug.attach payment --listen 127.0.0.1:40001
 ```
 
-The action should resolve Payment independently and print:
+It independently resolves Payment:
 
-```text
-DAP listening locally on 127.0.0.1:40001
+```json
+{"service_id":3,"service_name":"Payment","node_id":"node-4","worker_id":"payment-1","artifact_digest":"sha256:...","code_version":"...","dap_endpoint":"127.0.0.1:40001"}
 ```
 
-Keep this action running too.
+Keep Terminal B running.
 
-## 6. Attach two IDE debugger sessions
+## Debug one order
 
-Create two ordinary Go/DAP attach configurations:
-
-- Orders -> `127.0.0.1:40000`
-- Payment -> `127.0.0.1:40001`
-
-The IDE is speaking DAP to Delve through Grove. There is no Grove-specific IDE plugin requirement for MVP.
-
-Send a standard DAP `attach` request to each endpoint. Grove fills in the
-already-resolved node-local process ID, so the client configuration does not
-contain a PID.
-
-Set one breakpoint in the Orders request/order-flow path and one in the Payment charge path.
-
-## 7. Trigger one order
-
-Use the Grove Shop Web UI and create an order.
-
-Expected sequence:
-
-1. Orders breakpoint hits in the Orders worker on node-2.
-2. Inspect an application variable and continue.
-3. Payment breakpoint hits in the Payment worker on node-4.
-4. Inspect an application variable and continue.
-5. The order completes successfully.
-
-The two debugger sessions remain independent; Grove is not multiplexing them into one synthetic debugger.
-
-## 8. Disconnect and verify health
-
-Disconnect both IDE sessions, then stop the two `debug.attach` actions if they have not exited automatically.
-
-Return to the TUI and verify:
+Connect two ordinary Go/DAP attach configurations:
 
 ```text
-Cluster
-
-Health      healthy
-Services    5 / 5 healthy
+Orders     127.0.0.1:40000
+Payment    127.0.0.1:40001
 ```
 
-For automated verification:
+The DAP clients use attach mode without a process ID. Grove inserts the
+resolved node-local PID before forwarding each request to Delve.
+
+Set these breakpoints in `demo/groveshop/groveshop.go`:
+
+```go
+chargeRequest := ChargeRequest{
+```
+
+```go
+if req.AmountCents <= 0 {
+```
+
+Create an order through the Grove Shop Web URL shown by the debug-demo start
+result. The observable sequence is:
+
+```text
+Orders/node-2     breakpoint -> inspect order.ID -> continue
+Payment/node-4    breakpoint -> inspect req.OrderID -> continue
+Order             completed
+```
+
+Orders and Payment are independent Delve sessions. Web, Inventory, and Shipping
+remain healthy while the two target workers report `debugging`.
+
+## Disconnect and verify health
+
+Disconnect both DAP clients. Each `debug.attach` action exits after its client
+disconnects and releases its listener, tunnel, and Delve process.
 
 ```bash
 ./bin/groveshop action cluster.status
 ```
 
-All five Grove Shop services must be back under normal supervision and healthy.
+The final result reports `healthy`, with all five components back in `healthy`
+state. Enter `q` in Terminal C to stop the console and all five child Grovlets.
 
-Finally, stop Terminal C with Ctrl-C. The deployment command removes its local
-discovery file and every child Grovlet.
+## Boundaries
 
-## Acceptance rule
-The actions in this guide are not documentation-only examples. Task 032 is incomplete until the implementation agent has:
-
-- built one debug-capable Grove Shop application binary containing the runtime and operational console;
-- opened the TUI and verified the five-node service placement;
-- run the two application-binary `debug.attach` actions;
-- proven both local DAP endpoints target the intended remote workers;
-- hit both breakpoints during one order flow;
-- continued the order to completion;
-- disconnected both sessions;
-- rerun cluster health checks successfully;
-- run `go test ./...` successfully.
-
-If any action or TUI path changes during implementation, update this guide first and retest the exact final text.
+Grove exposes one local DAP endpoint per selected worker. It does not multiplex
+debugger state, fan out breakpoints, or provide cross-service single-step
+semantics. The local application action is the only exposed debugger listener;
+node-local Delve ports are not published as cluster endpoints.

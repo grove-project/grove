@@ -1,6 +1,6 @@
 # Task 032 — Delve debugging across Grove Shop workers
 
-Status: TODO
+Status: DONE
 Depends on: 031
 
 ## Goal

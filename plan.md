@@ -188,7 +188,7 @@ operational ownership to `cmd/grovlet`, built and run as `groveshop`.
   and cancels the gateway when that process closes. Parser, TUI mapping, and
   streaming-lifetime tests pass with `go vet ./cmd/grovlet`.
 
-- [ ] 9. Prove and document the application-native two-worker debug flow.
+- [x] 9. Prove and document the application-native two-worker debug flow.
   **Context:** Migrate the existing real Delve E2E so the Grove Shop console
   owns the cluster and both `debug.attach` subprocesses use the Grove Shop
   binary. Attach ordinary DAP clients, hit and inspect Orders and Payment on
@@ -197,6 +197,14 @@ operational ownership to `cmd/grovlet`, built and run as `groveshop`.
   `demo/DEBUGGING_DEMO.md` exactly as documented.
   **Acceptance:** Focused repetitions, `go vet ./...`, `go test -count=1
   ./...`, and `go test -race -count=1 ./...` pass. Only then mark Task 032 DONE.
+  **Outcome:** The application-native E2E now starts the five-node topology
+  from the Grove Shop console, opens simultaneous Orders and Payment
+  `debug.attach` actions from the same binary, drives two ordinary DAP clients
+  through source breakpoints and variable evaluation, completes the order, and
+  verifies all target and non-target states before and after disconnect. The
+  final guide's build, status, fixed-endpoint actions, and three contextual TUI
+  paths were executed against the debug-built binary. Repository-wide vet,
+  normal, and race suites pass.
 
 ## Log
 
@@ -242,3 +250,8 @@ operational ownership to `cmd/grovlet`, built and run as `groveshop`.
   contextual TUI selection and structured action clients receive resolved
   service/node/worker/artifact/endpoint metadata before the ordinary DAP stream
   begins, and client cancellation unwinds the same session resources.
+- 2026-09-16: Completed Task 032. Two application-owned DAP sessions hit and
+  inspect Orders on node-2 and Payment on node-4 during one successful order;
+  Web, Inventory, and Shipping remain healthy, and both targets return to
+  normal supervision after disconnect. The exact final application-console
+  guide was exercised, and full normal and race suites pass.
