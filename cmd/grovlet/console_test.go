@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/console"
 	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/systemnats"
@@ -71,6 +73,7 @@ func TestResolveTUISelection(t *testing.T) {
 		{name: "new rollout", input: "Deployments > New rollout > configs/acme.yaml", wantName: "rollout.start", wantArgs: []string{"--config", "configs/acme.yaml"}, wantOK: true},
 		{name: "debug demo", input: "Deployments > Debug demo > Start", wantName: "debug.demo.start", wantOK: true},
 		{name: "application action", input: "Application > Run integrity check", wantName: groveshop.ActionVerifyOrders, wantOK: true},
+		{name: "debug attach", input: "Services > Orders > Instances > node-2 > Debug > Attach", wantName: "debug.attach", wantArgs: []string{"orders", "--listen", "127.0.0.1:0"}, wantOK: true},
 		{name: "raw action fallback", input: "cluster.status", wantName: "cluster.status", wantOK: true},
 		{name: "blank", input: "   ", wantOK: false},
 	}
@@ -82,6 +85,93 @@ func TestResolveTUISelection(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunApplicationActionStreamsLongRunningResult(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "console.json")
+	t.Setenv(consoleStateEnvironment, statePath)
+	runtimeDir, err := os.MkdirTemp("", "grove-action-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+	listener, err := net.Listen("unix", filepath.Join(runtimeDir, "actions.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var registry console.Registry
+	if err := registry.Register(console.Action{
+		Name: "session.start", Label: "Start", Section: "Test",
+		Handler: func(context.Context, []string) (any, error) {
+			return &testConsoleActionSession{started: started, release: release}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := newConsoleActionServer(t.Context(), listener, &registry)
+	t.Cleanup(server.close)
+	if err := writeConsoleConnection(consoleConnection{SocketPath: listener.Addr().String()}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeConsoleConnection(consoleConnection{SocketPath: listener.Addr().String()}) })
+
+	writes := make(chan []byte, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- runApplicationAction(t.Context(), []string{"session.start"}, channelWriter{writes: writes})
+	}()
+	select {
+	case output := <-writes:
+		if string(output) != "{\"state\":\"waiting\"}\n" {
+			t.Errorf("initial action output = %q", output)
+		}
+	case <-t.Context().Done():
+		t.Fatal(t.Context().Err())
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("long-running action returned before release: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("long-running action session did not start")
+	}
+}
+
+type testConsoleActionSession struct {
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (s *testConsoleActionSession) InitialResult() any {
+	return map[string]string{"state": "waiting"}
+}
+
+func (s *testConsoleActionSession) Wait(ctx context.Context) error {
+	close(s.started)
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type channelWriter struct {
+	writes chan<- []byte
+}
+
+func (w channelWriter) Write(data []byte) (int, error) {
+	w.writes <- append([]byte(nil), data...)
+	return len(data), nil
 }
 
 func TestGroveShopBinaryRunsConsoleActionsAndNodeRuntime(t *testing.T) {

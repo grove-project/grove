@@ -38,6 +38,12 @@ type consoleActionRequest struct {
 type consoleActionResponse struct {
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  string          `json:"error,omitempty"`
+	Active bool            `json:"active,omitempty"`
+}
+
+type consoleActionSession interface {
+	InitialResult() any
+	Wait(context.Context) error
 }
 
 func runApplicationConsole(ctx context.Context, args []string, input io.Reader, output io.Writer) error {
@@ -98,8 +104,17 @@ func runApplicationConsole(ctx context.Context, args []string, input io.Reader, 
 			result, err := tui.Select(ctx, action, actionArgs)
 			if err != nil {
 				fmt.Fprintf(output, "Error: %v\n", err)
-			} else if err := writeConsoleResult(output, result); err != nil {
-				return err
+			} else if session, ok := result.(consoleActionSession); ok {
+				if err := writeConsoleResult(output, session.InitialResult()); err != nil {
+					return err
+				}
+				if err := session.Wait(ctx); err != nil {
+					fmt.Fprintf(output, "Error: %v\n", err)
+				}
+			} else {
+				if err := writeConsoleResult(output, result); err != nil {
+					return err
+				}
 			}
 			if err := renderApplicationTUI(ctx, tui, output); err != nil {
 				return err
@@ -142,6 +157,8 @@ func resolveTUISelection(line string) (string, []string, bool) {
 			return "resilience.run", nil, true
 		case parts[0] == "Application" && parts[1] == "Run integrity check" && len(parts) == 2:
 			return groveshop.ActionVerifyOrders, nil, true
+		case len(parts) == 6 && parts[0] == "Services" && parts[2] == "Instances" && parts[4] == "Debug" && parts[5] == "Attach":
+			return "debug.attach", []string{strings.ToLower(parts[1]), "--listen", "127.0.0.1:0"}, true
 		}
 	}
 	return fields[0], fields[1:], true
@@ -176,8 +193,9 @@ func runApplicationAction(ctx context.Context, args []string, output io.Writer) 
 	if err := json.NewEncoder(stream).Encode(request); err != nil {
 		return fmt.Errorf("send application action: %w", err)
 	}
+	decoder := json.NewDecoder(stream)
 	var response consoleActionResponse
-	if err := json.NewDecoder(stream).Decode(&response); err != nil {
+	if err := decoder.Decode(&response); err != nil {
 		return fmt.Errorf("receive application action: %w", err)
 	}
 	if response.Error != "" {
@@ -188,6 +206,15 @@ func runApplicationAction(ctx context.Context, args []string, output io.Writer) 
 	}
 	if _, err := output.Write(append(response.Result, '\n')); err != nil {
 		return fmt.Errorf("write application action result: %w", err)
+	}
+	if response.Active {
+		var final consoleActionResponse
+		if err := decoder.Decode(&final); err != nil {
+			return fmt.Errorf("wait for application action: %w", err)
+		}
+		if final.Error != "" {
+			return errors.New(final.Error)
+		}
 	}
 	return nil
 }
@@ -240,12 +267,31 @@ func (s *consoleActionServer) handle(ctx context.Context, stream net.Conn) {
 		_ = json.NewEncoder(stream).Encode(consoleActionResponse{Error: err.Error()})
 		return
 	}
+	session, active := result.(consoleActionSession)
+	if active {
+		result = session.InitialResult()
+	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
 		_ = json.NewEncoder(stream).Encode(consoleActionResponse{Error: "encode application action: " + err.Error()})
 		return
 	}
-	_ = json.NewEncoder(stream).Encode(consoleActionResponse{Result: encoded})
+	encoder := json.NewEncoder(stream)
+	if err := encoder.Encode(consoleActionResponse{Result: encoded, Active: active}); err != nil || !active {
+		return
+	}
+	sessionCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		var buffer [1]byte
+		_, _ = stream.Read(buffer[:])
+		cancel()
+	}()
+	if err := session.Wait(sessionCtx); err != nil {
+		_ = encoder.Encode(consoleActionResponse{Error: err.Error()})
+		return
+	}
+	_ = encoder.Encode(consoleActionResponse{})
 }
 
 func (s *consoleActionServer) close() {

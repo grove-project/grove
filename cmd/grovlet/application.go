@@ -107,6 +107,11 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 			Description: "Recover Inventory after its hosting Grovlet fails, then rerun an order.",
 			Handler:     controller.runResilience,
 		},
+		{
+			Name: "debug.attach", Label: "Attach debugger", Section: "Debug",
+			Description: "Resolve a Grove Shop service and expose its Delve DAP session locally.",
+			Handler:     controller.attachDebugger,
+		},
 	}
 	for _, action := range actions {
 		if err := registry.Register(action); err != nil {

@@ -172,7 +172,7 @@ operational ownership to `cmd/grovlet`, built and run as `groveshop`.
   exposes worker identity. The real application-binary topology test and Grove
   Shop Web tests pass.
 
-- [ ] 8. Expose long-running debugger attachment through console actions.
+- [x] 8. Expose long-running debugger attachment through console actions.
   **Context:** Register `debug.attach SERVICE --listen ADDRESS` on the same
   registry used by TUI selection. Extend the local action protocol only enough
   to publish the initial resolved result before holding the action open, detect
@@ -181,6 +181,12 @@ operational ownership to `cmd/grovlet`, built and run as `groveshop`.
   **Acceptance:** Unit/integration tests prove initial result streaming,
   cancellation cleanup, contextual path mapping, actionable resolution errors,
   and identical registry dispatch for TUI and automation.
+  **Outcome:** Registered `debug.attach` on the application registry and mapped
+  the documented service-instance TUI path to that same handler. The console
+  action protocol now marks long-running sessions, writes the resolved JSON
+  result before waiting, retains the invoking process until DAP disconnect,
+  and cancels the gateway when that process closes. Parser, TUI mapping, and
+  streaming-lifetime tests pass with `go vet ./cmd/grovlet`.
 
 - [ ] 9. Prove and document the application-native two-worker debug flow.
   **Context:** Migrate the existing real Delve E2E so the Grove Shop console
@@ -232,3 +238,7 @@ operational ownership to `cmd/grovlet`, built and run as `groveshop`.
   Web, Orders, Inventory, Payment, and Shipping on nodes 1-5 from the configured
   application artifact and exposes worker IDs in the same status read model
   consumed by TUI and automation.
+- 2026-09-16: `debug.attach` now runs as a long-lived application action. Both
+  contextual TUI selection and structured action clients receive resolved
+  service/node/worker/artifact/endpoint metadata before the ordinary DAP stream
+  begins, and client cancellation unwinds the same session resources.
