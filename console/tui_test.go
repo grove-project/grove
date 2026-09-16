@@ -22,7 +22,7 @@ func TestTUIRendersStateAndUsesRegisteredAction(t *testing.T) {
 	}
 	tui, err := console.NewTUI(&registry, func(context.Context) (console.Model, error) {
 		return console.Model{
-			Application: "Grove Shop", Health: "healthy",
+			Application: "Grove Shop", Sections: []string{"Cluster", "Services", "Deployments", "Application"}, Health: "healthy",
 			NodesHealthy: 3, NodesTotal: 3, ServicesHealthy: 5, ServicesTotal: 5,
 			ActiveVersion: "v0.1.0", ConfigRevision: "acme-r42",
 			LastEvent: "inventory recovered on node-1",
@@ -38,7 +38,7 @@ func TestTUIRendersStateAndUsesRegisteredAction(t *testing.T) {
 	for _, want := range []string{
 		"GroveShop Grove Shop", "Cluster  healthy", "Nodes    3 / 3 healthy",
 		"Services 5 / 5 healthy", "Version  v0.1.0", "Config   acme-r42",
-		"inventory recovered on node-1", "Deployments", "New rollout  [rollout.start]",
+		"inventory recovered on node-1", "Services", "Deployments", "New rollout  [rollout.start]",
 	} {
 		if !strings.Contains(snapshot, want) {
 			t.Errorf("Render() = %q; want %q", snapshot, want)

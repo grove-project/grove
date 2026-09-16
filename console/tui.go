@@ -19,6 +19,8 @@ var (
 type Model struct {
 	// Application is the application name shown in the TUI title.
 	Application string
+	// Sections are the application-first top-level navigation areas.
+	Sections []string
 	// Health is the current cluster health.
 	Health string
 	// NodesHealthy is the number of currently healthy Grovlets.
@@ -76,13 +78,20 @@ func (t *TUI) Render(ctx context.Context) (string, error) {
 		fmt.Fprintf(&output, "Last event\n  %s\n", model.LastEvent)
 	}
 
-	section := ""
-	for _, action := range t.registry.Actions() {
-		if action.Section != section {
-			section = action.Section
-			fmt.Fprintf(&output, "\n%s\n", section)
+	actions := t.registry.Actions()
+	sections := append([]string(nil), model.Sections...)
+	for _, action := range actions {
+		if !containsSection(sections, action.Section) {
+			sections = append(sections, action.Section)
 		}
-		fmt.Fprintf(&output, "  %s  [%s]\n", action.Label, action.Name)
+	}
+	for _, section := range sections {
+		fmt.Fprintf(&output, "\n%s\n", section)
+		for _, action := range actions {
+			if action.Section == section {
+				fmt.Fprintf(&output, "  %s  [%s]\n", action.Label, action.Name)
+			}
+		}
 	}
 	return output.String(), nil
 }
@@ -98,4 +107,13 @@ func displayValue(value string) string {
 		return "-"
 	}
 	return value
+}
+
+func containsSection(sections []string, want string) bool {
+	for _, section := range sections {
+		if section == want {
+			return true
+		}
+	}
+	return false
 }
