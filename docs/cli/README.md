@@ -15,36 +15,47 @@ groveshop
 
 The primary human experience is an interactive terminal UI, not a large tree of generic flags.
 
-> The examples below describe the intended Grove experience. Implementation is evolving.
+Grove Shop implements this experience now: its root invocation opens the
+application console, and `action` exposes the same registered handlers for
+automation.
 
 ## Start the application console
 
 ```bash
-$ ./groveshop
+$ go build -o ./bin/groveshop ./cmd/grovlet
+$ ./bin/groveshop
 ```
 
 A Grove-aware application opens its interactive console when invoked in an interactive terminal:
 
 ```text
-┌ GroveShop ────────────────────────────────────────────┐
-│ Cluster: healthy     Nodes: 3      Version: v0.8.2   │
-├───────────────────────────────────────────────────────┤
-│ > Services                                            │
-│   Nodes                                               │
-│   Deployments                                         │
-│   Configuration                                       │
-│   Logs                                                │
-│   Debug                                               │
-│   Storage                                             │
-│                                                       │
-│ ─ Application ─                                       │
-│   Seed demo orders                                    │
-│   Clear orders                                        │
-│   Generate load                                       │
-│   Run integrity check                                 │
-│                                                       │
-│ q Quit        / Search        ? Help                  │
-└───────────────────────────────────────────────────────┘
+GroveShop Grove Shop
+Cluster  healthy
+Nodes    3 / 3 healthy
+Services 3 / 3 healthy
+Version  v0.1.0
+Config   acme-r42
+
+Cluster
+  Status  [cluster.status]
+  Restart cluster  [cluster.restart]
+
+Services
+
+Nodes
+
+Deployments
+  New rollout  [rollout.start]
+
+Configuration
+
+Logs
+
+Debug
+
+Application
+  Run integrity check  [app.orders.verify]
+  Run resilience scenario  [resilience.run]
 ```
 
 The same executable may also start the runtime directly when used as the deployed process. TUI activation must never make headless execution depend on a terminal.
@@ -95,9 +106,8 @@ This separation gives Grove two interfaces without two products:
 A non-interactive form may look like:
 
 ```bash
-$ ./groveshop action cluster.status
-$ ./groveshop action service.inspect orders
-$ ./groveshop action app.orders.verify
+$ ./bin/groveshop action cluster.status
+$ ./bin/groveshop action app.orders.verify
 ```
 
 The exact action syntax is intentionally secondary to the TUI. Grove documentation should prefer TUI examples for human workflows and use action invocations only for scripts, CI, tests, or reproducible automation.

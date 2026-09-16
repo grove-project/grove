@@ -55,10 +55,16 @@ Grove Shop artifact
 │   └── Shipping
 ├── embedded Web UI assets
 ├── Grove deployment/runtime metadata
+├── Grove Shop operational actions and interactive TUI
 └── reserved embedded customer-config region
 ```
 
 There must be no separate frontend deployment and no required loose UI assets or production config files accompanying the artifact.
+
+The same artifact is also the operator entry point. Running `groveshop` opens
+the application console; `groveshop action ...` is its structured automation
+surface. Both read the same Grove status endpoint that the embedded Web UI
+polls.
 
 ## Runtime topology
 

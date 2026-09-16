@@ -75,16 +75,31 @@ retain/restore Artifact A
 
 Do not repair Artifact B by mutating its config in place. Do not copy only the previous config value back into the candidate.
 
-## CLI target
-The final developer experience should be minimal:
+## Application console workflow
+The developer experience is one application binary, not a separately required
+Grove CLI:
 
 ```bash
-grove deploy --config configs/acme.yaml
-
-grove deploy --config configs/acme-broken.yaml
+go build -o ./bin/groveshop ./cmd/grovlet
+./bin/groveshop
 ```
 
-The CLI may internally build/package/embed as required by the implementation phase. Lower-level config compile/embed/extract commands may exist for inspection and testing, but the headline demo must not require a long sequence of manual artifact-management commands.
+```text
+Deployments > New rollout > configs/acme.yaml
+Deployments > New rollout > configs/acme-broken.yaml
+```
+
+For scripts, CI, and automated tests, invoke the same registered actions from
+that binary:
+
+```bash
+./bin/groveshop action rollout.start --config configs/acme.yaml
+./bin/groveshop action rollout.start --config configs/acme-broken.yaml
+```
+
+The action form reaches the same rollout implementation as the contextual TUI
+selection. Lower-level config compile/embed/extract commands remain inspection
+and test tools, not part of the headline demo.
 
 ## Required observability
 The Cluster Status UI should make the configuration lifecycle visible through stable metadata, for example:

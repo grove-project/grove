@@ -21,7 +21,7 @@ Prove Grove's core lifecycle in one short, repeatable scenario using the Grove S
 Expected:
 - the same binary contains Grove Shop, the Grove runtime integration, and the Grove operational console;
 - an interactive terminal opens the Grove TUI;
-- the local multi-Grovlet cluster is started or reused as required by the developer workflow.
+- no cluster has to be started separately.
 
 ### 2. Deploy the known-good artifact
 
@@ -32,7 +32,7 @@ Deployments > New rollout > configs/acme.yaml
 ```
 
 Expected:
-- Grove builds/packages the application as needed;
+- Grove embeds the selected configuration and starts the local three-Grovlet cluster;
 - the config is embedded into the candidate artifact;
 - Grove Shop components become healthy;
 - the console exposes the Web UI URL.
@@ -114,6 +114,23 @@ Expected:
 - previous known-good artifact remains active;
 - previous embedded config remains active;
 - no manual config repair or component restart is required.
+
+### 8. Demonstrate process recovery and reconstruction
+
+From the same application console:
+
+```text
+Application > Run resilience scenario
+Cluster > Restart cluster
+```
+
+Expected:
+- Inventory moves from its failed Grovlet to a surviving Grovlet and a new
+  order completes;
+- the application binary reconstructs the deployment after every Grovlet is
+  restarted, using durable Grove state;
+- the console and the Web status pane return to `healthy` with the known-good
+  artifact still active.
 
 ## Headline demo contract
 The headline human interaction is one executable plus TUI navigation:

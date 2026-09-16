@@ -108,7 +108,7 @@ control store, scheduler, or same-host test shortcut.
   the shared status healthy. The real-process action test passed through the
   full recovery/restart/rollback sequence.
 
-- [ ] 5. Prove and document the reopened Task 031 contract.
+- [x] 5. Prove and document the reopened Task 031 contract.
   **Context:** Migrate the complete MVP E2E so all lifecycle mutations enter
   through the Grove Shop binary. Assert TUI and Web render the same structured
   state, run the final documented application-console flow, update affected
@@ -116,6 +116,13 @@ control store, scheduler, or same-host test shortcut.
   **Acceptance:** Formatting, diff checks, focused repetitions, `go vet ./...`,
   `go test -count=1 ./...`, and `go test -race -count=1 ./...` all pass with
   useful real-process diagnostics and no fixed sleeps.
+  **Outcome:** The application-native E2E now verifies the embedded Web asset,
+  immutable runtime config identity, cross-Grovlet placement, the shared Web,
+  action, and TUI read model, order completion, node recovery, durable cluster
+  reconstruction, candidate failure, and rollback. Contextual TUI paths invoke
+  the same registry as automation, and the docs show the runnable one-binary
+  workflow. `go vet ./...`, `go test -count=1 ./...`, and `go test -race
+  -count=1 ./...` pass.
 
 ## Log
 
@@ -140,3 +147,9 @@ control store, scheduler, or same-host test shortcut.
   durable reconstruction through the same console registry. Restart now selects
   the latest ready-event NATS URL from each reused node log, avoiding stale
   connection metadata after an embedded server restarts.
+- 2026-09-16: Closed the reopened Task 031 contract. The final E2E proves the
+  application artifact's embedded UI/config, cross-process business call,
+  contextual TUI state, recovery, reconstruction, rejected candidate, and
+  post-rollback order. Recovery waits for a successful application call after
+  control-plane convergence, eliminating a responder-readiness race. The full
+  normal and race suites pass.

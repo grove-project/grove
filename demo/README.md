@@ -32,14 +32,22 @@ A customer configuration is embedded into the artifact after compilation. The ar
 ## Minimal operator flow
 
 ```bash
-grove deploy --config configs/acme.yaml
+go build -o ./bin/groveshop ./cmd/grovlet
+./bin/groveshop
+```
+
+In the application console:
+
+```text
+Deployments > New rollout > configs/acme.yaml
 
 # Keep the browser open.
 
-grove deploy --config configs/acme-broken.yaml
+Deployments > New rollout > configs/acme-broken.yaml
 ```
 
-The browser should be enough to observe the full upgrade, failure, and rollback sequence.
+The rollout result prints the Grove Shop Web URL. The browser and console show
+the same cluster read model through the candidate failure and rollback.
 
 ## Supporting docs
 - `ARCHITECTURE.md` — demo services, artifact composition, and runtime topology.
