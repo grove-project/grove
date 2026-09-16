@@ -1,21 +1,22 @@
-# Plan: Move the Grove Shop lifecycle into its application console
+# Plan: Move Grove Shop debugging into its application console
 
 ## Goal
 
-Complete the reopened Task 031 by making the Grove Shop application binary its
-own operational console. The same binary must provide a TUI and structured
-actions over one registry, drive the existing deployment, recovery, durable
-restart, rollback, and resilience behavior, expose the authoritative Grove read
-model, and pass one production-shaped real-process lifecycle E2E.
+Complete Task 032 by aligning the existing two-worker Delve/DAP implementation
+with Grove's application-console contract. The Grove Shop binary must start the
+five-node debug topology, resolve and tunnel two independent debugger sessions
+through TUI and structured actions, execute the documented breakpoint flow, and
+finish with every worker healthy without requiring the separate `grove` CLI.
 
 ## Context
 
-`origin/main` reopened Task 031 and replaced the separate-CLI MVP experience
-with an application-owned console. The already implemented Task 032 debugger
-transport is preserved on this branch, but Task 032 is pending again and its
-console adaptation is explicitly outside this task. Task 031 may reuse existing
-runtime/control-plane mechanisms; it must not create another rollout engine,
-control store, scheduler, or same-host test shortcut.
+Task 031 is complete and provides the application-owned TUI/action registry,
+foreground cluster controller, and shared status model. An earlier Task 032
+implementation already provides System NATS debug streaming, node-local Delve
+ownership, exact-worker supervision, DAP attach adaptation, and a real
+five-Grovlet/two-breakpoint E2E, but its deployment and attach entry points live
+under `cmd/grove`. This task preserves those proven mechanisms and moves their
+operational ownership to `cmd/grovlet`, built and run as `groveshop`.
 
 ### Key Files
 
@@ -33,6 +34,14 @@ control store, scheduler, or same-host test shortcut.
   by the browser and console.
 - `grovetest/` — real process ownership, readiness waits, isolation, cleanup,
   and diagnostics.
+- `cmd/grove/debug.go` and `cmd/grove/debug_test.go` — existing service
+  resolution, local DAP gateway, and complete debugger E2E to reuse and migrate.
+- `cmd/grovlet/debug.go` — existing node-local Delve lifecycle bound to the
+  exact worker generation.
+- `internal/systemnats/debug.go` — existing full-duplex DAP transport over
+  ephemeral System NATS subjects.
+- `demo/DEBUGGING_DEMO.md` — exact application-binary commands and TUI paths
+  that must be executed before Task 032 is complete.
 
 ### Decisions Made
 
@@ -54,6 +63,14 @@ control store, scheduler, or same-host test shortcut.
   `cluster.status` consume the same `groveshop.ClusterStatusView`.
 - Do not expose or adapt DAP/debug actions in Task 031. The preserved debugger
   machinery will be connected to this registry only when Task 032 resumes.
+- Keep one ordinary Delve session per selected worker. Grove resolves topology,
+  injects the node-local PID into DAP attach, and tunnels bytes; it does not
+  multiplex DAP state or implement debugger semantics.
+- Treat debugger attach as a long-running registered action: both TUI and Unix
+  action clients receive the resolved endpoint before waiting, and cancellation
+  closes the local listener, System NATS stream, Delve process, and debug state.
+- Use the existing topology-explicit five-node demo placement only for Task 032;
+  do not add affinity, anti-affinity, or a general scheduler.
 
 ## Sub-Tasks
 
@@ -124,6 +141,44 @@ control store, scheduler, or same-host test shortcut.
   workflow. `go vet ./...`, `go test -count=1 ./...`, and `go test -race
   -count=1 ./...` pass.
 
+- [ ] 6. Extract the reusable service-aware DAP gateway.
+  **Context:** Move the existing placement resolution, local listener, attach
+  PID injection, and DAP proxy logic from `cmd/grove/debug.go` behind a focused
+  internal package usable by both command entry points. Preserve the current
+  generic CLI for compatibility, but do not extend its product surface.
+  **Acceptance:** Gateway unit tests cover service resolution, DAP framing/PID
+  injection, cancellation, and cleanup; existing `cmd/grove` debug tests pass.
+
+- [ ] 7. Start the five-node debug topology from Grove Shop.
+  **Context:** Register an application action for the debug demo and a matching
+  `Deployments > Debug demo > Start` TUI path. Embed the selected config into
+  the running debug-capable Grove Shop artifact, launch five real Grovlets with
+  Web/Orders/Inventory/Payment/Shipping on nodes 1-5, and return the shared
+  structured status only after every worker is healthy.
+  **Acceptance:** A real application-binary test starts the topology, observes
+  five healthy placements through `cluster.status`, and verifies the exact
+  Orders/node-2 and Payment/node-4 worker identities.
+
+- [ ] 8. Expose long-running debugger attachment through console actions.
+  **Context:** Register `debug.attach SERVICE --listen ADDRESS` on the same
+  registry used by TUI selection. Extend the local action protocol only enough
+  to publish the initial resolved result before holding the action open, detect
+  action-client cancellation, and propagate terminal session errors. Map the
+  documented service-context TUI paths to the same handler.
+  **Acceptance:** Unit/integration tests prove initial result streaming,
+  cancellation cleanup, contextual path mapping, actionable resolution errors,
+  and identical registry dispatch for TUI and automation.
+
+- [ ] 9. Prove and document the application-native two-worker debug flow.
+  **Context:** Migrate the existing real Delve E2E so the Grove Shop console
+  owns the cluster and both `debug.attach` subprocesses use the Grove Shop
+  binary. Attach ordinary DAP clients, hit and inspect Orders and Payment on
+  different workers during one order, continue, disconnect, verify non-target
+  workers and final health, then execute every final command/TUI path in
+  `demo/DEBUGGING_DEMO.md` exactly as documented.
+  **Acceptance:** Focused repetitions, `go vet ./...`, `go test -count=1
+  ./...`, and `go test -race -count=1 ./...` pass. Only then mark Task 032 DONE.
+
 ## Log
 
 - 2026-09-14: `origin/main` advanced to `a02664f` and reopened Task 031 after
@@ -153,3 +208,7 @@ control store, scheduler, or same-host test shortcut.
   post-rollback order. Recovery waits for a successful application call after
   control-plane convergence, eliminating a responder-readiness race. The full
   normal and race suites pass.
+- 2026-09-16: Started Task 032 alignment on `origin/main` `0b193bf`. The
+  existing Delve controller, System NATS byte tunnel, supervision state, and DAP
+  E2E remain the implementation baseline; only their separate-CLI ownership is
+  being replaced by the application console contract.
