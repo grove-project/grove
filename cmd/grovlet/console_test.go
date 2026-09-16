@@ -69,6 +69,7 @@ func TestResolveTUISelection(t *testing.T) {
 	}{
 		{name: "cluster status", input: "Cluster > Status", wantName: "cluster.status", wantOK: true},
 		{name: "new rollout", input: "Deployments > New rollout > configs/acme.yaml", wantName: "rollout.start", wantArgs: []string{"--config", "configs/acme.yaml"}, wantOK: true},
+		{name: "debug demo", input: "Deployments > Debug demo > Start", wantName: "debug.demo.start", wantOK: true},
 		{name: "application action", input: "Application > Run integrity check", wantName: groveshop.ActionVerifyOrders, wantOK: true},
 		{name: "raw action fallback", input: "cluster.status", wantName: "cluster.status", wantOK: true},
 		{name: "blank", input: "   ", wantOK: false},

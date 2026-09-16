@@ -155,7 +155,7 @@ operational ownership to `cmd/grovlet`, built and run as `groveshop`.
   `go test -count=1 ./internal/debuggateway` and a compile-only
   `go test -run '^$' -count=1 ./cmd/grove` pass.
 
-- [ ] 7. Start the five-node debug topology from Grove Shop.
+- [x] 7. Start the five-node debug topology from Grove Shop.
   **Context:** Register an application action for the debug demo and a matching
   `Deployments > Debug demo > Start` TUI path. Embed the selected config into
   the running debug-capable Grove Shop artifact, launch five real Grovlets with
@@ -164,6 +164,13 @@ operational ownership to `cmd/grovlet`, built and run as `groveshop`.
   **Acceptance:** A real application-binary test starts the topology, observes
   five healthy placements through `cluster.status`, and verifies the exact
   Orders/node-2 and Payment/node-4 worker identities.
+  **Outcome:** Registered `debug.demo.start` and mapped `Deployments > Debug
+  demo > Start` to it. The application controller embeds the Acme config into
+  its own debug-built artifact, starts five real Grovlets with fixed demo
+  placement, records the active artifact/rollout, and waits for the shared
+  status model to report every node and worker healthy. The status contract now
+  exposes worker identity. The real application-binary topology test and Grove
+  Shop Web tests pass.
 
 - [ ] 8. Expose long-running debugger attachment through console actions.
   **Context:** Register `debug.attach SERVICE --listen ADDRESS` on the same
@@ -221,3 +228,7 @@ operational ownership to `cmd/grovlet`, built and run as `groveshop`.
 - 2026-09-16: Extracted the service-aware local DAP gateway from `cmd/grove`
   into `internal/debuggateway` so Grove Shop can own sessions without copying
   service-resolution or DAP protocol adaptation logic.
+- 2026-09-16: Grove Shop now owns the debug demo deployment. Its action starts
+  Web, Orders, Inventory, Payment, and Shipping on nodes 1-5 from the configured
+  application artifact and exposes worker IDs in the same status read model
+  consumed by TUI and automation.

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -26,6 +27,8 @@ import (
 
 var (
 	grovletPath           string
+	debugGrovletPath      string
+	delvePath             string
 	grovletArtifactDigest string
 )
 
@@ -1711,15 +1714,20 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	path, buildErr := grovetest.BuildGrovlet(ctx, buildDir)
+	debugPath, debugBuildErr := grovetest.BuildDebugGrovlet(ctx, buildDir)
+	delveCommand := exec.CommandContext(ctx, "go", "tool", "-n", "dlv")
+	delveOutput, delveErr := delveCommand.Output()
 	cancel()
-	if buildErr != nil {
-		fmt.Fprintln(os.Stderr, buildErr)
+	if err := errors.Join(buildErr, debugBuildErr, delveErr); err != nil {
+		fmt.Fprintln(os.Stderr, err)
 		_ = os.RemoveAll(buildDir)
 		os.Exit(1)
 	}
 	grovletPath = path
+	debugGrovletPath = debugPath
+	delvePath = strings.TrimSpace(string(delveOutput))
 	inspection, inspectErr := artifact.InspectFile(path)
 	if inspectErr != nil {
 		fmt.Fprintln(os.Stderr, inspectErr)

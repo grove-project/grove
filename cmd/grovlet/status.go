@@ -79,6 +79,7 @@ func buildGroveShopStatus(
 			nodeStatus.Components = append(nodeStatus.Components, groveshop.ComponentStatusView{
 				ServiceID: component.ServiceID,
 				Name:      component.Name,
+				WorkerID:  component.WorkerID,
 				State:     string(component.State),
 				Error:     component.Error,
 			})

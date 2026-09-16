@@ -61,6 +61,7 @@ type NodeStatusView struct {
 type ComponentStatusView struct {
 	ServiceID grove.ServiceID `json:"service_id"`
 	Name      string          `json:"name"`
+	WorkerID  string          `json:"worker_id"`
 	State     string          `json:"state"`
 	Error     string          `json:"error,omitempty"`
 }

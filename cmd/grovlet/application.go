@@ -54,6 +54,7 @@ type applicationCluster struct {
 	webAddress    string
 	artifact      artifact.Inspection
 	failedNodeID  string
+	debugDemo     bool
 }
 
 type rolloutActionResult struct {
@@ -90,6 +91,11 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 			Name: "rollout.start", Label: "New rollout", Section: "Deployments",
 			Description: "Build and roll out an immutable configured Grove Shop artifact.",
 			Handler:     controller.startRollout,
+		},
+		{
+			Name: "debug.demo.start", Label: "Debug demo > Start", Section: "Deployments",
+			Description: "Start the five-node Grove Shop debugging topology.",
+			Handler:     controller.startDebugDemo,
 		},
 		{
 			Name: "cluster.restart", Label: "Restart cluster", Section: "Cluster",

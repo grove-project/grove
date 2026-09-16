@@ -136,6 +136,8 @@ func resolveTUISelection(line string) (string, []string, bool) {
 			return "cluster.restart", nil, true
 		case parts[0] == "Deployments" && parts[1] == "New rollout" && len(parts) == 3 && parts[2] != "":
 			return "rollout.start", []string{"--config", parts[2]}, true
+		case len(parts) == 3 && parts[0] == "Deployments" && parts[1] == "Debug demo" && parts[2] == "Start":
+			return "debug.demo.start", nil, true
 		case parts[0] == "Application" && parts[1] == "Run resilience scenario" && len(parts) == 2:
 			return "resilience.run", nil, true
 		case parts[0] == "Application" && parts[1] == "Run integrity check" && len(parts) == 2:
