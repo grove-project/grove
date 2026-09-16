@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/grove-project/grove/console"
+	"github.com/grove-project/grove/demo/groveshop"
 )
 
 const consoleStateEnvironment = "GROVE_CONSOLE_STATE"
@@ -87,14 +88,14 @@ func runApplicationConsole(ctx context.Context, args []string, input io.Reader, 
 		case err := <-inputErr:
 			return err
 		case line := <-lines:
-			fields := strings.Fields(line)
-			if len(fields) == 0 {
+			action, actionArgs, ok := resolveTUISelection(line)
+			if !ok {
 				continue
 			}
-			if fields[0] == "q" || fields[0] == "quit" {
+			if action == "q" || action == "quit" {
 				return nil
 			}
-			result, err := tui.Select(ctx, fields[0], fields[1:])
+			result, err := tui.Select(ctx, action, actionArgs)
 			if err != nil {
 				fmt.Fprintf(output, "Error: %v\n", err)
 			} else if err := writeConsoleResult(output, result); err != nil {
@@ -115,12 +116,41 @@ func scanConsoleInput(input io.Reader, lines chan<- string, result chan<- error)
 	result <- scanner.Err()
 }
 
+func resolveTUISelection(line string) (string, []string, bool) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return "", nil, false
+	}
+	if len(fields) == 1 && (fields[0] == "q" || fields[0] == "quit") {
+		return fields[0], nil, true
+	}
+	parts := strings.Split(line, ">")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	if len(parts) >= 2 {
+		switch {
+		case parts[0] == "Cluster" && parts[1] == "Status" && len(parts) == 2:
+			return "cluster.status", nil, true
+		case parts[0] == "Cluster" && parts[1] == "Restart cluster" && len(parts) == 2:
+			return "cluster.restart", nil, true
+		case parts[0] == "Deployments" && parts[1] == "New rollout" && len(parts) == 3 && parts[2] != "":
+			return "rollout.start", []string{"--config", parts[2]}, true
+		case parts[0] == "Application" && parts[1] == "Run resilience scenario" && len(parts) == 2:
+			return "resilience.run", nil, true
+		case parts[0] == "Application" && parts[1] == "Run integrity check" && len(parts) == 2:
+			return groveshop.ActionVerifyOrders, nil, true
+		}
+	}
+	return fields[0], fields[1:], true
+}
+
 func renderApplicationTUI(ctx context.Context, tui *console.TUI, output io.Writer) error {
 	snapshot, err := tui.Render(ctx)
 	if err != nil {
 		return fmt.Errorf("render Grove Shop TUI: %w", err)
 	}
-	if _, err := io.WriteString(output, snapshot+"\nq Quit\n"); err != nil {
+	if _, err := io.WriteString(output, snapshot+"\nUse Section > Action > argument, or q Quit\n"); err != nil {
 		return fmt.Errorf("write Grove Shop TUI: %w", err)
 	}
 	return nil

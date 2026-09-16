@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +56,30 @@ func TestApplicationConsoleDispatchesStructuredActions(t *testing.T) {
 	}
 	if output := tuiOutput.String(); !strings.Contains(output, "GroveShop Grove Shop") || !strings.Contains(output, "Run integrity check") {
 		t.Errorf("TUI output = %q", output)
+	}
+}
+
+func TestResolveTUISelection(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantName string
+		wantArgs []string
+		wantOK   bool
+	}{
+		{name: "cluster status", input: "Cluster > Status", wantName: "cluster.status", wantOK: true},
+		{name: "new rollout", input: "Deployments > New rollout > configs/acme.yaml", wantName: "rollout.start", wantArgs: []string{"--config", "configs/acme.yaml"}, wantOK: true},
+		{name: "application action", input: "Application > Run integrity check", wantName: groveshop.ActionVerifyOrders, wantOK: true},
+		{name: "raw action fallback", input: "cluster.status", wantName: "cluster.status", wantOK: true},
+		{name: "blank", input: "   ", wantOK: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			name, args, ok := resolveTUISelection(test.input)
+			if name != test.wantName || !slices.Equal(args, test.wantArgs) || ok != test.wantOK {
+				t.Errorf("resolveTUISelection(%q) = (%q, %q, %t); want (%q, %q, %t)", test.input, name, args, ok, test.wantName, test.wantArgs, test.wantOK)
+			}
+		})
 	}
 }
 
@@ -148,6 +174,10 @@ func TestGroveShopBinaryRollsBackBrokenConfiguration(t *testing.T) {
 	if active.Status.ActiveArtifact.ConfigRevision != "acme-r42" || active.Status.Rollout == nil || active.Status.Rollout.Phase != string(systemnats.RolloutActive) {
 		t.Errorf("active artifact status = %#v rollout=%#v", active.Status.ActiveArtifact, active.Status.Rollout)
 	}
+	if applicationPlacementNodeFromStatus(active.Status, groveshop.ServiceOrders) != "node-1" || applicationPlacementNodeFromStatus(active.Status, groveshop.ServiceInventory) != "node-2" {
+		t.Errorf("initial placement = %#v; want Orders on node-1 and Inventory on node-2", active.Status.Placements)
+	}
+	assertGroveShopWebArtifact(t, ctx, active)
 	before, err := createApplicationOrder(ctx, strings.TrimPrefix(active.WebURL, "http://"), "console-before-rollback")
 	if err != nil || !applicationOrderCompleted(before) {
 		t.Fatalf("order before rollback = %#v, %v", before, err)
@@ -160,6 +190,9 @@ func TestGroveShopBinaryRollsBackBrokenConfiguration(t *testing.T) {
 	}
 	if !applicationStatusHealthy(actionStatus, active.Status.ActiveArtifact.ArtifactDigest) {
 		t.Errorf("cluster.status = %#v", actionStatus)
+	}
+	if _, err := io.WriteString(input, "Cluster > Status\n"); err != nil {
+		t.Fatal(err)
 	}
 	resilienceOutput := runGroveShopAction(t, ctx, statePath, "resilience.run")
 	var resilience resilienceActionResult
@@ -214,6 +247,55 @@ func TestGroveShopBinaryRollsBackBrokenConfiguration(t *testing.T) {
 	stopped = true
 	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("console state after lifecycle error = %v; want not exist", err)
+	}
+	for _, want := range []string{
+		"GroveShop Grove Shop", "Cluster  healthy", "Nodes    3 / 3 healthy", "Services 3 / 3 healthy",
+		"Services\n", "Nodes\n", "Deployments\n", "Configuration\n", "Logs\n", "Debug\n", "Application\n", "New rollout",
+	} {
+		if !strings.Contains(consoleOutput.String(), want) {
+			t.Errorf("application TUI output missing %q:\n%s", want, consoleOutput.String())
+		}
+	}
+}
+
+func assertGroveShopWebArtifact(t *testing.T, ctx context.Context, active rolloutActionResult) {
+	t.Helper()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, active.WebURL+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("GET Grove Shop UI: %v", err)
+	}
+	defer response.Body.Close()
+	page, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET Grove Shop UI status = %s: %s", response.Status, page)
+	}
+	wantPage, err := groveshop.WebAsset("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(page, wantPage) {
+		t.Error("Grove Shop UI does not serve the embedded index.html asset")
+	}
+	var configuration groveshop.RuntimeConfigurationView
+	if err := readApplicationJSON(ctx, active.WebURL+"/grove/config", &configuration); err != nil {
+		t.Fatalf("read Grove Shop runtime configuration: %v", err)
+	}
+	if configuration.Revision != active.Status.ActiveArtifact.ConfigRevision || configuration.ConfigDigest != active.Status.ActiveArtifact.ConfigDigest || configuration.CustomerName != "Acme Retail" || configuration.ReservationBuffer != 100 {
+		t.Errorf("Grove Shop runtime configuration = %#v", configuration)
+	}
+	var webStatus groveshop.ClusterStatusView
+	if err := readApplicationJSON(ctx, active.WebURL+"/grove/status", &webStatus); err != nil {
+		t.Fatalf("read Grove Shop Web status: %v", err)
+	}
+	if !applicationStatusHealthy(webStatus, active.Status.ActiveArtifact.ArtifactDigest) {
+		t.Errorf("Grove Shop Web status = %#v", webStatus)
 	}
 }
 

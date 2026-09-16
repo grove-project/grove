@@ -30,6 +30,7 @@ import (
 const (
 	applicationNodeCount         = 3
 	applicationConditionInterval = 25 * time.Millisecond
+	applicationOperationTimeout  = time.Minute
 )
 
 var (
@@ -113,6 +114,8 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 }
 
 func (c *applicationController) startRollout(ctx context.Context, args []string) (any, error) {
+	operationCtx, cancel := context.WithTimeout(ctx, applicationOperationTimeout)
+	defer cancel()
 	configPath, err := parseRolloutArguments(args)
 	if err != nil {
 		return nil, err
@@ -123,9 +126,9 @@ func (c *applicationController) startRollout(ctx context.Context, args []string)
 	deployed := c.cluster != nil
 	c.mu.RUnlock()
 	if !deployed {
-		return c.startKnownGood(ctx, configPath)
+		return c.startKnownGood(operationCtx, configPath)
 	}
-	return c.rejectBrokenCandidate(ctx, configPath)
+	return c.rejectBrokenCandidate(operationCtx, configPath)
 }
 
 func parseRolloutArguments(args []string) (string, error) {
@@ -146,6 +149,8 @@ func parseRolloutArguments(args []string) (string, error) {
 }
 
 func (c *applicationController) runResilience(ctx context.Context, args []string) (any, error) {
+	operationCtx, cancel := context.WithTimeout(ctx, applicationOperationTimeout)
+	defer cancel()
 	if len(args) != 0 {
 		return nil, errConsoleArguments
 	}
@@ -160,11 +165,11 @@ func (c *applicationController) runResilience(ctx context.Context, args []string
 	if cluster.failedNodeID != "" {
 		return nil, errors.New("restart the cluster before running another resilience scenario")
 	}
-	transport, err := systemnats.Connect(ctx, cluster.systemNATSURL)
+	transport, err := systemnats.Connect(operationCtx, cluster.systemNATSURL)
 	if err != nil {
 		return nil, fmt.Errorf("connect to Grove Shop cluster: %w", err)
 	}
-	placement, err := transport.RequestPlacement(ctx, "node-3")
+	placement, err := transport.RequestPlacement(operationCtx, "node-3")
 	if err != nil {
 		transport.Close()
 		return nil, fmt.Errorf("read Inventory placement: %w", err)
@@ -176,22 +181,22 @@ func (c *applicationController) runResilience(ctx context.Context, args []string
 		return nil, fmt.Errorf("Inventory host %q is not a managed Grovlet", failedNodeID)
 	}
 	transport.Close()
-	if err := cluster.nodes[failedIndex].Kill(ctx); err != nil {
+	if err := cluster.nodes[failedIndex].Kill(operationCtx); err != nil {
 		return nil, fmt.Errorf("kill Inventory host %s: %w", failedNodeID, err)
 	}
-	transport, err = systemnats.Connect(ctx, cluster.systemNATSURL)
+	transport, err = systemnats.Connect(operationCtx, cluster.systemNATSURL)
 	if err != nil {
 		return nil, fmt.Errorf("reconnect after Inventory host failure: %w", err)
 	}
 	defer transport.Close()
-	recoveredNodeID, err := waitForApplicationRecovery(ctx, transport, failedNodeID, cluster.artifact.ArtifactDigest)
+	recoveredNodeID, err := waitForApplicationRecovery(operationCtx, transport, failedNodeID, cluster.artifact.ArtifactDigest)
 	if err != nil {
 		return nil, fmt.Errorf("recover Inventory after node loss: %w\n%s", err, applicationDiagnostics(cluster.nodes))
 	}
-	if err := putApplicationDesired(ctx, transport, applicationDesiredDeployment(cluster.artifact, recoveredNodeID)); err != nil {
+	if err := putApplicationDesired(operationCtx, transport, applicationDesiredDeployment(cluster.artifact, recoveredNodeID)); err != nil {
 		return nil, err
 	}
-	order, err := createApplicationOrder(ctx, cluster.webAddress, "resilience-order")
+	order, err := waitForApplicationOrder(operationCtx, cluster.webAddress, "resilience-order")
 	if err != nil {
 		return nil, fmt.Errorf("run order after Inventory recovery: %w", err)
 	}
@@ -202,7 +207,7 @@ func (c *applicationController) runResilience(ctx context.Context, args []string
 	cluster.failedNodeID = failedNodeID
 	c.lastEvent = "Inventory recovered from " + failedNodeID + " on " + recoveredNodeID
 	c.mu.Unlock()
-	status, err := c.status(ctx)
+	status, err := c.status(operationCtx)
 	if err != nil {
 		return nil, fmt.Errorf("read recovered application status: %w", err)
 	}
@@ -212,6 +217,8 @@ func (c *applicationController) runResilience(ctx context.Context, args []string
 }
 
 func (c *applicationController) restartCluster(ctx context.Context, args []string) (any, error) {
+	operationCtx, cancel := context.WithTimeout(ctx, applicationOperationTimeout)
+	defer cancel()
 	if len(args) != 0 {
 		return nil, errConsoleArguments
 	}
@@ -227,7 +234,7 @@ func (c *applicationController) restartCluster(ctx context.Context, args []strin
 		if fmt.Sprintf("node-%d", i+1) == cluster.failedNodeID {
 			continue
 		}
-		if err := cluster.nodes[i].Stop(ctx); err != nil {
+		if err := cluster.nodes[i].Stop(operationCtx); err != nil {
 			return nil, fmt.Errorf("stop node-%d for durable restart: %w\n%s", i+1, err, applicationDiagnostics(cluster.nodes))
 		}
 	}
@@ -237,7 +244,7 @@ func (c *applicationController) restartCluster(ctx context.Context, args []strin
 		}
 	}
 	for i, node := range cluster.nodes {
-		if err := node.WaitReady(ctx); err != nil {
+		if err := node.WaitReady(operationCtx); err != nil {
 			return nil, fmt.Errorf("wait for restarted node-%d: %w\n%s", i+1, err, applicationDiagnostics(cluster.nodes))
 		}
 	}
@@ -250,7 +257,7 @@ func (c *applicationController) restartCluster(ctx context.Context, args []strin
 	cluster.failedNodeID = ""
 	c.lastEvent = "reconstructed deployment from durable state"
 	c.mu.Unlock()
-	status, err := c.waitForStatus(ctx, func(status groveshop.ClusterStatusView) bool {
+	status, err := c.waitForStatus(operationCtx, func(status groveshop.ClusterStatusView) bool {
 		return applicationStatusHealthy(status, cluster.artifact.ArtifactDigest)
 	})
 	if err != nil {
@@ -888,12 +895,39 @@ func applicationOrderCompleted(order groveshop.Order) bool {
 	})
 }
 
+// waitForApplicationOrder proves that the recovered placement can serve the
+// application call boundary, not merely that its component was observed as
+// healthy by the control plane.
+func waitForApplicationOrder(ctx context.Context, webAddress, orderID string) (groveshop.Order, error) {
+	ticker := time.NewTicker(applicationConditionInterval)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		order, err := createApplicationOrder(ctx, webAddress, orderID)
+		if err == nil {
+			return order, nil
+		}
+		lastErr = err
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return groveshop.Order{}, fmt.Errorf("wait for order %q: %w", orderID, errors.Join(lastErr, ctx.Err()))
+		}
+	}
+}
+
 func (c *applicationController) readModel(ctx context.Context) (console.Model, error) {
 	status, err := c.status(ctx)
 	if err != nil {
 		return console.Model{}, err
 	}
-	model := console.Model{Application: "Grove Shop", Health: status.Health, NodesTotal: len(status.Nodes), ServicesTotal: len(status.Placements)}
+	model := console.Model{
+		Application:   "Grove Shop",
+		Sections:      []string{"Cluster", "Services", "Nodes", "Deployments", "Configuration", "Logs", "Debug", "Application"},
+		Health:        status.Health,
+		NodesTotal:    len(status.Nodes),
+		ServicesTotal: len(status.Placements),
+	}
 	for _, node := range status.Nodes {
 		if node.Health == string(systemnats.HealthHealthy) {
 			model.NodesHealthy++
