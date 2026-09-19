@@ -25,6 +25,10 @@ func TestTUIRendersStateAndUsesRegisteredAction(t *testing.T) {
 			Application: "Grove Shop", Sections: []string{"Cluster", "Services", "Deployments", "Application"}, Health: "healthy",
 			NodesHealthy: 3, NodesTotal: 3, ServicesHealthy: 5, ServicesTotal: 5,
 			ActiveVersion: "v0.1.0", ConfigRevision: "acme-r42", CandidateRevision: "acme-r43", RolloutPhase: "pending",
+			IngressURL: "http://127.0.0.1:8080",
+			DebugSessions: []console.DebugSession{
+				{ServiceName: "Orders", NodeID: "node-2", WorkerID: "orders-1", DAPEndpoint: "127.0.0.1:40000"},
+			},
 			LastEvent: "inventory recovered on node-1",
 		}, nil
 	})
@@ -38,7 +42,7 @@ func TestTUIRendersStateAndUsesRegisteredAction(t *testing.T) {
 	for _, want := range []string{
 		"GroveShop Grove Shop", "Cluster  healthy", "Nodes    3 / 3 healthy",
 		"Services 5 / 5 healthy", "Version  v0.1.0", "Config   acme-r42",
-		"Candidate acme-r43", "Rollout  pending",
+		"Ingress  http://127.0.0.1:8080", "Debugger Orders node-2/orders-1 DAP 127.0.0.1:40000", "Candidate acme-r43", "Rollout  pending",
 		"inventory recovered on node-1", "Services", "Deployments", "New rollout  [rollout.start]",
 	} {
 		if !strings.Contains(snapshot, want) {

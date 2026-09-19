@@ -39,8 +39,20 @@ type Model struct {
 	CandidateRevision string
 	// RolloutPhase is the current durable deployment phase.
 	RolloutPhase string
+	// IngressURL is the application endpoint exposed by the active deployment.
+	IngressURL string
+	// DebugSessions are the active service-aware Delve/DAP tunnels.
+	DebugSessions []DebugSession
 	// LastEvent explains the latest operationally relevant state change.
 	LastEvent string
+}
+
+// DebugSession identifies one active local DAP tunnel and its remote worker.
+type DebugSession struct {
+	ServiceName string `json:"service_name"`
+	NodeID      string `json:"node_id"`
+	WorkerID    string `json:"worker_id"`
+	DAPEndpoint string `json:"dap_endpoint"`
 }
 
 // ModelReader returns the latest application-first console model.
@@ -88,6 +100,17 @@ func (t *TUI) render(ctx context.Context, selectedAction string) (string, error)
 	fmt.Fprintf(&output, "Services %d / %d healthy\n", model.ServicesHealthy, model.ServicesTotal)
 	fmt.Fprintf(&output, "Version  %s\n", displayValue(model.ActiveVersion))
 	fmt.Fprintf(&output, "Config   %s\n", displayValue(model.ConfigRevision))
+	fmt.Fprintf(&output, "Ingress  %s\n", displayValue(model.IngressURL))
+	for _, session := range model.DebugSessions {
+		fmt.Fprintf(
+			&output,
+			"Debugger %s %s/%s DAP %s\n",
+			displayValue(session.ServiceName),
+			displayValue(session.NodeID),
+			displayValue(session.WorkerID),
+			displayValue(session.DAPEndpoint),
+		)
+	}
 	if model.CandidateRevision != "" {
 		fmt.Fprintf(&output, "Candidate %s\n", model.CandidateRevision)
 	}

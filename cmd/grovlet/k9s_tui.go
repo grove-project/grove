@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 
@@ -12,8 +14,11 @@ import (
 )
 
 const (
-	applicationTUIRefreshInterval = 250 * time.Millisecond
-	applicationTUIDialogPage      = "dialog"
+	applicationTUIRefreshInterval  = 250 * time.Millisecond
+	applicationLogsRefreshInterval = 500 * time.Millisecond
+	applicationTUIDialogPage       = "dialog"
+	applicationTUILogsPage         = "logs"
+	applicationTUIIngressRegion    = "ingress"
 )
 
 type applicationTUI struct {
@@ -40,6 +45,11 @@ type applicationTUI struct {
 	busyStarted    time.Time
 	spinnerFrame   int
 	queueDraw      func(func())
+	ingressURL     string
+	openURL        func(string) error
+	logsView       *tview.TextView
+	logsOpen       bool
+	logsCancel     context.CancelFunc
 }
 
 func runInteractiveApplicationTUI(ctx context.Context, tui *console.TUI) error {
@@ -65,6 +75,7 @@ func newApplicationTUI(parent context.Context, tui *console.TUI) (*applicationTU
 		prompt:  tview.NewInputField(),
 		hints:   tview.NewTextView(),
 		actions: tui.Actions(),
+		openURL: openBrowser,
 	}
 	view.queueDraw = func(update func()) { view.app.QueueUpdateDraw(update) }
 	if len(view.actions) == 0 {
@@ -84,10 +95,12 @@ func newApplicationTUI(parent context.Context, tui *console.TUI) (*applicationTU
 
 func (v *applicationTUI) configure() {
 	v.header.SetDynamicColors(true)
+	v.header.SetRegions(true)
 	v.header.SetBorder(true)
 	v.header.SetTitle(" [::b]Grove Shop[-:-:-] ")
 	v.header.SetBorderColor(tcell.ColorDarkCyan)
 	v.header.SetBackgroundColor(tcell.ColorDefault)
+	v.header.SetMouseCapture(v.captureHeaderMouse)
 
 	v.table.SetBorder(true)
 	v.table.SetTitle(" [::b]Actions[-:-:-] ")
@@ -124,7 +137,7 @@ func (v *applicationTUI) configure() {
 
 	v.root = tview.NewFlex().SetDirection(tview.FlexRow)
 	v.root.SetBackgroundColor(tcell.ColorDefault)
-	v.root.AddItem(v.header, 4, 0, false)
+	v.root.AddItem(v.header, 5, 0, false)
 	v.root.AddItem(v.table, 0, 1, true)
 	v.root.AddItem(v.flash, 1, 0, false)
 	v.root.AddItem(v.prompt, 0, 0, false)
@@ -221,10 +234,68 @@ func (v *applicationTUI) updateModel(model console.Model) {
 	if model.RolloutPhase != "" {
 		second += "   [::b]ROLLOUT[-:-:-] " + model.RolloutPhase
 	}
-	v.header.SetText(first + "\n" + second)
+	v.ingressURL = model.IngressURL
+	third := "[::b]INGRESS[-:-:-] -"
+	if model.IngressURL != "" {
+		third = fmt.Sprintf(
+			"[::b]INGRESS[-:-:-] [\"%s\"][aqua::u]%s[-:-:-][\"\"]  [gray](click to open)[-:-:-]",
+			applicationTUIIngressRegion,
+			model.IngressURL,
+		)
+	}
+	lines := []string{first, second, third}
+	for _, session := range model.DebugSessions {
+		lines = append(lines, fmt.Sprintf(
+			"[purple::b]DLV[-:-:-] %s  [gray]%s/%s[-:-:-]  [aqua::b]DAP %s[-:-:-]",
+			tview.Escape(displayTUIValue(session.ServiceName)),
+			tview.Escape(displayTUIValue(session.NodeID)),
+			tview.Escape(displayTUIValue(session.WorkerID)),
+			tview.Escape(displayTUIValue(session.DAPEndpoint)),
+		))
+	}
+	v.root.ResizeItem(v.header, 5+len(model.DebugSessions), 0)
+	v.header.SetText(strings.Join(lines, "\n"))
 	if model.LastEvent != "" && !v.busy {
 		v.setFlash(tcell.ColorLightGray, model.LastEvent)
 	}
+}
+
+func (v *applicationTUI) captureHeaderMouse(
+	action tview.MouseAction,
+	event *tcell.EventMouse,
+) (tview.MouseAction, *tcell.EventMouse) {
+	if action != tview.MouseLeftClick || v.ingressURL == "" {
+		return action, event
+	}
+	x, y := event.Position()
+	innerX, innerY, _, _ := v.header.GetInnerRect()
+	urlStart := innerX + len("INGRESS ")
+	if y != innerY+2 || x < urlStart || x >= urlStart+len(v.ingressURL) {
+		return action, event
+	}
+	if err := v.openURL(v.ingressURL); err != nil {
+		v.setFlash(tcell.ColorOrangeRed, "Open ingress: "+err.Error())
+	} else {
+		v.setFlash(tcell.ColorGreen, "Opened "+v.ingressURL)
+	}
+	return action, nil
+}
+
+func openBrowser(url string) error {
+	var command *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		command = exec.Command("open", url)
+	case "windows":
+		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		command = exec.Command("xdg-open", url)
+	}
+	if err := command.Start(); err != nil {
+		return fmt.Errorf("launch system browser: %w", err)
+	}
+	go func() { _ = command.Wait() }()
+	return nil
 }
 
 func (v *applicationTUI) rebuildActions(filter string) {
@@ -292,7 +363,7 @@ func (v *applicationTUI) selectedAction() (console.Action, bool) {
 }
 
 func (v *applicationTUI) keyboard(event *tcell.EventKey) *tcell.EventKey {
-	if v.dialogOpen || v.app.GetFocus() == v.prompt {
+	if v.logsOpen || v.dialogOpen || v.app.GetFocus() == v.prompt {
 		return event
 	}
 	if event.Key() == tcell.KeyCtrlC {
@@ -304,6 +375,14 @@ func (v *applicationTUI) keyboard(event *tcell.EventKey) *tcell.EventKey {
 			v.rebuildActions("")
 			v.setFlash(tcell.ColorGray, "Filter cleared")
 		}
+		return nil
+	}
+	if event.Key() == tcell.KeyUp {
+		v.moveSelection(-1)
+		return nil
+	}
+	if event.Key() == tcell.KeyDown {
+		v.moveSelection(1)
 		return nil
 	}
 	if event.Key() == tcell.KeyEnter || event.Key() == tcell.KeyRight {
@@ -389,6 +468,10 @@ func (v *applicationTUI) activateAction(action console.Action, args []string) {
 		v.setFlash(tcell.ColorOrange, "An operation is already running")
 		return
 	}
+	if action.Name == "logs.view" {
+		v.showLogs()
+		return
+	}
 	if len(args) == 0 {
 		switch action.Name {
 		case "rollout.start":
@@ -414,8 +497,23 @@ func (v *applicationTUI) startAction(action console.Action, args []string) {
 		result, err := v.tui.Select(v.ctx, action.Name, args)
 		if err == nil {
 			if session, ok := result.(consoleActionSession); ok {
-				result = session.InitialResult()
+				initial := session.InitialResult()
+				v.queueUpdate(func() {
+					v.busy = false
+					v.busyAction = ""
+					v.setFlash(tcell.ColorGreen, strings.ReplaceAll(summarizeInteractiveResult(initial), "\n", " · "))
+				})
 				err = session.Wait(v.ctx)
+				if err != nil {
+					v.queueUpdate(func() {
+						v.setFlash(tcell.ColorOrangeRed, "Debugger session ended: "+err.Error())
+					})
+				} else {
+					v.queueUpdate(func() {
+						v.setFlash(tcell.ColorLightGray, "Debugger session disconnected")
+					})
+				}
+				return
 			}
 		}
 		message := ""
@@ -555,6 +653,135 @@ func (v *applicationTUI) showHelp() {
 	v.app.SetFocus(modal)
 }
 
+func (v *applicationTUI) showLogs() {
+	if v.logsOpen {
+		return
+	}
+	logsCtx, cancel := context.WithCancel(v.ctx)
+	view := tview.NewTextView()
+	view.SetDynamicColors(true)
+	view.SetScrollable(true)
+	view.SetWrap(false)
+	view.SetBorder(true)
+	view.SetBorderColor(tcell.ColorDarkCyan)
+	view.SetBorderFocusColor(tcell.ColorAqua)
+	view.SetTitle(" [::b]Logs and health diagnostics[-:-:-] ")
+	view.SetText("[aqua::b]Loading application, cluster, and System NATS diagnostics…[-:-:-]")
+	view.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Key() == tcell.KeyEscape || (event.Key() == tcell.KeyRune && event.Rune() == 'q') {
+			v.closeLogs()
+			return nil
+		}
+		if event.Key() == tcell.KeyRune && event.Rune() == 'r' {
+			go v.refreshLogs(logsCtx)
+			return nil
+		}
+		return event
+	})
+	v.logsView = view
+	v.logsOpen = true
+	v.logsCancel = cancel
+	v.pages.AddPage(applicationTUILogsPage, view, true, true)
+	v.app.SetFocus(view)
+	go v.watchLogs(logsCtx)
+}
+
+func (v *applicationTUI) watchLogs(ctx context.Context) {
+	ticker := time.NewTicker(applicationLogsRefreshInterval)
+	defer ticker.Stop()
+	for {
+		v.refreshLogs(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+func (v *applicationTUI) refreshLogs(ctx context.Context) {
+	attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	result, err := v.tui.Select(attemptCtx, "logs.view", nil)
+	cancel()
+	text := ""
+	if err != nil {
+		text = "[orangered::b]Unable to read logs[-:-:-]\n" + tview.Escape(err.Error())
+	} else if logs, ok := result.(applicationLogsView); ok {
+		text = renderApplicationLogs(logs)
+	} else {
+		text = "[orangered::b]Logs action returned an unexpected result[-:-:-]"
+	}
+	v.queueUpdate(func() {
+		if !v.logsOpen || v.logsView == nil {
+			return
+		}
+		row, column := v.logsView.GetScrollOffset()
+		v.logsView.SetText(text)
+		v.logsView.ScrollTo(row, column)
+	})
+}
+
+func (v *applicationTUI) closeLogs() {
+	if v.logsCancel != nil {
+		v.logsCancel()
+	}
+	v.pages.RemovePage(applicationTUILogsPage)
+	v.logsView = nil
+	v.logsOpen = false
+	v.logsCancel = nil
+	v.app.SetFocus(v.table)
+}
+
+func renderApplicationLogs(logs applicationLogsView) string {
+	var output strings.Builder
+	healthColor := "green"
+	if logs.Health != "healthy" {
+		healthColor = "orangered"
+	}
+	fmt.Fprintf(
+		&output,
+		"[::b]HEALTH[-:-:-] [%s::b]%s[-:-:-]    [gray]auto-refresh 500ms · ↑/↓ scroll · r refresh · q/esc back[-:-:-]\n\n",
+		healthColor,
+		strings.ToUpper(displayTUIValue(logs.Health)),
+	)
+	if len(logs.Causes) == 0 {
+		output.WriteString("[green::b]WHY HEALTHY[-:-:-]\n  No active health failures.\n")
+	} else if logs.Health == "healthy" {
+		output.WriteString("[orange::b]RECENT FAILURE / RECOVERY[-:-:-]\n")
+		for _, cause := range logs.Causes {
+			fmt.Fprintf(&output, "  [orange]•[-] %s\n", tview.Escape(cause))
+		}
+	} else {
+		output.WriteString("[orangered::b]WHY NOT HEALTHY[-:-:-]\n")
+		for _, cause := range logs.Causes {
+			fmt.Fprintf(&output, "  [orangered]•[-] %s\n", tview.Escape(cause))
+		}
+	}
+	var debugLines []string
+	for _, session := range logs.DebugSessions {
+		debugLines = append(debugLines, fmt.Sprintf(
+			"service=%s node=%s worker=%s dap=%s",
+			session.ServiceName, session.NodeID, session.WorkerID, session.DAPEndpoint,
+		))
+	}
+	writeApplicationLogSection(&output, "ACTIVE DELVE / DAP SESSIONS", debugLines)
+	writeApplicationLogSection(&output, "APPLICATION", logs.Application)
+	writeApplicationLogSection(&output, "CLUSTER", logs.Cluster)
+	writeApplicationLogSection(&output, "SYSTEM NATS / CONTROL PLANE", logs.SystemNATS)
+	return output.String()
+}
+
+func writeApplicationLogSection(output *strings.Builder, title string, lines []string) {
+	fmt.Fprintf(output, "\n[aqua::b]%s[-:-:-]\n", title)
+	if len(lines) == 0 {
+		output.WriteString("  [gray]No entries captured.[-:-:-]\n")
+		return
+	}
+	for _, line := range lines {
+		fmt.Fprintf(output, "  %s\n", tview.Escape(line))
+	}
+}
+
 func (v *applicationTUI) closeDialog() {
 	v.pages.RemovePage(applicationTUIDialogPage)
 	v.dialogOpen = false
@@ -598,6 +825,7 @@ func hotkeyLabel(action string) string {
 		'x': "resilience.run",
 		'D': "debug.demo.start",
 		'a': "debug.attach",
+		'l': "logs.view",
 		'v': "app.orders.verify",
 	} {
 		if action == name {
@@ -615,6 +843,7 @@ func actionForHotkey(key rune) (string, bool) {
 		'x': "resilience.run",
 		'D': "debug.demo.start",
 		'a': "debug.attach",
+		'l': "logs.view",
 		'v': "app.orders.verify",
 	}[key]
 	return action, ok
@@ -622,7 +851,7 @@ func actionForHotkey(key rune) (string, bool) {
 
 func k9sHintLine() string {
 	return "[aqua::b]<enter>[-:-:-] Run  [aqua::b]<d>[-:-:-] Deploy  [aqua::b]<s>[-:-:-] Status  " +
-		"[aqua::b]<x>[-:-:-] Resilience  [aqua::b]<R>[-:-:-] Restart\n" +
+		"[aqua::b]<x>[-:-:-] Resilience  [aqua::b]<R>[-:-:-] Restart  [aqua::b]<l>[-:-:-] Logs\n" +
 		"[aqua::b]<:>[-:-:-] Command  [aqua::b]</>[-:-:-] Filter  [aqua::b]<?>[-:-:-] Help  " +
 		"[aqua::b]<esc>[-:-:-] Back  [aqua::b]<q>[-:-:-] Quit"
 }

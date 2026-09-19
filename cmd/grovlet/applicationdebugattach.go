@@ -6,8 +6,11 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"sort"
+	"sync"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/console"
 	"github.com/grove-project/grove/internal/debuggateway"
 	"github.com/grove-project/grove/internal/systemnats"
 )
@@ -26,8 +29,18 @@ type debugAttachResult struct {
 
 type debugAttachAction struct {
 	result    debugAttachResult
-	session   *debuggateway.Session
-	transport *systemnats.Transport
+	session   debugAttachSession
+	transport debugAttachTransport
+	onDone    func()
+	doneOnce  sync.Once
+}
+
+type debugAttachSession interface {
+	Wait(context.Context) error
+}
+
+type debugAttachTransport interface {
+	Close()
 }
 
 func (a *debugAttachAction) InitialResult() any {
@@ -35,6 +48,7 @@ func (a *debugAttachAction) InitialResult() any {
 }
 
 func (a *debugAttachAction) Wait(ctx context.Context) error {
+	defer a.doneOnce.Do(a.onDone)
 	defer a.transport.Close()
 	return a.session.Wait(ctx)
 }
@@ -63,15 +77,58 @@ func (c *applicationController) attachDebugger(ctx context.Context, args []strin
 		return nil, err
 	}
 	target := session.Target
+	result := debugAttachResult{
+		ServiceID: target.ServiceID, ServiceName: target.ServiceName,
+		NodeID: target.NodeID, WorkerID: target.WorkerID,
+		ArtifactDigest: target.ArtifactDigest, CodeVersion: target.CodeVersion,
+		DAPEndpoint: session.Address,
+	}
+	sessionKey := c.registerDebugSession(result)
 	return &debugAttachAction{
-		result: debugAttachResult{
-			ServiceID: target.ServiceID, ServiceName: target.ServiceName,
-			NodeID: target.NodeID, WorkerID: target.WorkerID,
-			ArtifactDigest: target.ArtifactDigest, CodeVersion: target.CodeVersion,
-			DAPEndpoint: session.Address,
-		},
-		session: session, transport: transport,
+		result: result, session: session, transport: transport,
+		onDone: func() { c.unregisterDebugSession(sessionKey) },
 	}, nil
+}
+
+func (c *applicationController) registerDebugSession(result debugAttachResult) string {
+	key := result.ServiceName + "\x00" + result.DAPEndpoint
+	c.mu.Lock()
+	if c.debugSessions == nil {
+		c.debugSessions = make(map[string]console.DebugSession)
+	}
+	c.debugSessions[key] = console.DebugSession{
+		ServiceName: result.ServiceName,
+		NodeID:      result.NodeID,
+		WorkerID:    result.WorkerID,
+		DAPEndpoint: result.DAPEndpoint,
+	}
+	c.lastEvent = fmt.Sprintf("debugger ready: %s on %s at %s", result.ServiceName, result.NodeID, result.DAPEndpoint)
+	c.mu.Unlock()
+	return key
+}
+
+func (c *applicationController) unregisterDebugSession(key string) {
+	c.mu.Lock()
+	session, exists := c.debugSessions[key]
+	delete(c.debugSessions, key)
+	if exists {
+		c.lastEvent = fmt.Sprintf("debugger disconnected: %s on %s", session.ServiceName, session.NodeID)
+	}
+	c.mu.Unlock()
+}
+
+func copyDebugSessions(sessions map[string]console.DebugSession) []console.DebugSession {
+	result := make([]console.DebugSession, 0, len(sessions))
+	for _, session := range sessions {
+		result = append(result, session)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].ServiceName != result[j].ServiceName {
+			return result[i].ServiceName < result[j].ServiceName
+		}
+		return result[i].DAPEndpoint < result[j].DAPEndpoint
+	})
+	return result
 }
 
 func parseDebugAttachArguments(args []string) (string, string, error) {

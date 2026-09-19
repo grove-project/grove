@@ -143,6 +143,14 @@ func summarizeInteractiveResult(result any) string {
 		)
 	case debugDemoActionResult:
 		return fmt.Sprintf("Debug demo: %s\nWeb UI: %s", value.State, value.WebURL)
+	case debugAttachResult:
+		return fmt.Sprintf(
+			"Debugger ready: %s on %s/%s\nDAP: %s",
+			value.ServiceName,
+			value.NodeID,
+			value.WorkerID,
+			value.DAPEndpoint,
+		)
 	case groveshop.ClusterStatusView:
 		return fmt.Sprintf("Cluster: %s\nNodes: %d\nServices: %d", value.Health, len(value.Nodes), len(value.Placements))
 	}

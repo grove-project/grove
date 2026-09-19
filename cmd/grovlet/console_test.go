@@ -325,6 +325,15 @@ func runGroveShopLifecycleDemo(t *testing.T) {
 	if final := rollback.Status; !applicationStatusHealthy(final, active.Status.ActiveArtifact.ArtifactDigest) || final.Rollout == nil || final.Rollout.Phase != string(systemnats.RolloutRolledBack) || final.Rollout.Failure == nil || final.Rollout.Failure.Field != "inventory.reservation_buffer" {
 		t.Errorf("rolled-back status = %#v", final)
 	}
+	logsOutput := runGroveShopAction(t, ctx, statePath, "logs.view")
+	var logs applicationLogsView
+	if err := json.Unmarshal(logsOutput, &logs); err != nil {
+		t.Fatalf("decode logs view %q: %v", logsOutput, err)
+	}
+	if len(logs.Application) == 0 || len(logs.Cluster) == 0 || len(logs.SystemNATS) == 0 ||
+		!containsApplicationLogLine(logs.Causes, "inventory.reservation_buffer") {
+		t.Fatalf("logs view = %#v; want application, cluster, System NATS, and rollback diagnostics", logs)
+	}
 	after, err := createApplicationOrder(ctx, strings.TrimPrefix(active.WebURL, "http://"), "console-after-rollback")
 	if err != nil || !applicationOrderCompleted(after) {
 		t.Fatalf("order after rollback = %#v, %v", after, err)

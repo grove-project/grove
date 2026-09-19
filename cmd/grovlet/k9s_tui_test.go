@@ -60,10 +60,90 @@ func TestApplicationTUIHandlesK9sStyleNavigation(t *testing.T) {
 	}
 	view.closeDialog()
 
-	header := view.header.GetText(true)
-	if !strings.Contains(header, "HEALTHY") || !strings.Contains(header, "3/3") {
-		t.Fatalf("status header = %q; want healthy node and service counts", header)
+	var openedURL string
+	view.openURL = func(url string) error {
+		openedURL = url
+		return nil
 	}
+	view.header.SetRect(0, 0, 120, 5)
+	mouseCapture := view.header.GetMouseCapture()
+	_, event := mouseCapture(
+		tview.MouseLeftClick,
+		tcell.NewEventMouse(10, 3, tcell.ButtonPrimary, tcell.ModNone),
+	)
+	if openedURL != "http://127.0.0.1:8080" {
+		t.Fatalf("opened URL = %q; want app ingress", openedURL)
+	}
+	if event != nil {
+		t.Fatal("ingress click was forwarded instead of consumed")
+	}
+	if action, ok := actionForHotkey('l'); !ok || action != "logs.view" {
+		t.Fatalf("logs hotkey = (%q, %t); want logs.view", action, ok)
+	}
+
+	header := view.header.GetText(true)
+	if !strings.Contains(header, "HEALTHY") || !strings.Contains(header, "3/3") ||
+		!strings.Contains(header, "http://127.0.0.1:8080") ||
+		!strings.Contains(header, "Orders") || !strings.Contains(header, "127.0.0.1:40000") {
+		t.Fatalf("status header = %q; want health counts and ingress URL", header)
+	}
+}
+
+type blockingApplicationTUISession struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingApplicationTUISession) InitialResult() any {
+	return debugAttachResult{
+		ServiceName: "Orders", NodeID: "node-2", WorkerID: "orders-1",
+		DAPEndpoint: "127.0.0.1:40000",
+	}
+}
+
+func (s *blockingApplicationTUISession) Wait(ctx context.Context) error {
+	close(s.started)
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestApplicationTUIDebugAttachBecomesReadyWithoutWaitingForDisconnect(t *testing.T) {
+	session := &blockingApplicationTUISession{started: make(chan struct{}), release: make(chan struct{})}
+	var registry console.Registry
+	if err := registry.Register(console.Action{
+		Name: "debug.attach", Label: "Attach debugger", Section: "Debug",
+		Handler: func(context.Context, []string) (any, error) { return session, nil },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tui, err := console.NewTUI(&registry, func(context.Context) (console.Model, error) {
+		return console.Model{Application: "Grove Shop", Health: "healthy"}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := newApplicationTUI(t.Context(), tui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view.queueDraw = func(update func()) { update() }
+	view.activateActionName("debug.attach", []string{"orders", "--listen", "127.0.0.1:40000"})
+	select {
+	case <-session.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("debug session did not begin waiting for its DAP client")
+	}
+	waitForApplicationTUI(t, "debug endpoint to become ready", func() bool {
+		return !view.busy && strings.Contains(view.flash.GetText(true), "127.0.0.1:40000")
+	})
+	close(session.release)
+	waitForApplicationTUI(t, "debug session disconnect", func() bool {
+		return strings.Contains(view.flash.GetText(true), "disconnected")
+	})
 }
 
 func TestApplicationTUIRefreshesDuringRollout(t *testing.T) {
@@ -123,6 +203,7 @@ func newTestApplicationTUI(t *testing.T, rollout console.Handler) *console.TUI {
 		{Name: "cluster.restart", Label: "Restart cluster", Section: "Cluster", Handler: func(context.Context, []string) (any, error) { return nil, nil }},
 		{Name: "cluster.status", Label: "Status", Section: "Cluster", Handler: func(context.Context, []string) (any, error) { return nil, nil }},
 		{Name: "debug.demo.start", Label: "Debug demo", Section: "Deployments", Handler: func(context.Context, []string) (any, error) { return nil, nil }},
+		{Name: "logs.view", Label: "View logs", Section: "Logs", Handler: func(context.Context, []string) (any, error) { return applicationLogsView{}, nil }},
 		{Name: "rollout.start", Label: "New rollout", Section: "Deployments", Handler: rollout},
 	}
 	for _, action := range actions {
@@ -141,6 +222,10 @@ func newTestApplicationTUI(t *testing.T, rollout console.Handler) *console.TUI {
 			ServicesTotal:   3,
 			ActiveVersion:   "v1",
 			ConfigRevision:  "sha256:active",
+			IngressURL:      "http://127.0.0.1:8080",
+			DebugSessions: []console.DebugSession{
+				{ServiceName: "Orders", NodeID: "node-2", WorkerID: "orders-1", DAPEndpoint: "127.0.0.1:40000"},
+			},
 		}, nil
 	})
 	if err != nil {

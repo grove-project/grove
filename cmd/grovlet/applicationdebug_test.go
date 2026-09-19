@@ -21,6 +21,7 @@ import (
 
 	"github.com/google/go-dap"
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/console"
 	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/internal/systemnats"
 )
@@ -142,6 +143,15 @@ func runGroveShopDebuggingDemo(t *testing.T) {
 	if _, err := waitForDebugApplicationStates(ctx, statePath, wantDebugging); err != nil {
 		t.Fatalf("observe independent debug sessions: %v; console=%s", err, consoleOutput.String())
 	}
+	logsOutput := runDebugApplicationAction(t, ctx, statePath, "logs.view")
+	var activeLogs applicationLogsView
+	if err := json.Unmarshal(logsOutput, &activeLogs); err != nil {
+		t.Fatalf("decode active debugger logs %q: %v", logsOutput, err)
+	}
+	if !hasApplicationDebugSession(activeLogs.DebugSessions, "Orders", "node-2", "orders-1", ordersAddress) ||
+		!hasApplicationDebugSession(activeLogs.DebugSessions, "Payment", "node-4", "payment-1", paymentAddress) {
+		t.Fatalf("active debugger sessions = %#v; want Orders and Payment DAP endpoints", activeLogs.DebugSessions)
+	}
 
 	sourcePath, ordersLine, paymentLine := applicationDebugBreakpointLocations(t)
 	ordersDAP := connectApplicationDAPClient(t, ctx, ordersAddress)
@@ -200,6 +210,14 @@ func runGroveShopDebuggingDemo(t *testing.T) {
 	if !debugApplicationStatusHealthy(finalStatus, result.Status.ActiveArtifact.ArtifactDigest) {
 		t.Fatalf("final debug demo status = %#v; want healthy", finalStatus)
 	}
+	logsOutput = runDebugApplicationAction(t, ctx, statePath, "logs.view")
+	var finalLogs applicationLogsView
+	if err := json.Unmarshal(logsOutput, &finalLogs); err != nil {
+		t.Fatalf("decode final debugger logs %q: %v", logsOutput, err)
+	}
+	if len(finalLogs.DebugSessions) != 0 {
+		t.Fatalf("active debugger sessions after disconnect = %#v; want none", finalLogs.DebugSessions)
+	}
 	if _, err := io.WriteString(input, "q\n"); err != nil {
 		t.Fatal(err)
 	}
@@ -210,6 +228,15 @@ func runGroveShopDebuggingDemo(t *testing.T) {
 	if output := consoleOutput.String(); !strings.Contains(output, "Debug demo > Start") {
 		t.Errorf("debug demo TUI action missing: %s", output)
 	}
+}
+
+func hasApplicationDebugSession(sessions []console.DebugSession, service, node, worker, endpoint string) bool {
+	for _, session := range sessions {
+		if session.ServiceName == service && session.NodeID == node && session.WorkerID == worker && session.DAPEndpoint == endpoint {
+			return true
+		}
+	}
+	return false
 }
 
 type runningDebugApplicationAction struct {

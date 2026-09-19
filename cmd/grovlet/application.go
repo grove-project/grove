@@ -40,12 +40,13 @@ var (
 )
 
 type applicationController struct {
-	binaryPath  string
-	runtimeDir  string
-	operationMu sync.Mutex
-	mu          sync.RWMutex
-	cluster     *applicationCluster
-	lastEvent   string
+	binaryPath    string
+	runtimeDir    string
+	operationMu   sync.Mutex
+	mu            sync.RWMutex
+	cluster       *applicationCluster
+	lastEvent     string
+	debugSessions map[string]console.DebugSession
 }
 
 type applicationCluster struct {
@@ -72,7 +73,10 @@ type resilienceActionResult struct {
 }
 
 func newApplicationController(binaryPath, runtimeDir string) *applicationController {
-	return &applicationController{binaryPath: binaryPath, runtimeDir: runtimeDir}
+	return &applicationController{
+		binaryPath: binaryPath, runtimeDir: runtimeDir,
+		debugSessions: make(map[string]console.DebugSession),
+	}
 }
 
 func registerApplicationConsoleActions(registry *console.Registry, controller *applicationController) error {
@@ -106,6 +110,11 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 			Name: "resilience.run", Label: "Run resilience scenario", Section: "Application",
 			Description: "Recover Inventory after its hosting Grovlet fails, then rerun an order.",
 			Handler:     controller.runResilience,
+		},
+		{
+			Name: "logs.view", Label: "View logs", Section: "Logs",
+			Description: "Explain health using application, cluster, and System NATS diagnostics.",
+			Handler:     controller.logs,
 		},
 		{
 			Name: "debug.attach", Label: "Attach debugger", Section: "Debug",
@@ -962,7 +971,7 @@ func (c *applicationController) readModel(ctx context.Context) (console.Model, e
 		}
 	}
 	for _, placement := range status.Placements {
-		if placement.Health == string(systemnats.ComponentHealthy) {
+		if placement.Health == string(systemnats.ComponentHealthy) || placement.Health == string(systemnats.ComponentDebugging) {
 			model.ServicesHealthy++
 		}
 	}
@@ -978,6 +987,10 @@ func (c *applicationController) readModel(ctx context.Context) (console.Model, e
 	}
 	c.mu.RLock()
 	model.LastEvent = c.lastEvent
+	if c.cluster != nil && c.cluster.webAddress != "" {
+		model.IngressURL = "http://" + c.cluster.webAddress
+	}
+	model.DebugSessions = copyDebugSessions(c.debugSessions)
 	c.mu.RUnlock()
 	return model, nil
 }
@@ -1009,6 +1022,7 @@ func (c *applicationController) close() {
 	c.mu.Lock()
 	cluster := c.cluster
 	c.cluster = nil
+	clear(c.debugSessions)
 	c.mu.Unlock()
 	if cluster != nil {
 		cleanupApplicationNodes(cluster.nodes)
