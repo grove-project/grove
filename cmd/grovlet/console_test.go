@@ -225,9 +225,10 @@ func TestGroveShopBinaryRunsConsoleActionsAndNodeRuntime(t *testing.T) {
 	}
 }
 
-// Application-native actions drive the known-good deployment and retain it
-// after an invalid Inventory candidate is rejected.
-func TestGroveShopBinaryRollsBackBrokenConfiguration(t *testing.T) {
+// runGroveShopLifecycleDemo drives the non-debug portion of the documented
+// application demo. It remains a helper so the complete demo is accepted by
+// one production-shaped E2E rather than by independent tests.
+func runGroveShopLifecycleDemo(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
 	statePath := filepath.Join(t.TempDir(), "console.json")

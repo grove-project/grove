@@ -35,6 +35,10 @@ type Model struct {
 	ActiveVersion string
 	// ConfigRevision is the active embedded configuration revision.
 	ConfigRevision string
+	// CandidateRevision is the candidate embedded configuration revision.
+	CandidateRevision string
+	// RolloutPhase is the current durable deployment phase.
+	RolloutPhase string
 	// LastEvent explains the latest operationally relevant state change.
 	LastEvent string
 }
@@ -63,6 +67,16 @@ func NewTUI(registry *Registry, readModel ModelReader) (*TUI, error) {
 // Render returns a deterministic terminal snapshot of current application
 // state and all registered contextual actions.
 func (t *TUI) Render(ctx context.Context) (string, error) {
+	return t.render(ctx, "")
+}
+
+// RenderSelected returns a terminal snapshot with one action marked as the
+// current keyboard selection.
+func (t *TUI) RenderSelected(ctx context.Context, selectedAction string) (string, error) {
+	return t.render(ctx, selectedAction)
+}
+
+func (t *TUI) render(ctx context.Context, selectedAction string) (string, error) {
 	model, err := t.readModel(ctx)
 	if err != nil {
 		return "", fmt.Errorf("read console model: %w", err)
@@ -74,6 +88,12 @@ func (t *TUI) Render(ctx context.Context) (string, error) {
 	fmt.Fprintf(&output, "Services %d / %d healthy\n", model.ServicesHealthy, model.ServicesTotal)
 	fmt.Fprintf(&output, "Version  %s\n", displayValue(model.ActiveVersion))
 	fmt.Fprintf(&output, "Config   %s\n", displayValue(model.ConfigRevision))
+	if model.CandidateRevision != "" {
+		fmt.Fprintf(&output, "Candidate %s\n", model.CandidateRevision)
+	}
+	if model.RolloutPhase != "" {
+		fmt.Fprintf(&output, "Rollout  %s\n", model.RolloutPhase)
+	}
 	if model.LastEvent != "" {
 		fmt.Fprintf(&output, "Last event\n  %s\n", model.LastEvent)
 	}
@@ -89,11 +109,25 @@ func (t *TUI) Render(ctx context.Context) (string, error) {
 		fmt.Fprintf(&output, "\n%s\n", section)
 		for _, action := range actions {
 			if action.Section == section {
-				fmt.Fprintf(&output, "  %s  [%s]\n", action.Label, action.Name)
+				marker := "  "
+				if action.Name == selectedAction {
+					marker = "> "
+				}
+				fmt.Fprintf(&output, "%s%s  [%s]\n", marker, action.Label, action.Name)
 			}
 		}
 	}
 	return output.String(), nil
+}
+
+// Actions returns the ordered actions available for keyboard navigation.
+func (t *TUI) Actions() []Action {
+	return t.registry.Actions()
+}
+
+// ReadModel returns the latest application state for interactive frontends.
+func (t *TUI) ReadModel(ctx context.Context) (Model, error) {
+	return t.readModel(ctx)
 }
 
 // Select dispatches one human TUI selection through the same registered

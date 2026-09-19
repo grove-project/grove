@@ -15,6 +15,7 @@ import (
 
 	"github.com/grove-project/grove/console"
 	"github.com/grove-project/grove/demo/groveshop"
+	"golang.org/x/term"
 )
 
 const consoleStateEnvironment = "GROVE_CONSOLE_STATE"
@@ -81,6 +82,12 @@ func runApplicationConsole(ctx context.Context, args []string, input io.Reader, 
 	}
 	defer removeConsoleConnection(connection)
 
+	if inputFile, inputOK := input.(*os.File); inputOK {
+		if outputFile, outputOK := output.(*os.File); outputOK &&
+			term.IsTerminal(int(inputFile.Fd())) && term.IsTerminal(int(outputFile.Fd())) {
+			return runInteractiveApplicationTUI(ctx, tui)
+		}
+	}
 	if err := renderApplicationTUI(ctx, tui, output); err != nil {
 		return err
 	}
@@ -121,6 +128,29 @@ func runApplicationConsole(ctx context.Context, args []string, input io.Reader, 
 			}
 		}
 	}
+}
+
+func summarizeInteractiveResult(result any) string {
+	switch value := result.(type) {
+	case rolloutActionResult:
+		return fmt.Sprintf("Rollout: %s\nWeb UI: %s", value.State, value.WebURL)
+	case resilienceActionResult:
+		return fmt.Sprintf(
+			"Inventory recovered: %s -> %s\nOrder: %s",
+			value.FailedNodeID,
+			value.RecoveredNodeID,
+			value.Order.Status,
+		)
+	case debugDemoActionResult:
+		return fmt.Sprintf("Debug demo: %s\nWeb UI: %s", value.State, value.WebURL)
+	case groveshop.ClusterStatusView:
+		return fmt.Sprintf("Cluster: %s\nNodes: %d\nServices: %d", value.Health, len(value.Nodes), len(value.Placements))
+	}
+	encoded, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("%v", result)
+	}
+	return string(encoded)
 }
 
 func scanConsoleInput(input io.Reader, lines chan<- string, result chan<- error) {

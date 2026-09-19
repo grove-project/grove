@@ -131,15 +131,24 @@ func (c *applicationController) startRollout(ctx context.Context, args []string)
 	if err != nil {
 		return nil, err
 	}
+	c.setLastEvent("rollout: validating " + filepath.Base(configPath))
 	c.operationMu.Lock()
 	defer c.operationMu.Unlock()
 	c.mu.RLock()
 	deployed := c.cluster != nil
 	c.mu.RUnlock()
 	if !deployed {
-		return c.startKnownGood(operationCtx, configPath)
+		result, rolloutErr := c.startKnownGood(operationCtx, configPath)
+		if rolloutErr != nil {
+			c.setLastEvent("rollout failed: " + rolloutErr.Error())
+		}
+		return result, rolloutErr
 	}
-	return c.rejectBrokenCandidate(operationCtx, configPath)
+	result, rolloutErr := c.rejectBrokenCandidate(operationCtx, configPath)
+	if rolloutErr != nil {
+		c.setLastEvent("rollout failed: " + rolloutErr.Error())
+	}
+	return result, rolloutErr
 }
 
 func parseRolloutArguments(args []string) (string, error) {
@@ -282,11 +291,13 @@ func (c *applicationController) startKnownGood(ctx context.Context, configPath s
 	if err != nil {
 		return rolloutActionResult{}, fmt.Errorf("compile known-good configuration: %w", err)
 	}
+	c.setLastEvent("rollout: building configured artifact " + compilation.Revision)
 	artifactPath := filepath.Join(c.runtimeDir, "groveshop-active")
 	inspection, err := artifact.EmbedFile(c.binaryPath, artifactPath, compilation)
 	if err != nil {
 		return rolloutActionResult{}, fmt.Errorf("build known-good Grove Shop artifact: %w", err)
 	}
+	c.setLastEvent("rollout: starting three Grovlets")
 	cluster, err := startApplicationCluster(ctx, artifactPath, inspection)
 	if err != nil {
 		return rolloutActionResult{}, err
@@ -302,6 +313,7 @@ func (c *applicationController) startKnownGood(ctx context.Context, configPath s
 		return rolloutActionResult{}, fmt.Errorf("connect to Grove Shop cluster: %w", err)
 	}
 	defer transport.Close()
+	c.setLastEvent("rollout: waiting for service placement")
 	if err := waitForApplicationPlacement(ctx, transport, inspection.ArtifactDigest); err != nil {
 		return rolloutActionResult{}, fmt.Errorf("wait for Grove Shop placement: %w\n%s", err, applicationDiagnostics(cluster.nodes))
 	}
@@ -313,6 +325,7 @@ func (c *applicationController) startKnownGood(ctx context.Context, configPath s
 	if err := transport.PutDeploymentArtifact(ctx, "node-1", record); err != nil {
 		return rolloutActionResult{}, fmt.Errorf("record known-good artifact: %w", err)
 	}
+	c.setLastEvent("rollout: activating " + inspection.Config.Revision)
 	active := applicationRollout(1, record.ClusterID, record.ArtifactDigest, "", systemnats.RolloutActive)
 	if err := transport.PutRollout(ctx, "node-2", active); err != nil {
 		return rolloutActionResult{}, fmt.Errorf("activate known-good rollout: %w", err)
@@ -348,6 +361,7 @@ func (c *applicationController) rejectBrokenCandidate(ctx context.Context, confi
 	if err != nil {
 		return rolloutActionResult{}, err
 	}
+	c.setLastEvent("rollout: building candidate " + compilation.Revision)
 	candidatePath := filepath.Join(c.runtimeDir, "groveshop-candidate")
 	inspection, err := artifact.EmbedFile(c.binaryPath, candidatePath, compilation)
 	if err != nil {
@@ -359,6 +373,7 @@ func (c *applicationController) rejectBrokenCandidate(ctx context.Context, confi
 	}
 	defer transport.Close()
 	candidate := applicationArtifactRecord(inspection)
+	c.setLastEvent("rollout: recording candidate " + inspection.Config.Revision)
 	if err := transport.PutDeploymentArtifact(ctx, "node-1", candidate); err != nil {
 		return rolloutActionResult{}, fmt.Errorf("record candidate artifact: %w", err)
 	}
@@ -373,6 +388,7 @@ func (c *applicationController) rejectBrokenCandidate(ctx context.Context, confi
 	if err != nil {
 		return rolloutActionResult{}, fmt.Errorf("observe pending candidate: %w", err)
 	}
+	c.setLastEvent("rollout: starting candidate Inventory")
 	candidateNode, err := grovetest.StartNode(
 		candidatePath,
 		"--node-id", "node-2-candidate",
@@ -400,6 +416,7 @@ func (c *applicationController) rejectBrokenCandidate(ctx context.Context, confi
 		Code: "candidate_startup_failed", Component: "Inventory",
 		Field: validation.Field, Message: validation.Message,
 	}
+	c.setLastEvent("rollout: candidate unhealthy; rolling back")
 	_, err = systemnats.NewDeployments().RollbackFailedUpgrade(ctx, transport, pending, routes, failure)
 	if err != nil {
 		return rolloutActionResult{}, fmt.Errorf("rollback failed candidate: %w", err)
@@ -953,10 +970,22 @@ func (c *applicationController) readModel(ctx context.Context) (console.Model, e
 		model.ActiveVersion = status.ActiveArtifact.CodeVersion
 		model.ConfigRevision = status.ActiveArtifact.ConfigRevision
 	}
+	if status.CandidateArtifact != nil {
+		model.CandidateRevision = status.CandidateArtifact.ConfigRevision
+	}
+	if status.Rollout != nil {
+		model.RolloutPhase = status.Rollout.Phase
+	}
 	c.mu.RLock()
 	model.LastEvent = c.lastEvent
 	c.mu.RUnlock()
 	return model, nil
+}
+
+func (c *applicationController) setLastEvent(event string) {
+	c.mu.Lock()
+	c.lastEvent = event
+	c.mu.Unlock()
 }
 
 func cleanupApplicationNodes(nodes []*grovetest.Node) {

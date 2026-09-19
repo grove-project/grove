@@ -68,9 +68,9 @@ func TestDebugApplicationStatusHealthy(t *testing.T) {
 	}
 }
 
-// The Grove Shop artifact itself owns the topology that subsequent debugger
-// actions inspect; no external deployment command prepares the cluster.
-func TestGroveShopApplicationDebugsOrdersAndPaymentWorkers(t *testing.T) {
+// runGroveShopDebuggingDemo exercises the documented two-worker Delve/DAP
+// sequence. The complete-demo E2E calls it after the rollout lifecycle.
+func runGroveShopDebuggingDemo(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	statePath := filepath.Join(t.TempDir(), "console.json")

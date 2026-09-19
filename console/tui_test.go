@@ -24,7 +24,7 @@ func TestTUIRendersStateAndUsesRegisteredAction(t *testing.T) {
 		return console.Model{
 			Application: "Grove Shop", Sections: []string{"Cluster", "Services", "Deployments", "Application"}, Health: "healthy",
 			NodesHealthy: 3, NodesTotal: 3, ServicesHealthy: 5, ServicesTotal: 5,
-			ActiveVersion: "v0.1.0", ConfigRevision: "acme-r42",
+			ActiveVersion: "v0.1.0", ConfigRevision: "acme-r42", CandidateRevision: "acme-r43", RolloutPhase: "pending",
 			LastEvent: "inventory recovered on node-1",
 		}, nil
 	})
@@ -38,11 +38,19 @@ func TestTUIRendersStateAndUsesRegisteredAction(t *testing.T) {
 	for _, want := range []string{
 		"GroveShop Grove Shop", "Cluster  healthy", "Nodes    3 / 3 healthy",
 		"Services 5 / 5 healthy", "Version  v0.1.0", "Config   acme-r42",
+		"Candidate acme-r43", "Rollout  pending",
 		"inventory recovered on node-1", "Services", "Deployments", "New rollout  [rollout.start]",
 	} {
 		if !strings.Contains(snapshot, want) {
 			t.Errorf("Render() = %q; want %q", snapshot, want)
 		}
+	}
+	selectedSnapshot, err := tui.RenderSelected(t.Context(), "rollout.start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(selectedSnapshot, "> New rollout  [rollout.start]") {
+		t.Errorf("RenderSelected() = %q; want selected rollout marker", selectedSnapshot)
 	}
 	result, err := tui.Select(t.Context(), "rollout.start", []string{"configs/acme.yaml"})
 	if err != nil {
