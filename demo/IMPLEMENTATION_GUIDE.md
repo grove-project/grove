@@ -52,13 +52,16 @@ Use deterministic test conditions for MVP rather than depending on external netw
 - Task 031 proves order success before the bad deployment and again after rollback.
 
 ### Final debugging proof
-- Task 032 adds Delve/DAP as the final MVP task.
+- Task 032 establishes the external Delve/DAP transport and target-resolution foundation.
+- The canonical human debugging experience is now the native Grove Shop TUI described in `demo/DEBUGGING_DEMO.md`; external DAP remains an interoperability and automation surface rather than the headline experience.
+- The debug-capable artifact embeds the exact application source plus source/symbol metadata needed to navigate from registered Grove operations to source. Source protection is future work.
 - Read `docs/adr/009-dap-debugging-interface.md`, `docs/developer-experience/debugging.md`, and `demo/DEBUGGING_DEMO.md` before implementing it.
-- Run Grove Shop for this scenario as five Grovlets with one service per node: Web, Orders, Inventory, Payment, Shipping.
-- Every service must execute in a dedicated worker process for the debugging scenario.
-- The demo must attach **two independent debugger sessions concurrently** to workers on different nodes. The canonical targets are Orders on node-2 and Payment on node-4.
+- The lifecycle demo uses the three-node cluster already created by starting the same Grove Shop binary in three terminals. Debugging must use the current service placement after rollout and node-failure recovery.
+- The native TUI must demonstrate debugging at least two services currently placed on different nodes.
+- The operator begins from a real order's observed Grove call flow. Because main application operations are registered with Grove and cross-service invocation uses `grove.Call`, Grove already knows the semantic application boundaries and should present the registered operations that actually executed as natural breakpoint suggestions.
+- External acceptance may still attach two independent ordinary DAP sessions to different workers to prove interoperability.
 - Grove must resolve service -> node -> worker itself. The user must not find or supply PIDs, remote node addresses, or remote Delve ports.
-- The first implementation is a discovery/tunnel layer around ordinary Delve DAP sessions. Do not build a stateful multi-process DAP multiplexer for the MVP.
+- Delve remains the debugging engine. The TUI debug experience and external DAP endpoints must share Grove's debug manager/target resolution; do not reimplement Go debugging semantics.
 - While a worker is intentionally paused by a debugger, Grove supervision must use explicit deterministic debug-session semantics so the breakpoint is not mistaken for an ordinary worker failure.
 - Task 032 is not DONE until the exact human workflow documented in `demo/DEBUGGING_DEMO.md` has been executed successfully against the implementation in addition to the automated DAP E2E and `go test ./...`.
 
@@ -179,12 +182,17 @@ A config-only change must first be embedded into a new immutable artifact and th
 
 There must not be a separately required `grove` executable for normal application operation.
 
-The debugging portion should be TUI-first:
+The debugging portion is TUI-native and runtime-guided:
 
 ```text
-Services > orders > Instances > node-2 > Debug > Attach
-Services > payment > Instances > node-4 > Debug > Attach
+Debug > Last flow
+  > orders.CreateOrder      Enter -> source   Space -> Grove breakpoint
+  > payments.Charge         Enter -> source   Space -> Grove breakpoint
 ```
+
+After the next order hits a breakpoint, the TUI switches to a paused debug layout with source as the dominant pane and contextual Locals/Stack/Goroutines/Breakpoints/Trace panes. Keyboard navigation, stepping, expression evaluation, and arbitrary source breakpoints are defined in `demo/DEBUGGING_DEMO.md`.
+
+The operator must be able to continue from a breakpoint in one service and later stop in another service on another node without discovering or changing node/PID/port details.
 
 For automated acceptance, use the equivalent application-binary actions:
 
@@ -210,6 +218,6 @@ These actions should execute using the application's own packages, embedded conf
 ## Scope discipline
 Do not implement general-purpose placement scoring, affinity/anti-affinity, or a sophisticated scheduler merely to support placement validation or the one-service-per-node debug demo. MVP only needs the hard eligibility boundary plus deterministic demo placement.
 
-For debugging, do not implement DAP multiplexing, cross-service single-step semantics, global breakpoint fan-out, or an IDE-specific plugin. Two independent ordinary DAP sessions are enough for the MVP proof.
+For debugging, do not implement synthetic cross-service instruction-level step-into or an IDE-specific plugin. Grove may coordinate semantic Grove breakpoint intent across services, while Delve remains responsible for actual Go breakpoints, stack/locals/goroutines, expression evaluation, and stepping. External DAP support remains required.
 
 Do not add storefront complexity, authentication, external payment providers, databases, or frontend frameworks merely to make the sample feel realistic. The demo should remain deterministic, fast, and easy to E2E test.
