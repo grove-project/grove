@@ -114,6 +114,24 @@ After confirmation:
 
 The newly launched candidate process is a bootstrap/deployment participant for this flow; starting it must not silently change the intended stable node count merely because it was used to introduce a new build.
 
+### Stable ingress continuity during rollout
+
+A rollout changes the application build, not the application's externally visible network identity. The Grove-managed ingress endpoint and port belong to the running cluster/application and must remain stable before, during, and after rollout.
+
+For the demo, keep the Grove Shop browser open on the same URL and ingress port for the entire rollout. The Web UI must continue polling cluster state and the Orders UI must remain usable while old- and new-build workers coexist and services migrate. The operator must not change the browser URL, reconnect to a new port, or restart the client to observe the new build.
+
+Ingress must route requests according to the active rollout state while preserving the same externally visible listener. Candidate startup must not attempt to replace the cluster ingress with a new public port.
+
+Acceptance/E2E coverage must prove that:
+- the ingress address/port is identical before and after rollout;
+- requests continue through that same endpoint during mixed-version rollout;
+- the browser/client does not reconnect to a different endpoint;
+- existing functionality remains reachable during rollout;
+- after cutover, the new build/feature is observable through that same endpoint;
+- rollback, when exercised, also preserves the endpoint.
+
+This continuity should be demonstrated alongside the synchronized Cluster TUI views: the TUIs visibly show the build moving across the cluster while the browser remains continuously connected to the same application endpoint.
+
 This behavior is part of the demo contract and must be covered by deterministic acceptance/E2E tests, including multiple observers of the shared Cluster read model.
 
 ## UI implementation guidance
