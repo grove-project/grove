@@ -32,7 +32,7 @@ Implement the initial ADR-009 model only:
 6. The human target-selection flow is available from the Grove Shop TUI.
 7. The same debugger attach capability is exposed as a structured action from the Grove Shop binary for automation and deterministic tests.
 
-Do **not** implement a synthetic multi-process DAP multiplexer, cross-service step-into, global breakpoint fan-out, or debugger-state ID rewriting.
+Do **not** implement a synthetic multi-process DAP multiplexer, cross-service instruction-level step-into, or debugger-state ID rewriting. The native TUI may coordinate semantic Grove breakpoint intent across services while Delve remains the debugging engine.
 
 ## Grove Shop deployment shape
 For this task, the debugging demo deployment is deliberately topology-explicit. Run the five Grove Shop services on five dedicated Grovlets so that each service has a distinct node/worker target:
@@ -102,6 +102,216 @@ The TUI must use the same underlying action/operation rather than implementing a
 15. Disconnect both debugger sessions.
 16. Verify both workers return to normal supervision and the cluster remains healthy in the TUI/read model.
 
+## Native TUI screen contracts
+
+The native Grove Shop debugger is the primary human experience. External DAP endpoints remain supported, but the TUI must expose the same underlying Grove debug manager and Delve state.
+
+### 1. Observed flow / breakpoint suggestions
+
+After an order executes, `Debug > Last flow` shows the registered Grove operations that actually participated in that request. Grove already knows these semantic boundaries from service registration and `grove.Call`; do not infer the primary application flow from raw profiling.
+
+```text
+ GROVE / DEBUG / LAST FLOW                         POST /orders · 184ms
+──────────────────────────────────────────────────────────────────────────────
+
+ EXECUTED GROVE CALLS                         SUGGESTED BREAKPOINTS
+───────────────────────────────────────┬──────────────────────────────────────
+ web.PlaceOrder             node-1     │ [ ] web.PlaceOrder
+       │                               │ [◆] orders.CreateOrder
+       ▼                               │ [◆] inventory.Reserve
+ orders.CreateOrder         node-2     │ [◆] payments.Charge
+       │                               │
+       ├──── inventory.Reserve node-1  │
+       │                               │
+       └──── payments.Charge   node-2  │
+───────────────────────────────────────┴──────────────────────────────────────
+ j/k navigate   Enter source   Space breakpoint   a recommended   t trace
+```
+
+Node identities above are illustrative. The screen must always render current placement.
+
+`Enter` on a registered operation opens its embedded source. `Space` toggles a semantic Grove breakpoint identified by service/method identity rather than a hard-coded node or source line.
+
+### 2. Source navigation
+
+Source is the dominant debugging pane. Navigation is keyboard-first and organized around application semantics rather than directory traversal.
+
+```text
+ GROVE / DEBUG / SOURCE                         orders · node-2 · worker-7
+──────────────────────────────────────────────────────────────────────────────
+
+ FILES / SYMBOLS              internal/orders/service.go
+─────────────────────┬────────────────────────────────────────────────────────
+ orders              │  39   order := newOrder(req)
+   service.go        │  40
+   repository.go     │◆ 41   if err := s.reserve(ctx, order); err != nil {
+                     │  42       return nil, err
+ payments            │  43   }
+   service.go        │  44
+   gateway.go        │▶ 45   receipt, err := s.charge(ctx, order)
+                     │  46   if err != nil {
+ inventory           │  47       return nil, err
+   service.go        │  48   }
+─────────────────────┴────────────────────────────────────────────────────────
+ orders.CreateOrder · service.go:45 · BP:1
+──────────────────────────────────────────────────────────────────────────────
+ j/k move  Space breakpoint  Enter follow  / search  Ctrl-P source  @ symbols
+```
+
+Required navigation:
+- `Ctrl-P`: fuzzy search files, packages, services, types, functions, and methods;
+- `@`: symbols in the current file;
+- `/`, `n`, `N`: text search and next/previous result;
+- `:<line>`: go to line;
+- `gg` / `G`: file top/bottom;
+- `Enter`: follow a resolvable symbol or registered Grove call destination;
+- `Alt-Left` / `Alt-Right`: source-navigation history;
+- `Space`: toggle a source/Grove breakpoint as appropriate.
+
+A selected `grove.Call` should be able to navigate directly to the registered destination implementation instead of forcing the user through Grove transport plumbing.
+
+### 3. Breakpoint list
+
+```text
+ GROVE / DEBUG / BREAKPOINTS
+──────────────────────────────────────────────────────────────────────────────
+
+ ◆ orders.CreateOrder       service.go:41     all instances
+ ◆ payments.Charge          service.go:91     all instances
+ ● gateway.go:143           payments          source breakpoint
+
+──────────────────────────────────────────────────────────────────────────────
+ j/k select   Enter source   Space enable/disable   x remove   Esc back
+```
+
+`◆` denotes a semantic Grove breakpoint. `●` denotes an arbitrary source breakpoint.
+
+### 4. Paused source + locals
+
+When a breakpoint hits, the TUI automatically switches to the paused debugger. Source remains dominant and Locals becomes the default contextual pane.
+
+```text
+ GROVE / DEBUG                    PAUSED ●  payments / node-2 / worker-7
+──────────────────────────────────────────────────────────────────────────────
+
+ service.go                                     LOCALS
+─────────────────────────────────────────┬────────────────────────────────────
+  88 func (s *Service) Charge(           │ req *ChargeRequest
+  89     ctx context.Context,             │ ├─ OrderID    "O-184"
+  90     req ChargeRequest,               │ ├─ Amount     149.00
+▶ 91 ) error {                            │ └─ Currency   "USD"
+  92     payment := newPayment(req)       │
+  93                                      │ payment *Payment
+  94     err := s.gateway.Charge(...)     │ ├─ Status     "pending"
+                                          │ └─ ...
+─────────────────────────────────────────┴────────────────────────────────────
+ payments.Charge · service.go:91 · goroutine 231
+──────────────────────────────────────────────────────────────────────────────
+ F5 continue  F10 over  F11 into  ⇧F11 out  v locals  s stack  g goroutines
+```
+
+Pressing `v` focuses Locals. `j/k` moves between values and `Enter` expands/collapses structs, pointers, slices, maps, and nested values.
+
+### 5. Stack context
+
+```text
+ CONTEXT / STACK
+────────────────────────────────────────
+ > payments.Charge          service.go:91
+   payments.Handle          handler.go:72
+   grove.rpc.invoke         rpc.go:182
+   grove.worker.run         worker.go:94
+────────────────────────────────────────
+ j/k frame   Enter/open   v locals
+```
+
+Changing the selected frame updates both the source pane and locals for that frame.
+
+### 6. Goroutines
+
+```text
+ CONTEXT / GOROUTINES
+────────────────────────────────────────
+ > 231  stopped   payments.Charge
+   114  waiting   nats.(*Conn).readLoop
+    88  waiting   runtime.gopark
+────────────────────────────────────────
+ j/k select   Enter stack
+```
+
+### 7. Expression evaluation
+
+```text
+┌─ Evaluate ──────────────────────────────────────────────┐
+│ > req.Amount * 1.17                                    │
+│                                                       │
+│ 174.33                                                │
+└───────────────────────────────────────────────────────┘
+```
+
+`e` opens evaluation while paused. Evaluation is backed by Delve; Grove must not implement Go expression semantics.
+
+### 8. Trace/flow ↔ source navigation
+
+The contextual `t` view preserves the runtime path that led to the debugging session:
+
+```text
+ TRACE / OBSERVED FLOW
+────────────────────────────────────────────────────────
+ POST /orders
+ │
+ ├─ web.PlaceOrder              node-1
+ ├─ orders.CreateOrder          node-2
+ ├─ inventory.Reserve           node-1
+ └─ payments.Charge             node-2   ← current
+────────────────────────────────────────────────────────
+ j/k select   Enter source   Space breakpoint
+```
+
+Selecting an operation and pressing `Enter` opens its source. This navigation must work in both directions: observed flow -> source and paused source -> flow.
+
+### 9. Cross-node debugging proof
+
+The demo must visibly prove that node placement is not part of the debugging workflow:
+
+```text
+orders.CreateOrder
+node-1 / worker-3
+      │
+      │ F5 continue
+      ▼
+payments.Charge
+node-2 / worker-7
+```
+
+The TUI changes source, locals, stack, worker, and node context automatically. The user does not reconnect, choose another Delve port, discover a PID, or open a second native debugger.
+
+### Keyboard contract summary
+
+```text
+j/k          navigate
+h/l          pane / collapse / expand
+Enter        open / follow / expand
+Space        toggle breakpoint
+Ctrl-P       source/symbol search
+@            current-file symbols
+/            source search
+b            breakpoints
+t            trace / observed flow
+s            stack
+v            locals
+g            goroutines
+e            evaluate
+F5           continue
+F10          step over
+F11          step into
+Shift-F11    step out
+Alt-Left     navigation back
+Alt-Right    navigation forward
+```
+
+These screens are behavioral contracts, not pixel-perfect layouts. Implementations may adapt dimensions to terminal size, but the information hierarchy, keyboard-first workflow, and source/flow/debug relationships must remain recognizable.
+
 ## Automated acceptance
 Add a deterministic Go E2E that validates everything Grove owns without requiring a GUI IDE:
 
@@ -128,7 +338,7 @@ Use a small DAP test client from Go or a narrowly scoped test helper. Do not req
 - No manual node discovery.
 - No direct remote Delve port exposure.
 - No DAP multiplexer in this task.
-- No cross-service single-step semantics.
+- No synthetic cross-service instruction-level single-step semantics.
 - No fixed sleeps in E2E tests.
 - Preserve all tests from tasks 001-031.
 
