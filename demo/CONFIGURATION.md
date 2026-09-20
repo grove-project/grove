@@ -1,10 +1,12 @@
 # Grove Shop Embedded Configuration Demo
 
 ## Purpose
-The MVP must visibly prove Grove's embedded customer-configuration model and show that configuration participates in the same immutable deployment and rollback lifecycle as application code.
+Configuration is part of the Grove Shop immutable artifact. A configuration change therefore follows exactly the same rollout path as a code change.
+
+There is no special human-facing "config deployment" mechanism.
 
 ## Good configuration
-Use a simple customer-specific YAML file such as:
+Use a customer-specific YAML source such as:
 
 ```yaml
 customer:
@@ -14,10 +16,9 @@ inventory:
   reservation_buffer: 100
 ```
 
-The exact schema may evolve, but at least one value must influence normal application behavior and be visible through the running application or status UI.
+At least one value must influence normal application behavior and be visible through the running application or status metadata.
 
 ## Broken configuration
-The demo also includes a deliberately invalid configuration:
 
 ```yaml
 customer:
@@ -27,88 +28,76 @@ inventory:
   reservation_buffer: -1
 ```
 
-Inventory must treat a negative reservation buffer as invalid and fail deterministically during candidate startup/initialization.
+Inventory treats a negative reservation buffer as invalid and fails deterministically during candidate startup/initialization. Grove marks the candidate unhealthy and rejects it.
 
-The failure may be implemented as a returned fatal startup error or a process/component crash depending on the component model available at that stage. The important observable behavior is that Grove marks the candidate unhealthy and rejects it.
-
-Do not implement a hidden `crash=true` switch as the primary scenario. The failure should come from a plausible invalid application configuration value.
+Do not use a hidden `crash=true` switch as the primary scenario.
 
 ## Artifact semantics
-Configuration is embedded after compilation into a reserved region of the Grove application binary/artifact.
-
-Conceptually:
+Configuration is embedded into the Grove application artifact before it is introduced to the cluster:
 
 ```text
-go build
-   |
-   v
-base Grove Shop binary
-   |
-   +-- embed configs/acme.yaml
-   |       -> Artifact A
-   |
-   `-- embed configs/acme-broken.yaml
-           -> Artifact B
+application code
+      |
+    build
+      v
+Grove Shop binary
+      |
+      +-- embed config A -> Artifact A
+      |
+      `-- embed config B -> Artifact B
 ```
 
-Each resulting artifact is immutable for deployment purposes.
+Every resulting artifact is immutable for deployment purposes. Artifact identity must include the embedded configuration so A and B differ even when code is identical.
 
-Artifact identity must distinguish the good and broken artifacts even when the application code version is identical.
+A code change, config change, or both simply produces another artifact:
+
+```text
+same application identity + different artifact identity -> rollout candidate
+```
+
+## Human workflow
+The configuration source may be prepared/embedded by build tooling, but rollout begins by running the resulting artifact, exactly as for a code change:
+
+```bash
+# produce artifact with desired embedded config
+./bin/groveshop-new
+```
+
+The process discovers the existing Grove Shop cluster. Because application identity matches and artifact identity differs, the TUI offers **Roll out this build**.
+
+Do not make `Deployments > New rollout > <config-file>` or `rollout.start --config ...` the headline workflow. Those forms incorrectly imply that configuration has a separate deployment path.
+
+Structured config compile/embed/extract actions may exist for build automation, inspection, and tests, but the deployment input is the resulting immutable artifact.
 
 ## Rollback semantics
-Rollback always means returning to the previous complete known-good artifact:
 
 ```text
-Artifact A
-app version N + UI + config A
-       |
-       | active
-       v
-Artifact B
-app version N + UI + config B
-       |
-       | candidate fails
-       v
-reject B
-retain/restore Artifact A
+Artifact A: code N + config A  ACTIVE
+                 |
+Artifact B: code N + config B  CANDIDATE
+                 |
+          config B invalid
+                 |
+        candidate rejected
+                 |
+Artifact A                    ACTIVE
 ```
 
-Do not repair Artifact B by mutating its config in place. Do not copy only the previous config value back into the candidate.
+Rollback restores/retains the previous complete known-good artifact. Grove must not mutate candidate config in place or copy only an old config value into the candidate.
 
-## Application console workflow
-The developer experience is one application binary, not a separately required
-Grove CLI:
+## Stable ingress and shared observability
+The browser remains on the same Grove-managed ingress address/port throughout a config-only rollout and rollback, exactly as for a code rollout.
 
-```bash
-go build -o ./bin/groveshop ./cmd/grovlet
-./bin/groveshop
-```
+Every open Cluster TUI view must show the same candidate artifact/config identity, validation failure, rollback reason, and final active artifact. The browser status pane observes the same read model.
 
-```text
-Deployments > New rollout > configs/acme.yaml
-Deployments > New rollout > configs/acme-broken.yaml
-```
+Raw secrets or arbitrary configuration contents must never be displayed.
 
-For scripts, CI, and automated tests, invoke the same registered actions from
-that binary:
-
-```bash
-./bin/groveshop action rollout.start --config configs/acme.yaml
-./bin/groveshop action rollout.start --config configs/acme-broken.yaml
-```
-
-The action form reaches the same rollout implementation as the contextual TUI
-selection. Lower-level config compile/embed/extract commands remain inspection
-and test tools, not part of the headline demo.
-
-## Required observability
-The Cluster Status UI should make the configuration lifecycle visible through stable metadata, for example:
-- active artifact identity,
-- candidate artifact identity,
-- active config revision/hash/name,
-- candidate config revision/hash/name,
-- candidate component failure,
-- rollback reason,
-- final active known-good artifact.
-
-The UI should not display secrets or arbitrary raw configuration contents.
+## Acceptance
+Tests must prove that a config-only artifact change:
+- is detected as a different artifact of the same application;
+- enters the ordinary rollout path;
+- is visible simultaneously to multiple Cluster observers;
+- preserves the public ingress endpoint;
+- can fail health validation;
+- rolls back the complete artifact;
+- leaves the previous application/config healthy and reachable through the same endpoint.
