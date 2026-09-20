@@ -30,7 +30,6 @@ DEMO-001 is part of the immediate demo focus but is dependency-gated until stabl
 | [ROLLOUT-001](rollout/ROLLOUT-001-startup-candidate-detection.md) Startup candidate detection | rollout | todo | CLUSTER-001 |
 | [DEBUG-002](debugging/DEBUG-002-runtime-guided-debug-tui.md) Runtime-guided Debug TUI | debugging | todo | DEBUG-001 |
 | [NET-001](networking/NET-001-stable-ingress-rollout.md) Stable ingress through rollout | networking | todo | ROLLOUT-001 |
-| [DEMO-002](demo/DEMO-002-load-generator-tui.md) Load generator TUI | demo | todo | DEMO-001 |
 
 ## LATER / dependency-gated
 
@@ -38,21 +37,21 @@ DEMO-001 is part of the immediate demo focus but is dependency-gated until stabl
 | --- | --- | --- | --- |
 | [ROLLOUT-002](rollout/ROLLOUT-002-config-as-artifact-rollout.md) Config as artifact rollout | rollout | todo | ROLLOUT-001, NET-001 |
 | [DEBUG-003](debugging/DEBUG-003-native-paused-debugger.md) Native paused debugger | debugging | todo | DEBUG-002 |
-| [TEST-001](testing/TEST-001-killer-demo-e2e.md) Killer demo E2E | testing | todo | TUI-001, ROLLOUT-002, DEBUG-003, DEMO-002 |
+| [TEST-001](testing/TEST-001-killer-demo-e2e.md) Killer demo E2E | testing | todo | TUI-001, ROLLOUT-002, DEBUG-003, DEMO-001 |
 
 ## Dependency shape
 
 ```text
 CLUSTER-001 ──┬─> TUI-001
               └─> ROLLOUT-001 ─> NET-001 ─┬─> ROLLOUT-002
-                                          └─> DEMO-001 ─> DEMO-002
+                                          └─> DEMO-001
 
 DEBUG-001 ─> DEBUG-002 ─> DEBUG-003
 
 TUI-001 ───────────────┐
 ROLLOUT-002 ───────────┤
 DEBUG-003 ─────────────┼─> TEST-001
-DEMO-002 ──────────────┘
+DEMO-001 ──────────────┘
 ```
 
 ## Status vocabulary
