@@ -72,6 +72,20 @@ Automated or manual proof required.
 
 Keep examples and acceptance behavior more prominent than long prose.
 
+## Human-facing UX contracts
+
+If a task changes something a human sees or operates, the task spec must show the intended experience before implementation begins.
+
+Add a `## TUI contract`, `## CLI contract`, `## Browser contract`, or more general `## Human contract` as appropriate. Prefer concrete ASCII screens, terminal transcripts, commands, keyboard interactions, and state transitions over prose-only descriptions.
+
+The example is a behavioral contract, not a pixel-perfect mandate: rendering may adapt to terminal dimensions, but information hierarchy, available actions, terminology, and important transitions must remain recognizable.
+
+A human-facing task is underspecified if an implementer cannot answer **what should the user actually see and do?** from the task file alone.
+
+For TUI flows, show important states rather than only the happy-path screen—for example discovery, steady state, recovery, rollout, paused debugging, or failure when those states are part of the task.
+
+Do not expose Grove implementation details such as NATS addresses, worker PIDs, or node-local Delve ports merely because they are convenient to implement.
+
 ## Workstreams
 
 Use these stable directories for new tasks:
