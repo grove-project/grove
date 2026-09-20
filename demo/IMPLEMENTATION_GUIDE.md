@@ -61,6 +61,61 @@ Use deterministic test conditions for MVP rather than depending on external netw
 - While a worker is intentionally paused by a debugger, Grove supervision must use explicit deterministic debug-session semantics so the breakpoint is not mistaken for an ordinary worker failure.
 - Task 032 is not DONE until the exact human workflow documented in `demo/DEBUGGING_DEMO.md` has been executed successfully against the implementation in addition to the automated DAP E2E and `go test ./...`.
 
+## Startup discovery, cluster join, and rollout UX
+
+The Grove Shop application binary must make startup intent implicit from discovery and binary identity. The operator should not need separate cluster-create, node-join, or deploy commands for the headline demo.
+
+Grove must distinguish:
+- **Application identity**: stable across builds of the same Grove application.
+- **Build identity**: identifies the exact built artifact/version.
+
+On startup, the process discovers reachable Grove clusters for the same application identity:
+- If no matching cluster exists, the first process bootstraps a new cluster.
+- If a matching cluster exists and its build identity matches the local binary, the TUI immediately suggests joining that cluster. Joining is the primary/default action; creating a second cluster for the same application is an explicit secondary/advanced action.
+- If a matching cluster exists but the build identity differs, the TUI treats the local binary as a rollout candidate and immediately suggests rolling that build out to the existing cluster.
+- Unrelated Grove applications must not be presented as join or rollout targets.
+
+For the canonical three-node demo, the intended human workflow is therefore: start the exact same Grove Shop binary in three terminals. The first instance creates the cluster; the second and third discover it and require only confirmation in the TUI to join. Do not require the operator to enter NATS addresses, PIDs, Grove-specific join flags, or other runtime implementation details.
+
+### Shared Cluster TUI view
+
+The TUI must contain a first-class **Cluster** view that can be opened simultaneously in every running Grove Shop terminal.
+
+The Cluster view is a live projection of shared control-plane state, not a local-node-only dashboard. Every terminal connected to the cluster must converge on and render the same authoritative state. It must show at minimum:
+- cluster health and current/candidate build identities;
+- node membership and per-node build/version;
+- service placement;
+- node join/leave/failure and service movement;
+- active rollout/rollback state and progress;
+- a recent cluster activity/event stream sufficient to make transitions understandable.
+
+Changes must propagate to all open Cluster views promptly enough that tiled terminals visibly behave as views into one cluster.
+
+During node failure/recovery, all surviving terminals must show the membership change and resulting service relocation. During a rollout, all terminals must transition into rollout state and display progress as the candidate replaces the previous build. When the rollout completes or rolls back, all terminals must converge on the resulting stable state.
+
+### Build-and-run rollout demo
+
+The rollout demo must prove the direct developer loop:
+
+```bash
+# edit Grove Shop
+go build -o ./bin/groveshop ./...
+./bin/groveshop
+```
+
+When this newly built binary discovers an existing Grove Shop cluster with the same application identity but a different build identity, its TUI must offer **Roll out this build** rather than offering to join as an ordinary same-build node.
+
+After confirmation:
+1. rollout state becomes shared cluster state;
+2. the initiating terminal follows rollout progress directly;
+3. Cluster views already open in the other node terminals show the same rollout progress live;
+4. node/service build transitions and health remain visible;
+5. completion or rollback is reflected consistently in every Cluster view.
+
+The newly launched candidate process is a bootstrap/deployment participant for this flow; starting it must not silently change the intended stable node count merely because it was used to introduce a new build.
+
+This behavior is part of the demo contract and must be covered by deterministic acceptance/E2E tests, including multiple observers of the shared Cluster read model.
+
 ## UI implementation guidance
 The Web UI is part of Grove Shop and must be served by a Grove-managed Web component.
 
