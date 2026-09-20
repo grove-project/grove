@@ -39,10 +39,11 @@ Use deterministic test conditions for MVP rather than depending on external netw
 - The TUI is backed by a structured action registry that can also be invoked non-interactively for CI, tests, scripts, and reproducible demos.
 - The same action registry must support Grove built-in actions and application-specific actions registered by Grove Shop.
 - Task 023: define one immutable artifact containing application code, Grove runtime, embedded TUI/operational actions, embedded UI assets, deployment metadata, and reserved config region.
-- Task 024: implement customer config embedding/extraction and support distinct artifact identity when config differs.
+- Task 024: implement customer config embedding/extraction and support distinct artifact identity when config differs. A config-only artifact change must subsequently use the exact same startup-discovery, rollout, health-gating, stable-ingress, and rollback path as a code change.
 
 ### Upgrade and rollback
 - Tasks 025-028: treat the complete artifact as the versioned deployment unit. Introduce candidate state, health gating, cutover, and rollback.
+- Code-only, config-only, and combined changes must use one artifact rollout mechanism; Grove may describe the difference as metadata but must not branch into separate deployment semantics.
 - A candidate with broken Inventory config must fail deterministically and cause Grove to return to the previous complete known-good artifact.
 - Candidate placement must obey the same placement eligibility contract as normal deployment.
 
@@ -172,15 +173,11 @@ GroveShop
 
 Do not force the user through separate cluster-create, config-compile, config-embed, artifact-create, upgrade, status, or debugger-discovery command trees for the headline demo.
 
-For deterministic automation and acceptance tests, the same application binary may invoke the underlying structured actions directly. The intended shape is:
+For deterministic automation and acceptance tests, the application binary may expose structured actions for observing cluster state and for build/config tooling. However, the deployment acceptance path must exercise the same artifact-start semantics as the human demo: starting a same-application/different-artifact binary introduces a rollout candidate.
 
-```bash
-./bin/groveshop action rollout.start --config configs/acme.yaml
-./bin/groveshop action rollout.start --config configs/acme-broken.yaml
-./bin/groveshop action cluster.status
-```
+A config-only change must first be embedded into a new immutable artifact and then follow that same startup/discovery/rollout path. Do not use `rollout.start --config ...` as the canonical deployment contract, because that would create a separate configuration deployment mechanism.
 
-The exact action names may evolve, but there must not be a separately required `grove` executable for normal application operation.
+There must not be a separately required `grove` executable for normal application operation.
 
 The debugging portion should be TUI-first:
 
