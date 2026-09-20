@@ -139,6 +139,14 @@ disconnects and releases its listener, tunnel, and Delve process.
 The final result reports `healthy`, with all five components back in `healthy`
 state. Enter `q` in Terminal C to stop the console and all five child Grovlets.
 
+## Relationship to the lifecycle demo
+
+This is a focused debugging proof built on the same Grove Shop application/runtime model. It must not redefine cluster bootstrap, artifact rollout, configuration deployment, or ingress ownership.
+
+When the broader lifecycle demo is running, application identity/artifact identity semantics, same-artifact join behavior, different-artifact rollout behavior, shared Cluster TUI state, and stable Grove-managed ingress remain authoritative as documented in `DEMO_FLOW.md` and `IMPLEMENTATION_GUIDE.md`.
+
+The explicit debug actions below exist to expose deterministic local DAP endpoints for IDE/acceptance use; they are not a second deployment or cluster-management CLI.
+
 ## Boundaries
 
 Grove exposes one local DAP endpoint per selected worker. It does not multiplex
