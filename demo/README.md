@@ -1,61 +1,70 @@
 # Grove Shop MVP Demo
 
 ## Purpose
-Grove Shop is the permanent reference application for the Grove MVP. It exists to prove Grove's core developer and runtime lifecycle in one visible, self-contained demo.
+Grove Shop is the permanent reference application for the Grove MVP. It proves Grove's developer, operator, and runtime lifecycle in one visible, self-contained demo.
 
-The demo must feel like a real application first and an infrastructure demo second.
+The demo must feel like one distributed application rather than a collection of infrastructure processes.
 
 ## Core story
-A developer builds one Grove application artifact containing:
-- the application services,
-- the embedded Web UI,
-- Grove runtime metadata,
-- and a reserved customer-configuration section.
+A developer builds one Grove Shop application artifact containing application services, embedded Web UI, Grove runtime/operational surface, deployment metadata, and embedded customer configuration.
 
-A customer configuration is embedded into the artifact after compilation. The artifact is deployed onto a local multi-Grovlet cluster. The browser shows the business application and Grove cluster state side by side. A second artifact is produced with a deliberately bad customer configuration. Grove starts it as an upgrade candidate, detects that a component crashes, rejects the candidate, and returns to the previous known-good artifact.
+Running the artifact is the primary human workflow:
+- the first instance discovers no compatible cluster and bootstraps one;
+- another instance of the same application and exact artifact discovers the cluster and suggests **Join**;
+- a different artifact of the same application discovers the cluster and suggests **Roll out this build**.
+
+Code changes and embedded-configuration changes are not separate deployment mechanisms. Both produce a new immutable artifact identity and use the same candidate, health-gating, cutover, and rollback flow.
+
+During the demo, multiple terminals keep Grove Shop's **Cluster** TUI view open. They all render the same authoritative control-plane state and update together as nodes join/leave, services move, and rollouts progress.
+
+The browser stays open on the same Grove-managed ingress address and port throughout rollout and rollback. Existing functionality remains reachable, and the new build becomes visible through that same endpoint after cutover.
 
 ## What the MVP demo must prove
 1. Normal Go application code using Grove's explicit service model.
-2. One immutable deployment artifact contains app code, Web UI, runtime metadata, and embedded customer configuration.
+2. One immutable deployment artifact contains app code, Web UI, runtime/operational surface, metadata, and embedded customer configuration.
 3. Multiple real Grovlet processes form a cluster on one host using production-shaped transport.
-4. Services communicate locally and across Grovlets.
-5. System NATS carries transient control traffic.
-6. JetStream/KV holds authoritative replicated Grove control state.
-7. The application UI is served by a Grove-managed component from the same cluster.
-8. The UI continuously polls Grove state and renders upgrades and recovery live.
-9. A bad embedded configuration can make a candidate component fail.
-10. Grove detects the failed candidate and automatically restores the previous known-good deployment.
-11. The business application is healthy after rollback.
-12. Two ordinary Delve/DAP sessions can debug Orders and Payment workers on
-    different Grovlets without PID, node, or remote-port discovery.
+4. Same-application/same-artifact startup suggests joining the discovered cluster.
+5. Same-application/different-artifact startup suggests rollout.
+6. Code-only, config-only, and combined changes all use the same artifact rollout path.
+7. Services communicate locally and across Grovlets.
+8. System NATS carries transient control traffic; JetStream/KV holds authoritative replicated control state.
+9. Every open Cluster TUI view reflects the same shared node, placement, health, activity, and rollout state.
+10. The application UI is served through a Grove-managed ingress whose externally visible endpoint remains stable across rollout and rollback.
+11. The browser continuously polls Grove state and can keep creating/observing orders during mixed-version rollout.
+12. A bad embedded configuration can make a candidate component fail; Grove rejects it and restores the previous complete known-good artifact.
+13. The business application remains healthy through successful rollout and after rollback.
+14. Two ordinary Delve/DAP sessions can debug Orders and Payment workers on different Grovlets without PID, node, or remote-port discovery.
 
 ## Minimal operator flow
+Build the initial artifact with the good embedded config, then run the same artifact in three terminals:
 
 ```bash
-go build -o ./bin/groveshop ./cmd/grovlet
+./bin/groveshop
+./bin/groveshop
 ./bin/groveshop
 ```
 
-In the application console:
+The first creates the cluster. The next two discover it and suggest joining. Keep the **Cluster** view open in all three terminals.
 
-```text
-Deployments > New rollout > configs/acme.yaml
+Keep the browser open on the Web URL exposed by the stable cluster ingress.
 
-# Keep the browser open.
+For either a code change or a config change, produce a new Grove Shop artifact with the desired embedded config and run it:
 
-Deployments > New rollout > configs/acme-broken.yaml
+```bash
+./bin/groveshop-new
 ```
 
-The rollout result prints the Grove Shop Web URL. The browser and console show
-the same cluster read model through the candidate failure and rollback.
+Because its application identity matches but artifact identity differs, Grove suggests rollout. After confirmation, all existing Cluster views show the same rollout progress live while the browser continues using the same ingress URL.
+
+For the failure proof, build/embed the invalid config into another artifact and run that artifact. The exact same rollout path detects the unhealthy candidate and rolls back the complete artifact.
 
 ## Supporting docs
-- `ARCHITECTURE.md` — demo services, artifact composition, and runtime topology.
-- `UI.md` — single-screen Orders + Cluster Status contract.
-- `CONFIGURATION.md` — embedded config and intentional failure scenario.
-- `DEMO_FLOW.md` — exact end-to-end demo sequence and expected observable states.
-- `IMPLEMENTATION_GUIDE.md` — how the demo contracts map onto the numbered tasks without violating incremental scope.
-- `DEBUGGING_DEMO.md` — exact five-node, two-worker Delve walkthrough.
+- `ARCHITECTURE.md` — demo services, artifact composition, topology, identity, ingress, and rollout model.
+- `UI.md` — browser UI and synchronized Cluster TUI contracts.
+- `CONFIGURATION.md` — embedded config as part of the immutable artifact and intentional failure scenario.
+- `DEMO_FLOW.md` — exact end-to-end demo sequence and observable states.
+- `IMPLEMENTATION_GUIDE.md` — implementation requirements and task mapping.
+- `DEBUGGING_DEMO.md` — five-node, two-worker Delve walkthrough.
 
 ## Non-goals for MVP v1
 - Firecracker live migration.
@@ -63,6 +72,6 @@ the same cluster read model through the candidate failure and rollback.
 - Edge-specific deployment.
 - Sophisticated application behavior.
 - Production storefront features.
+- Separate deployment semantics for configuration.
 
-The debugging proof is a topology-explicit final MVP scenario. It does not add
-DAP multiplexing, cross-service stepping, or general scheduling policy.
+The debugging proof does not add DAP multiplexing, cross-service stepping, or general scheduling policy.
