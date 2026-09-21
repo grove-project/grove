@@ -30,6 +30,7 @@ DEMO-001 is part of the immediate demo focus but is dependency-gated until stabl
 | [ROLLOUT-001](rollout/ROLLOUT-001-startup-candidate-detection.md) Startup candidate detection | rollout | todo | CLUSTER-001 |
 | [DEBUG-002](debugging/DEBUG-002-runtime-guided-debug-tui.md) Runtime-guided Debug TUI | debugging | todo | DEBUG-001 |
 | [NET-001](networking/NET-001-stable-ingress-rollout.md) Stable ingress through rollout | networking | todo | ROLLOUT-001 |
+| [SDK-001](sdk/SDK-001-groveshop-runtime-boundary.md) GroveShop/runtime boundary refactor | sdk | todo | — |
 
 ## LATER / dependency-gated
 
