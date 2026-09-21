@@ -43,6 +43,68 @@ type MembershipRecord struct {
 	NodeID string `json:"node_id"`
 	// AdvertisedEndpoint is the node's Grove transport endpoint.
 	AdvertisedEndpoint string `json:"advertised_endpoint"`
+	// Leaving distinguishes an intentional graceful shutdown from an
+	// unavailable node. It is reset when the same logical node starts again.
+	Leaving bool `json:"leaving,omitempty"`
+}
+
+// BeginLeave records graceful shutdown intent while the node is still able to
+// participate in the replicated control plane.
+func (m *Membership) BeginLeave(ctx context.Context, transport *Transport) error {
+	record := m.record
+	record.Leaving = true
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return &Error{Operation: "mark Grove membership leaving", Err: err}
+	}
+	js, err := jetstream.New(transport.connection)
+	if err != nil {
+		return &Error{Operation: "mark Grove membership leaving", Err: err}
+	}
+	kv, err := js.KeyValue(ctx, MembershipBucket)
+	if err != nil {
+		return &Error{Operation: "mark Grove membership leaving", Err: err}
+	}
+	if _, err := kv.Put(ctx, MembershipKey(record.NodeID), encoded); err != nil {
+		return &Error{Operation: "mark Grove membership leaving", Err: err}
+	}
+	return nil
+}
+
+// AllLeaving reports whether every still-registered member has announced a
+// graceful shutdown. Whole-cluster shutdown preserves membership for restart.
+func (m *Membership) AllLeaving(
+	ctx context.Context,
+	transport *Transport,
+	members []MembershipRecord,
+) (bool, error) {
+	js, err := jetstream.New(transport.connection)
+	if err != nil {
+		return false, &Error{Operation: "read leaving Grove membership", Err: err}
+	}
+	kv, err := js.KeyValue(ctx, MembershipBucket)
+	if err != nil {
+		return false, &Error{Operation: "read leaving Grove membership", Err: err}
+	}
+	registered := 0
+	for _, member := range members {
+		entry, err := kv.Get(ctx, MembershipKey(member.NodeID))
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			continue
+		}
+		if err != nil {
+			return false, &Error{Operation: "read leaving Grove membership", Err: err}
+		}
+		var record MembershipRecord
+		if err := json.Unmarshal(entry.Value(), &record); err != nil {
+			return false, &Error{Operation: "decode leaving Grove membership", Err: err}
+		}
+		registered++
+		if !record.Leaving {
+			return false, nil
+		}
+	}
+	return registered != 0, nil
 }
 
 // MembershipView is one Grovlet's current observation of authoritative
@@ -178,6 +240,24 @@ func (m *Membership) watch(ctx context.Context, transport *Transport) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// Leave removes the local node from authoritative membership. Callers use
+// this only for a graceful retirement; an abruptly failed node remains in
+// membership so its loss stays observable.
+func (m *Membership) Leave(ctx context.Context, transport *Transport) error {
+	js, err := jetstream.New(transport.connection)
+	if err != nil {
+		return &Error{Operation: "retire Grove membership", Err: err}
+	}
+	kv, err := js.KeyValue(ctx, MembershipBucket)
+	if err != nil {
+		return &Error{Operation: "retire Grove membership", Err: err}
+	}
+	if err := kv.Delete(ctx, MembershipKey(m.record.NodeID)); err != nil {
+		return &Error{Operation: "retire Grove membership", Err: err}
+	}
+	return nil
 }
 
 // Snapshot returns a copy of the current deterministically ordered view.

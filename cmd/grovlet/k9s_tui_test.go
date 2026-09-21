@@ -89,6 +89,22 @@ func TestApplicationTUIHandlesK9sStyleNavigation(t *testing.T) {
 	}
 }
 
+func TestApplicationTUIShowsStartupActionOnlyUntilConfirmation(t *testing.T) {
+	actions := []console.Action{
+		{Name: "cluster.status"},
+		{Name: "cluster.start"},
+		{Name: "cluster.join"},
+	}
+	startup := actionsForApplicationModel(actions, console.Model{StartupAction: "cluster.start"})
+	if len(startup) != 1 || startup[0].Name != "cluster.start" {
+		t.Fatalf("startup actions = %#v; want cluster.start only", startup)
+	}
+	normal := actionsForApplicationModel(actions, console.Model{})
+	if len(normal) != 1 || normal[0].Name != "cluster.status" {
+		t.Fatalf("normal actions = %#v; want startup actions removed", normal)
+	}
+}
+
 type blockingApplicationTUISession struct {
 	started chan struct{}
 	release chan struct{}

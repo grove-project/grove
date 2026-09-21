@@ -16,7 +16,6 @@ Keep active work intentionally small: at most 3–5 tasks.
 
 | Task | Workstream | Status | Depends on |
 | --- | --- | --- | --- |
-| [CLUSTER-001](cluster/CLUSTER-001-interactive-discovery-and-join.md) Interactive discovery and join | cluster | todo | — |
 | [DEBUG-001](debugging/DEBUG-001-runtime-flow-capture.md) Runtime Grove call-flow capture | debugging | todo | — |
 | [DEMO-001](demo/DEMO-001-standalone-load-generator.md) Standalone load generator | demo | todo | NET-001 |
 
@@ -39,6 +38,13 @@ DEMO-001 is part of the immediate demo focus but is dependency-gated until stabl
 | [ROLLOUT-002](rollout/ROLLOUT-002-config-as-artifact-rollout.md) Config as artifact rollout | rollout | todo | ROLLOUT-001, NET-001 |
 | [DEBUG-003](debugging/DEBUG-003-native-paused-debugger.md) Native paused debugger | debugging | todo | DEBUG-002 |
 | [TEST-001](testing/TEST-001-killer-demo-e2e.md) Killer demo E2E | testing | todo | TUI-001, ROLLOUT-002, DEBUG-003, DEMO-001 |
+
+## DONE
+
+| Task | Workstream | Status | Depends on |
+| --- | --- | --- | --- |
+| [RESILIENCE-001](resilience/RESILIENCE-001-graceful-node-retirement.md) Graceful node retirement and service recovery | resilience | done | CLUSTER-001 |
+| [CLUSTER-001](cluster/CLUSTER-001-interactive-discovery-and-join.md) Interactive discovery and join | cluster | done | — |
 
 ## Dependency shape
 

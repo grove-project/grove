@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"sync"
 	"time"
@@ -107,6 +108,20 @@ func StartClusterServer(ctx context.Context, cfg ClusterConfig) (*Server, error)
 	if err != nil {
 		return nil, err
 	}
+	routePort := cfg.RoutePort
+	if cfg.JetStreamStoreDir != "" && len(routes) == 0 {
+		if routePort == 0 {
+			routePort, err = reservePort(cfg.RouteHost)
+			if err != nil {
+				return nil, &Error{Operation: "reserve System NATS bootstrap route", Err: err}
+			}
+		}
+		bootstrapPeerPort, reserveErr := reservePort(cfg.RouteHost)
+		if reserveErr != nil {
+			return nil, &Error{Operation: "reserve System NATS future peer route", Err: reserveErr}
+		}
+		routes = []*url.URL{{Scheme: "nats-route", Host: net.JoinHostPort(cfg.RouteHost, fmt.Sprintf("%d", bootstrapPeerPort))}}
+	}
 	return startServer(ctx, &server.Options{
 		ServerName: cfg.Name,
 		Host:       cfg.Host,
@@ -114,14 +129,26 @@ func StartClusterServer(ctx context.Context, cfg ClusterConfig) (*Server, error)
 		Cluster: server.ClusterOpts{
 			Name: systemClusterName,
 			Host: cfg.RouteHost,
-			Port: randomPort(cfg.RoutePort),
+			Port: randomPort(routePort),
 		},
 		Routes:    routes,
 		JetStream: cfg.JetStreamStoreDir != "",
 		StoreDir:  cfg.JetStreamStoreDir,
 		NoLog:     true,
 		NoSigs:    true,
-	}, len(routes) != 0)
+	}, len(cfg.SeedURLs) != 0)
+}
+
+func reservePort(host string) (int, error) {
+	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		return 0, err
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		return 0, err
+	}
+	return port, nil
 }
 
 func parseSeedURLs(seedURLs []string) ([]*url.URL, error) {

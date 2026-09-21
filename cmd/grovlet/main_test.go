@@ -222,13 +222,26 @@ func TestParseConfig(t *testing.T) {
 	}, io.Discard); !errors.Is(err, errSystemNATSSeedRouteRequired) {
 		t.Errorf("seed without route listener error = %v; want %v", err, errSystemNATSSeedRouteRequired)
 	}
-	if _, err := parseConfig([]string{
+	bootstrap, err := parseConfig([]string{
 		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+		"--advertise-endpoint", "nats-subject://system/node-a",
 		"--system-nats-listen", "127.0.0.1:0",
 		"--system-nats-route-listen", "127.0.0.1:0",
 		"--system-nats-membership",
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("seedless membership bootstrap: %v", err)
+	}
+	if bootstrap.systemNATSSeed != "" {
+		t.Errorf("bootstrap seed = %q; want empty", bootstrap.systemNATSSeed)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-membership",
 	}, io.Discard); !errors.Is(err, errSystemNATSMembershipCluster) {
-		t.Errorf("membership without seed error = %v; want %v", err, errSystemNATSMembershipCluster)
+		t.Errorf("membership without route listener error = %v; want %v", err, errSystemNATSMembershipCluster)
 	}
 	if _, err := parseConfig([]string{
 		"--runtime-dir", runtimeDir,

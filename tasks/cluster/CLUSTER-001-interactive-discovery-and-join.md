@@ -1,6 +1,6 @@
 ---
 id: CLUSTER-001
-status: todo
+status: done
 outcome: groveshop-demo
 depends-on: []
 ---

@@ -9,7 +9,7 @@ The demo must feel like one distributed application rather than a collection of 
 A developer builds one Grove Shop application artifact containing application services, embedded Web UI, Grove runtime/operational surface, deployment metadata, and embedded customer configuration.
 
 Running the artifact is the primary human workflow:
-- the first instance discovers no compatible cluster and bootstraps one;
+- the first instance discovers no compatible cluster and offers **Start new cluster**;
 - another instance of the same application and exact artifact discovers the cluster and suggests **Join**;
 - a different artifact of the same application discovers the cluster and suggests **Roll out this build**.
 

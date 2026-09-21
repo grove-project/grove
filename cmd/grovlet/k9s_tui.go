@@ -36,6 +36,7 @@ type applicationTUI struct {
 	hints  *tview.TextView
 
 	actions        []console.Action
+	allActions     []console.Action
 	visibleActions []console.Action
 	filter         string
 	promptMode     string
@@ -64,21 +65,21 @@ func runInteractiveApplicationTUI(ctx context.Context, tui *console.TUI) error {
 func newApplicationTUI(parent context.Context, tui *console.TUI) (*applicationTUI, error) {
 	ctx, cancel := context.WithCancel(parent)
 	view := &applicationTUI{
-		ctx:     ctx,
-		cancel:  cancel,
-		tui:     tui,
-		app:     tview.NewApplication(),
-		pages:   tview.NewPages(),
-		header:  tview.NewTextView(),
-		table:   tview.NewTable(),
-		flash:   tview.NewTextView(),
-		prompt:  tview.NewInputField(),
-		hints:   tview.NewTextView(),
-		actions: tui.Actions(),
-		openURL: openBrowser,
+		ctx:        ctx,
+		cancel:     cancel,
+		tui:        tui,
+		app:        tview.NewApplication(),
+		pages:      tview.NewPages(),
+		header:     tview.NewTextView(),
+		table:      tview.NewTable(),
+		flash:      tview.NewTextView(),
+		prompt:     tview.NewInputField(),
+		hints:      tview.NewTextView(),
+		allActions: tui.Actions(),
+		openURL:    openBrowser,
 	}
 	view.queueDraw = func(update func()) { view.app.QueueUpdateDraw(update) }
-	if len(view.actions) == 0 {
+	if len(view.allActions) == 0 {
 		cancel()
 		return nil, fmt.Errorf("Grove Shop TUI has no actions")
 	}
@@ -88,6 +89,7 @@ func newApplicationTUI(parent context.Context, tui *console.TUI) (*applicationTU
 		cancel()
 		return nil, fmt.Errorf("read initial Grove Shop TUI model: %w", err)
 	}
+	view.actions = actionsForApplicationModel(view.allActions, model)
 	view.updateModel(model)
 	view.rebuildActions("")
 	return view, nil
@@ -194,6 +196,9 @@ func (v *applicationTUI) queueUpdate(update func()) {
 }
 
 func (v *applicationTUI) refreshModel(model console.Model) {
+	if v.setActionsForModel(model) {
+		v.rebuildActions("")
+	}
 	v.updateModel(model)
 	if !v.busy {
 		return
@@ -208,6 +213,28 @@ func (v *applicationTUI) refreshModel(model console.Model) {
 }
 
 func (v *applicationTUI) updateModel(model console.Model) {
+	if model.StartupAction != "" {
+		if model.StartupAction == "cluster.start" {
+			v.header.SetText(fmt.Sprintf(
+				"[::b]No GroveShop cluster discovered[-:-:-]\n\n[::b]Application[-:-:-] %s   [::b]Build[-:-:-] %s",
+				tview.Escape(model.Application),
+				tview.Escape(model.StartupBuild),
+			))
+			v.hints.SetText("[aqua::b]Enter[-:-:-] select")
+		} else {
+			v.header.SetText(fmt.Sprintf(
+				"[::b]Grove cluster discovered[-:-:-]\n\n[::b]Cluster[-:-:-] %s   [::b]Nodes[-:-:-] %d   [::b]Build[-:-:-] %s   [::b]Status[-:-:-] [green]%s[-]",
+				tview.Escape(model.StartupCluster),
+				model.StartupNodes,
+				tview.Escape(model.StartupBuild),
+				tview.Escape(model.StartupStatus),
+			))
+			v.hints.SetText("[aqua::b]Enter[-:-:-] join   [aqua::b]Esc[-:-:-] cancel")
+		}
+		v.root.ResizeItem(v.header, 7, 0)
+		return
+	}
+	v.hints.SetText(k9sHintLine())
 	healthColor := "green"
 	if model.Health == "degraded" || model.Health == "failed" {
 		healthColor = "orangered"
@@ -258,6 +285,42 @@ func (v *applicationTUI) updateModel(model console.Model) {
 	if model.LastEvent != "" && !v.busy {
 		v.setFlash(tcell.ColorLightGray, model.LastEvent)
 	}
+}
+
+func actionsForApplicationModel(actions []console.Action, model console.Model) []console.Action {
+	if model.StartupAction == "" {
+		normal := make([]console.Action, 0, len(actions))
+		for _, action := range actions {
+			if action.Name != "cluster.start" && action.Name != "cluster.join" {
+				normal = append(normal, action)
+			}
+		}
+		return normal
+	}
+	for _, action := range actions {
+		if action.Name == model.StartupAction {
+			return []console.Action{action}
+		}
+	}
+	return []console.Action{}
+}
+
+func (v *applicationTUI) setActionsForModel(model console.Model) bool {
+	next := actionsForApplicationModel(v.allActions, model)
+	if len(next) == len(v.actions) {
+		same := true
+		for index := range next {
+			if next[index].Name != v.actions[index].Name {
+				same = false
+				break
+			}
+		}
+		if same {
+			return false
+		}
+	}
+	v.actions = next
+	return true
 }
 
 func (v *applicationTUI) captureHeaderMouse(

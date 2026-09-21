@@ -70,6 +70,8 @@ func TestResolveTUISelection(t *testing.T) {
 		wantOK   bool
 	}{
 		{name: "cluster status", input: "Cluster > Status", wantName: "cluster.status", wantOK: true},
+		{name: "cluster start", input: "Cluster > Start new cluster", wantName: "cluster.start", wantOK: true},
+		{name: "cluster join", input: "Cluster > Join", wantName: "cluster.join", wantOK: true},
 		{name: "new rollout", input: "Deployments > New rollout > configs/acme.yaml", wantName: "rollout.start", wantArgs: []string{"--config", "configs/acme.yaml"}, wantOK: true},
 		{name: "debug demo", input: "Deployments > Debug demo > Start", wantName: "debug.demo.start", wantOK: true},
 		{name: "application action", input: "Application > Run integrity check", wantName: groveshop.ActionVerifyOrders, wantOK: true},

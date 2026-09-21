@@ -198,6 +198,28 @@ func TestMembershipConverges(t *testing.T) {
 	if err := transports[0].ServeMembership(ctx, "node", nil); !errors.Is(err, systemnats.ErrMembershipRequired) {
 		t.Errorf("nil membership endpoint error = %v; want %v", err, systemnats.ErrMembershipRequired)
 	}
+
+	if err := memberships[1].BeginLeave(ctx, transports[1]); err != nil {
+		t.Fatal(err)
+	}
+	if allLeaving, err := memberships[1].AllLeaving(ctx, transports[1], want); err != nil {
+		t.Fatal(err)
+	} else if allLeaving {
+		t.Fatal("one leaving node reported whole-cluster shutdown")
+	}
+	if err := memberships[1].Leave(ctx, transports[1]); err != nil {
+		t.Fatal(err)
+	}
+	wantAfterLeave := []systemnats.MembershipRecord{want[0], want[2]}
+	views, err = waitForMembershipViews(ctx, transports, nodeIDs, wantAfterLeave)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, view := range views {
+		if !slices.Equal(view.Members, wantAfterLeave) {
+			t.Errorf("%s membership after node-2 leave = %#v; want %#v", nodeIDs[i], view.Members, wantAfterLeave)
+		}
+	}
 }
 
 func reserveRoutePorts(t *testing.T, count int) []int {

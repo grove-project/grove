@@ -45,6 +45,18 @@ type Model struct {
 	DebugSessions []DebugSession
 	// LastEvent explains the latest operationally relevant state change.
 	LastEvent string
+	// StartupAction is the only cluster action offered before this process has
+	// entered the normal application TUI. Supported values are cluster.start
+	// and cluster.join.
+	StartupAction string
+	// StartupCluster is the discovered embedded cluster identity.
+	StartupCluster string
+	// StartupBuild is the short immutable build identity shown at startup.
+	StartupBuild string
+	// StartupNodes is the discovered cluster size before joining.
+	StartupNodes int
+	// StartupStatus is the discovered cluster health shown before joining.
+	StartupStatus string
 }
 
 // DebugSession identifies one active local DAP tunnel and its remote worker.
@@ -92,6 +104,9 @@ func (t *TUI) render(ctx context.Context, selectedAction string) (string, error)
 	model, err := t.readModel(ctx)
 	if err != nil {
 		return "", fmt.Errorf("read console model: %w", err)
+	}
+	if model.StartupAction != "" {
+		return t.renderStartup(model, selectedAction), nil
 	}
 	var output strings.Builder
 	fmt.Fprintf(&output, "GroveShop %s\n", model.Application)
@@ -141,6 +156,34 @@ func (t *TUI) render(ctx context.Context, selectedAction string) (string, error)
 		}
 	}
 	return output.String(), nil
+}
+
+func (t *TUI) renderStartup(model Model, selectedAction string) string {
+	var output strings.Builder
+	fmt.Fprintf(&output, "GroveShop %s\n", model.Application)
+	if model.StartupAction == "cluster.start" {
+		fmt.Fprintf(&output, "No %s cluster discovered\n\n", model.Application)
+		fmt.Fprintf(&output, "%sStart new cluster  [cluster.start]\n", startupMarker(selectedAction, "cluster.start"))
+		fmt.Fprintf(&output, "\nApplication  %s\n", model.Application)
+		fmt.Fprintf(&output, "Build        %s\n", displayValue(model.StartupBuild))
+		fmt.Fprintln(&output, "\nEnter select")
+		return output.String()
+	}
+	fmt.Fprintln(&output, "Grove cluster discovered")
+	fmt.Fprintf(&output, "\nCluster  %s\n", displayValue(model.StartupCluster))
+	fmt.Fprintf(&output, "Nodes    %d\n", model.StartupNodes)
+	fmt.Fprintf(&output, "Build    %s\n", displayValue(model.StartupBuild))
+	fmt.Fprintf(&output, "Status   %s\n", displayValue(model.StartupStatus))
+	fmt.Fprintf(&output, "\n%sJoin cluster  [cluster.join]\n", startupMarker(selectedAction, "cluster.join"))
+	fmt.Fprintln(&output, "\nEnter join   Esc cancel")
+	return output.String()
+}
+
+func startupMarker(selectedAction, action string) string {
+	if selectedAction == "" || selectedAction == action {
+		return "> "
+	}
+	return "  "
 }
 
 // Actions returns the ordered actions available for keyboard navigation.
