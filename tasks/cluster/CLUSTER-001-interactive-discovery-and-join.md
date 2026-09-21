@@ -39,9 +39,8 @@ Second/third process running the exact same build:
 │ Status        Healthy                                  │
 │                                                        │
 │ › Join cluster                                         │
-│   Start a separate cluster…                            │
 │                                                        │
-│ Enter select   ↑↓ navigate                             │
+│ Enter join   Esc cancel                                │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -51,8 +50,8 @@ After confirmation, transition directly into the normal GroveShop TUI with **Clu
 - Give a Grove application a stable application identity and a distinct build identity.
 - Discover reachable clusters for the same application identity on startup.
 - If none exists, bootstrap the first node.
-- If a same-build cluster exists, make **Join cluster** the primary TUI action.
-- Keep creating a second cluster for the same application as an explicit advanced action.
+- If a same-build cluster exists, **Join cluster** is the only cluster-creation/join action offered by this startup flow.
+- Once a compatible existing cluster is discovered, do **not** suggest, offer, or expose an action to create a separate cluster. Starting a new cluster is only the no-compatible-cluster path.
 - Never require the operator to enter NATS addresses, PIDs, or Grove implementation details.
 
 ## Acceptance
