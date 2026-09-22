@@ -24,6 +24,7 @@ const (
 	membershipKeyPrefix   = "nodes."
 	membershipSubjectRoot = "_GROVE.system.membership."
 	membershipRetryDelay  = 50 * time.Millisecond
+	membershipReplicaPoll = 250 * time.Millisecond
 )
 
 var (
@@ -43,6 +44,107 @@ type MembershipRecord struct {
 	NodeID string `json:"node_id"`
 	// AdvertisedEndpoint is the node's Grove transport endpoint.
 	AdvertisedEndpoint string `json:"advertised_endpoint"`
+	// Leaving distinguishes an intentional graceful shutdown from an
+	// unavailable node. It is reset when the same logical node starts again.
+	Leaving bool `json:"leaving,omitempty"`
+}
+
+// BeginLeave records graceful shutdown intent while the node is still able to
+// participate in the replicated control plane.
+func (m *Membership) BeginLeave(ctx context.Context, transport *Transport) error {
+	m.mu.Lock()
+	m.record.Leaving = true
+	record := m.record
+	knownMembers := append([]MembershipRecord(nil), m.view.Members...)
+	m.mu.Unlock()
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		return &Error{Operation: "mark Grove membership leaving", Err: err}
+	}
+	js, err := jetstream.New(transport.connection)
+	if err != nil {
+		return &Error{Operation: "mark Grove membership leaving", Err: err}
+	}
+	kv, err := js.KeyValue(ctx, MembershipBucket)
+	if err != nil {
+		return &Error{Operation: "mark Grove membership leaving", Err: err}
+	}
+	if _, err := kv.Put(ctx, MembershipKey(record.NodeID), encoded); err != nil {
+		return &Error{Operation: "mark Grove membership leaving", Err: err}
+	}
+	records, err := readKnownMembershipRecords(ctx, kv, knownMembers, record)
+	if err != nil {
+		return &Error{Operation: "read Grove membership for graceful replica shrink", Err: err}
+	}
+	if err := waitForControlStateReplicas(ctx, js, records, true); err != nil {
+		return &Error{Operation: "shrink Grove control-state replicas", Err: err}
+	}
+	return nil
+}
+
+func readKnownMembershipRecords(
+	ctx context.Context,
+	kv jetstream.KeyValue,
+	known []MembershipRecord,
+	local MembershipRecord,
+) (map[string]MembershipRecord, error) {
+	records := make(map[string]MembershipRecord, len(known)+1)
+	records[local.NodeID] = local
+	for _, expected := range known {
+		entry, err := kv.Get(ctx, MembershipKey(expected.NodeID))
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			delete(records, expected.NodeID)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		var observed MembershipRecord
+		if err := json.Unmarshal(entry.Value(), &observed); err != nil {
+			return nil, fmt.Errorf("decode membership record %q: %w", entry.Key(), err)
+		}
+		if entry.Key() != MembershipKey(observed.NodeID) || observed.AdvertisedEndpoint == "" {
+			return nil, fmt.Errorf("validate membership record %q: %w", entry.Key(), ErrMembershipRecordInvalid)
+		}
+		records[observed.NodeID] = observed
+	}
+	return records, nil
+}
+
+// AllLeaving reports whether every still-registered member has announced a
+// graceful shutdown. Whole-cluster shutdown preserves membership for restart.
+func (m *Membership) AllLeaving(
+	ctx context.Context,
+	transport *Transport,
+	members []MembershipRecord,
+) (bool, error) {
+	js, err := jetstream.New(transport.connection)
+	if err != nil {
+		return false, &Error{Operation: "read leaving Grove membership", Err: err}
+	}
+	kv, err := js.KeyValue(ctx, MembershipBucket)
+	if err != nil {
+		return false, &Error{Operation: "read leaving Grove membership", Err: err}
+	}
+	registered := 0
+	for _, member := range members {
+		entry, err := kv.Get(ctx, MembershipKey(member.NodeID))
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			continue
+		}
+		if err != nil {
+			return false, &Error{Operation: "read leaving Grove membership", Err: err}
+		}
+		var record MembershipRecord
+		if err := json.Unmarshal(entry.Value(), &record); err != nil {
+			return false, &Error{Operation: "decode leaving Grove membership", Err: err}
+		}
+		registered++
+		if !record.Leaving {
+			return false, nil
+		}
+	}
+	return registered != 0, nil
 }
 
 // MembershipView is one Grovlet's current observation of authoritative
@@ -59,9 +161,11 @@ type MembershipView struct {
 // Membership maintains one watcher-derived local view of the authoritative
 // JetStream/KV membership bucket.
 type Membership struct {
-	record MembershipRecord
-	mu     sync.RWMutex
-	view   MembershipView
+	record             MembershipRecord
+	mu                 sync.RWMutex
+	view               MembershipView
+	reconciledReplicas int
+	retired            bool
 }
 
 // NewMembership creates the membership observer for record.
@@ -115,26 +219,30 @@ func (m *Membership) watch(ctx context.Context, transport *Transport) error {
 		return fmt.Errorf("new JetStream client: %w", err)
 	}
 	setupCtx, cancel := operationContext(ctx)
-	kv, err := js.CreateOrUpdateKeyValue(setupCtx, jetstream.KeyValueConfig{
-		Bucket:      MembershipBucket,
-		Description: "Authoritative Grove node membership",
-		History:     1,
-		Storage:     jetstream.FileStorage,
-		Replicas:    MembershipReplicas,
-	})
+	kv, err := openOrCreateKeyValue(setupCtx, js, membershipKeyValueConfig(controlStateBootstrapReplicas))
 	if err != nil {
 		cancel()
 		return fmt.Errorf("create membership bucket: %w", err)
 	}
-	encoded, err := json.Marshal(m.record)
+	m.mu.Lock()
+	if m.retired {
+		m.mu.Unlock()
+		cancel()
+		return nil
+	}
+	record := m.record
+	encoded, err := json.Marshal(record)
 	if err != nil {
+		m.mu.Unlock()
 		cancel()
 		return fmt.Errorf("encode membership record: %w", err)
 	}
-	if _, err := kv.Put(setupCtx, MembershipKey(m.record.NodeID), encoded); err != nil {
+	if _, err := kv.Put(setupCtx, MembershipKey(record.NodeID), encoded); err != nil {
+		m.mu.Unlock()
 		cancel()
 		return fmt.Errorf("register membership record: %w", err)
 	}
+	m.mu.Unlock()
 	cancel()
 
 	watcher, err := kv.WatchAll(ctx)
@@ -142,6 +250,8 @@ func (m *Membership) watch(ctx context.Context, transport *Transport) error {
 		return fmt.Errorf("watch membership bucket: %w", err)
 	}
 	defer watcher.Stop()
+	replicaPoll := time.NewTicker(membershipReplicaPoll)
+	defer replicaPoll.Stop()
 
 	records := make(map[string]MembershipRecord)
 	initialized := false
@@ -153,6 +263,9 @@ func (m *Membership) watch(ctx context.Context, transport *Transport) error {
 			}
 			if entry == nil {
 				initialized = true
+				if err := m.reconcileControlState(ctx, js, records); err != nil {
+					return err
+				}
 				m.setReady(records)
 				continue
 			}
@@ -172,12 +285,130 @@ func (m *Membership) watch(ctx context.Context, transport *Transport) error {
 				records[record.NodeID] = record
 			}
 			if initialized {
+				if err := m.reconcileControlState(ctx, js, records); err != nil {
+					return err
+				}
+				m.setReady(records)
+			}
+		case <-replicaPoll.C:
+			if initialized {
+				readCtx, readCancel := context.WithTimeout(ctx, controlStateOperationTimeout)
+				authoritative, err := readMembershipRecords(readCtx, kv)
+				readCancel()
+				if err != nil {
+					return err
+				}
+				if equalMembershipRecords(records, authoritative) {
+					continue
+				}
+				records = authoritative
+				if err := m.reconcileControlState(ctx, js, records); err != nil {
+					return err
+				}
 				m.setReady(records)
 			}
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
+}
+
+func (m *Membership) reconcileControlState(
+	ctx context.Context,
+	js jetstream.JetStream,
+	records map[string]MembershipRecord,
+) error {
+	if err := reconcileControlStateReplicas(ctx, js, records, false); err != nil {
+		return err
+	}
+	replicas := controlStateReplicaCount(records)
+	m.mu.RLock()
+	reconciled := m.reconciledReplicas
+	m.mu.RUnlock()
+	if reconciled == replicas {
+		return nil
+	}
+	if err := waitForControlStateReplicas(ctx, js, records, false); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.reconciledReplicas = replicas
+	m.mu.Unlock()
+	return nil
+}
+
+func equalMembershipRecords(a, b map[string]MembershipRecord) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for nodeID, record := range a {
+		if b[nodeID] != record {
+			return false
+		}
+	}
+	return true
+}
+
+func readMembershipRecords(ctx context.Context, kv jetstream.KeyValue) (map[string]MembershipRecord, error) {
+	keys, err := kv.Keys(ctx)
+	if errors.Is(err, jetstream.ErrNoKeysFound) {
+		return map[string]MembershipRecord{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	records := make(map[string]MembershipRecord, len(keys))
+	for _, key := range keys {
+		if !strings.HasPrefix(key, membershipKeyPrefix) || len(key) == len(membershipKeyPrefix) {
+			return nil, fmt.Errorf("validate membership key %q: %w", key, ErrMembershipRecordInvalid)
+		}
+		entry, err := kv.Get(ctx, key)
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		var record MembershipRecord
+		if err := json.Unmarshal(entry.Value(), &record); err != nil {
+			return nil, fmt.Errorf("decode membership record %q: %w", key, err)
+		}
+		if key != MembershipKey(record.NodeID) || record.AdvertisedEndpoint == "" {
+			return nil, fmt.Errorf("validate membership record %q: %w", key, ErrMembershipRecordInvalid)
+		}
+		records[record.NodeID] = record
+	}
+	return records, nil
+}
+
+// Leave removes the local node from authoritative membership. Callers use
+// this only for a graceful retirement; an abruptly failed node remains in
+// membership so its loss stays observable.
+func (m *Membership) Leave(ctx context.Context, transport *Transport) error {
+	js, err := jetstream.New(transport.connection)
+	if err != nil {
+		return &Error{Operation: "retire Grove membership", Err: err}
+	}
+	kv, err := js.KeyValue(ctx, MembershipBucket)
+	if err != nil {
+		return &Error{Operation: "retire Grove membership", Err: err}
+	}
+	m.mu.Lock()
+	nodeID := m.record.NodeID
+	m.retired = true
+	if err := kv.Delete(ctx, MembershipKey(nodeID)); err != nil {
+		m.mu.Unlock()
+		return &Error{Operation: "retire Grove membership", Err: err}
+	}
+	members := m.view.Members[:0]
+	for _, member := range m.view.Members {
+		if member.NodeID != nodeID {
+			members = append(members, member)
+		}
+	}
+	m.view.Members = members
+	m.mu.Unlock()
+	return nil
 }
 
 // Snapshot returns a copy of the current deterministically ordered view.

@@ -21,7 +21,7 @@ Run the initial artifact:
 ./bin/groveshop
 ```
 
-No compatible Grove Shop cluster is discovered, so Grove bootstraps one. Open **Cluster** in the TUI.
+No compatible Grove Shop cluster is discovered, so Grove offers **Start new cluster** as the only startup action. Confirm it, then open **Cluster** in the normal TUI.
 
 ### 2. Join nodes 2 and 3
 Run the exact same artifact in two more terminals:
@@ -46,7 +46,9 @@ Create an order and verify:
 Created -> Reserved -> Paid -> Shipping -> Completed
 ```
 
-Terminate one node. The surviving Cluster views must show the node failure and service relocation live. The browser remains reachable through the same ingress endpoint. Create another order and prove the application still works.
+Quit one node from its GroveShop TUI. The surviving Cluster views must show its services relocate, the departing member disappear, and the cluster return to healthy. The browser remains reachable through the same ingress endpoint. Create another order and prove the application still works.
+
+A forcibly killed node remains visible as unavailable for diagnosis; only a graceful TUI exit retires membership automatically.
 
 Restore/rejoin the node as appropriate for the deterministic demo and verify all Cluster views converge.
 

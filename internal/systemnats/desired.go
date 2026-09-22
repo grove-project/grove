@@ -22,10 +22,12 @@ const (
 	// authoritative desired deployments.
 	DesiredReplicas = 3
 
-	desiredKeyPrefix   = "applications."
-	desiredSubjectRoot = "_GROVE.system.desired."
-	desiredCommandRoot = "_GROVE.system.desired_commands."
-	desiredRetryDelay  = 50 * time.Millisecond
+	desiredKeyPrefix    = "applications."
+	desiredSubjectRoot  = "_GROVE.system.desired."
+	desiredCommandRoot  = "_GROVE.system.desired_commands."
+	desiredRetryDelay   = 50 * time.Millisecond
+	desiredRefreshDelay = 250 * time.Millisecond
+	desiredWriteTimeout = 30 * time.Second
 )
 
 var (
@@ -111,10 +113,7 @@ func (d *Desired) watch(ctx context.Context, transport *Transport) error {
 		return fmt.Errorf("new JetStream client: %w", err)
 	}
 	setupCtx, cancel := operationContext(ctx)
-	kv, err := js.CreateOrUpdateKeyValue(setupCtx, jetstream.KeyValueConfig{
-		Bucket: DesiredBucket, Description: "Authoritative Grove desired deployments",
-		History: 1, Storage: jetstream.FileStorage, Replicas: DesiredReplicas,
-	})
+	kv, err := openOrCreateKeyValue(setupCtx, js, desiredKeyValueConfig(controlStateBootstrapReplicas))
 	cancel()
 	if err != nil {
 		return fmt.Errorf("create desired deployment bucket: %w", err)
@@ -124,8 +123,11 @@ func (d *Desired) watch(ctx context.Context, transport *Transport) error {
 		return fmt.Errorf("watch desired deployment bucket: %w", err)
 	}
 	defer watcher.Stop()
+	refresh := time.NewTicker(desiredRefreshDelay)
+	defer refresh.Stop()
 	records := make(map[string]DesiredDeployment)
 	initialized := false
+	ready := false
 	for {
 		select {
 		case entry, ok := <-watcher.Updates():
@@ -134,7 +136,19 @@ func (d *Desired) watch(ctx context.Context, transport *Transport) error {
 			}
 			if entry == nil {
 				initialized = true
-				d.setReady(records)
+				refreshCtx, refreshCancel := operationContext(ctx)
+				refreshed, refreshErr := refreshDesiredRecords(refreshCtx, kv, records)
+				if refreshErr == nil {
+					records = refreshed
+					ready, refreshErr = keyValueRecordCountMatches(refreshCtx, kv, len(records))
+				}
+				refreshCancel()
+				if refreshErr != nil {
+					return refreshErr
+				}
+				if ready {
+					d.setReady(records)
+				}
 				continue
 			}
 			applicationID, err := applicationIDFromDesiredKey(entry.Key())
@@ -154,13 +168,91 @@ func (d *Desired) watch(ctx context.Context, transport *Transport) error {
 				}
 				records[applicationID] = deployment
 			}
-			if initialized {
+			if initialized && ready {
+				d.setReady(records)
+			}
+		case <-refresh.C:
+			if !initialized {
+				continue
+			}
+			refreshCtx, refreshCancel := operationContext(ctx)
+			refreshed, err := refreshDesiredRecords(refreshCtx, kv, records)
+			refreshCancel()
+			if err != nil {
+				if ready {
+					d.setRefreshError(records, err)
+				} else {
+					d.setUnavailable(err)
+				}
+				continue
+			}
+			records = refreshed
+			if !ready {
+				checkCtx, checkCancel := operationContext(ctx)
+				ready, err = keyValueRecordCountMatches(checkCtx, kv, len(records))
+				checkCancel()
+				if err != nil {
+					d.setUnavailable(err)
+					continue
+				}
+			}
+			if ready {
 				d.setReady(records)
 			}
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
+}
+
+func keyValueRecordCountMatches(ctx context.Context, kv jetstream.KeyValue, records int) (bool, error) {
+	status, err := kv.Status(ctx)
+	if err != nil {
+		return false, err
+	}
+	return uint64(records) == status.Values(), nil
+}
+
+func refreshDesiredRecords(
+	ctx context.Context,
+	kv jetstream.KeyValue,
+	records map[string]DesiredDeployment,
+) (map[string]DesiredDeployment, error) {
+	keys, err := kv.Keys(ctx)
+	if err != nil && !errors.Is(err, jetstream.ErrNoKeysFound) {
+		return nil, fmt.Errorf("list desired deployments: %w", err)
+	}
+	candidates := make(map[string]struct{}, len(keys)+len(records))
+	for _, key := range keys {
+		candidates[key] = struct{}{}
+	}
+	for applicationID := range records {
+		candidates[DesiredKey(applicationID)] = struct{}{}
+	}
+	refreshed := make(map[string]DesiredDeployment, len(candidates))
+	for key := range candidates {
+		applicationID, err := applicationIDFromDesiredKey(key)
+		if err != nil {
+			return nil, err
+		}
+		entry, err := kv.Get(ctx, key)
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("refresh desired deployment %q: %w", key, err)
+		}
+		var deployment DesiredDeployment
+		if err := json.Unmarshal(entry.Value(), &deployment); err != nil {
+			return nil, fmt.Errorf("decode desired deployment %q: %w", key, err)
+		}
+		deployment, err = validateDesiredDeployment(deployment)
+		if err != nil || deployment.ApplicationID != applicationID {
+			return nil, fmt.Errorf("validate desired deployment %q: %w", key, errors.Join(ErrDesiredDeploymentInvalid, err))
+		}
+		refreshed[applicationID] = deployment
+	}
+	return refreshed, nil
 }
 
 // Put validates and writes deployment to authoritative JetStream/KV state.
@@ -177,14 +269,32 @@ func (d *Desired) Put(ctx context.Context, transport *Transport, deployment Desi
 	if err != nil {
 		return &Error{Operation: "write desired deployment", Err: err}
 	}
-	kv, err := js.KeyValue(ctx, DesiredBucket)
-	if err != nil {
-		return &Error{Operation: "write desired deployment", Err: err}
+	writeCtx := ctx
+	cancel := func() {}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		writeCtx, cancel = context.WithTimeout(ctx, desiredWriteTimeout)
 	}
-	if _, err := kv.Put(ctx, DesiredKey(deployment.ApplicationID), encoded); err != nil {
-		return &Error{Operation: "write desired deployment", Err: err}
+	defer cancel()
+	ticker := time.NewTicker(desiredRetryDelay)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		attemptCtx, attemptCancel := context.WithTimeout(writeCtx, controlStateOperationTimeout)
+		kv, err := js.KeyValue(attemptCtx, DesiredBucket)
+		if err == nil {
+			_, err = kv.Put(attemptCtx, DesiredKey(deployment.ApplicationID), encoded)
+		}
+		attemptCancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		select {
+		case <-ticker.C:
+		case <-writeCtx.Done():
+			return &Error{Operation: "write desired deployment", Err: errors.Join(lastErr, writeCtx.Err())}
+		}
 	}
-	return nil
 }
 
 func validateDesiredDeployment(deployment DesiredDeployment) (DesiredDeployment, error) {
@@ -227,13 +337,21 @@ func (d *Desired) Snapshot() DesiredView {
 }
 
 func (d *Desired) setReady(records map[string]DesiredDeployment) {
+	d.setObserved(records, "")
+}
+
+func (d *Desired) setRefreshError(records map[string]DesiredDeployment, err error) {
+	d.setObserved(records, err.Error())
+}
+
+func (d *Desired) setObserved(records map[string]DesiredDeployment, observedError string) {
 	deployments := make([]DesiredDeployment, 0, len(records))
 	for _, deployment := range records {
 		deployments = append(deployments, deployment)
 	}
 	sort.Slice(deployments, func(i, j int) bool { return deployments[i].ApplicationID < deployments[j].ApplicationID })
 	d.mu.Lock()
-	d.view = DesiredView{Ready: true, Deployments: deployments}
+	d.view = DesiredView{Ready: true, Deployments: deployments, Error: observedError}
 	d.mu.Unlock()
 }
 

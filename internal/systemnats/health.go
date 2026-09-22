@@ -190,7 +190,7 @@ func (h *Health) evaluate(now time.Time) {
 	for _, member := range membership.Members {
 		lastSeen := h.lastSeen[member.NodeID]
 		state := HealthUnavailable
-		if !lastSeen.IsZero() && now.Sub(lastSeen) <= h.config.UnavailableAfter {
+		if !member.Leaving && !lastSeen.IsZero() && now.Sub(lastSeen) <= h.config.UnavailableAfter {
 			state = HealthHealthy
 		}
 		node := ClusterNode{

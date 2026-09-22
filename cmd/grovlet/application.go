@@ -40,13 +40,19 @@ var (
 )
 
 type applicationController struct {
-	binaryPath    string
-	runtimeDir    string
-	operationMu   sync.Mutex
-	mu            sync.RWMutex
-	cluster       *applicationCluster
-	lastEvent     string
-	debugSessions map[string]console.DebugSession
+	binaryPath     string
+	runtimeDir     string
+	operationMu    sync.Mutex
+	mu             sync.RWMutex
+	cluster        *applicationCluster
+	discovery      *applicationDiscovery
+	startup        artifact.Inspection
+	startAvailable bool
+	joinAvailable  bool
+	startupNodes   int
+	localNodeID    string
+	lastEvent      string
+	debugSessions  map[string]console.DebugSession
 }
 
 type applicationCluster struct {
@@ -70,6 +76,11 @@ type resilienceActionResult struct {
 	RecoveredNodeID string                      `json:"recovered_node_id"`
 	Order           groveshop.Order             `json:"order"`
 	Status          groveshop.ClusterStatusView `json:"status"`
+}
+
+type applicationJoinResult struct {
+	State  string `json:"state"`
+	NodeID string `json:"node_id"`
 }
 
 func newApplicationController(binaryPath, runtimeDir string) *applicationController {
@@ -121,6 +132,20 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 			Description: "Resolve a Grove Shop service and expose its Delve DAP session locally.",
 			Handler:     controller.attachDebugger,
 		},
+	}
+	if controller.applicationStartAvailable() {
+		actions = append(actions, console.Action{
+			Name: "cluster.start", Label: "Start new cluster", Section: "Cluster",
+			Description: "Start the first node of a new Grove Shop cluster.",
+			Handler:     controller.startDiscoveredApplicationCluster,
+		})
+	}
+	if controller.applicationJoinAvailable() {
+		actions = append(actions, console.Action{
+			Name: "cluster.join", Label: "Join cluster", Section: "Cluster",
+			Description: "Join the discovered Grove Shop cluster with this artifact.",
+			Handler:     controller.joinApplicationCluster,
+		})
 	}
 	for _, action := range actions {
 		if err := registry.Register(action); err != nil {
@@ -955,15 +980,15 @@ func waitForApplicationOrder(ctx context.Context, webAddress, orderID string) (g
 
 func (c *applicationController) readModel(ctx context.Context) (console.Model, error) {
 	status, err := c.status(ctx)
-	if err != nil {
-		return console.Model{}, err
-	}
 	model := console.Model{
 		Application:   "Grove Shop",
 		Sections:      []string{"Cluster", "Services", "Nodes", "Deployments", "Configuration", "Logs", "Debug", "Application"},
 		Health:        status.Health,
 		NodesTotal:    len(status.Nodes),
 		ServicesTotal: len(status.Placements),
+	}
+	if err != nil {
+		model.Health = "starting"
 	}
 	for _, node := range status.Nodes {
 		if node.Health == string(systemnats.HealthHealthy) {
@@ -987,12 +1012,36 @@ func (c *applicationController) readModel(ctx context.Context) (console.Model, e
 	}
 	c.mu.RLock()
 	model.LastEvent = c.lastEvent
+	if err != nil && model.LastEvent == "" {
+		model.LastEvent = "waiting for Grove control-plane state: " + err.Error()
+	}
 	if c.cluster != nil && c.cluster.webAddress != "" {
 		model.IngressURL = "http://" + c.cluster.webAddress
 	}
 	model.DebugSessions = copyDebugSessions(c.debugSessions)
+	if c.startAvailable {
+		model.StartupAction = "cluster.start"
+	}
+	if c.joinAvailable {
+		model.StartupAction = "cluster.join"
+		model.StartupNodes = c.startupNodes
+		model.StartupStatus = "Healthy"
+	}
+	if model.StartupAction != "" {
+		model.Application = "GroveShop"
+		model.StartupCluster = c.startup.Config.Facts["cluster.name"]
+		model.StartupBuild = shortApplicationBuild(c.startup.ArtifactDigest)
+	}
 	c.mu.RUnlock()
 	return model, nil
+}
+
+func shortApplicationBuild(digest string) string {
+	digest = strings.TrimPrefix(digest, "sha256:")
+	if len(digest) > 7 {
+		return digest[:7]
+	}
+	return digest
 }
 
 func (c *applicationController) setLastEvent(event string) {
@@ -1003,6 +1052,19 @@ func (c *applicationController) setLastEvent(event string) {
 
 func cleanupApplicationNodes(nodes []*grovetest.Node) {
 	for _, node := range nodes {
+		_ = node.Cleanup()
+	}
+}
+
+func gracefullyStopApplicationNodes(nodes []*grovetest.Node) {
+	for _, node := range nodes {
+		// A configured application node may spend up to gracefulLeaveTimeout
+		// relocating services and evacuating its JetStream peers. Keep the
+		// supervising console alive slightly longer so q cannot kill the child
+		// halfway through that protocol and then remove it from discovery.
+		ctx, cancel := context.WithTimeout(context.Background(), gracefulLeaveTimeout+5*time.Second)
+		_ = node.Stop(ctx)
+		cancel()
 		_ = node.Cleanup()
 	}
 }
@@ -1021,10 +1083,26 @@ func applicationDiagnostics(nodes []*grovetest.Node) string {
 func (c *applicationController) close() {
 	c.mu.Lock()
 	cluster := c.cluster
+	discovery := c.discovery
+	localNodeID := c.localNodeID
 	c.cluster = nil
+	c.discovery = nil
+	c.localNodeID = ""
 	clear(c.debugSessions)
 	c.mu.Unlock()
 	if cluster != nil {
-		cleanupApplicationNodes(cluster.nodes)
+		if discovery != nil {
+			gracefullyStopApplicationNodes(cluster.nodes)
+		} else {
+			cleanupApplicationNodes(cluster.nodes)
+		}
+	}
+	if discovery != nil && localNodeID != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = discovery.removeNode(ctx, localNodeID)
+		cancel()
+	}
+	if discovery != nil {
+		discovery.close()
 	}
 }

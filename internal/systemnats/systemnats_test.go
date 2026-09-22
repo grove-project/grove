@@ -9,6 +9,8 @@ import (
 
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/internal/systemnats"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // Transport carries Grove envelopes without exposing NATS to the application
@@ -244,6 +246,51 @@ func TestStartClusterServer(t *testing.T) {
 	})
 	if !errors.Is(err, systemnats.ErrServerNotReady) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("unreachable seed error = %v; want readiness deadline", err)
+	}
+}
+
+func TestStartClusterServerBootstrapsUsableSingleNodeJetStream(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	started, err := systemnats.StartClusterServer(ctx, systemnats.ClusterConfig{
+		Name:              "node-1",
+		Host:              "127.0.0.1",
+		RouteHost:         "127.0.0.1",
+		JetStreamStoreDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(started.Shutdown)
+	connection, err := nats.Connect(started.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(connection.Close)
+	js, err := jetstream.New(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := js.AccountInfo(ctx); err != nil {
+		t.Fatalf("single logical node has no JetStream metadata leader: %v", err)
+	}
+	kv, err := js.CreateKeyValue(ctx, jetstream.KeyValueConfig{
+		Bucket:   "SINGLE_NODE_READY",
+		Storage:  jetstream.FileStorage,
+		Replicas: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kv.Put(ctx, "ready", []byte("true")); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := kv.Get(ctx, "ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(entry.Value()); got != "true" {
+		t.Fatalf("single-node authoritative state = %q; want true", got)
 	}
 }
 

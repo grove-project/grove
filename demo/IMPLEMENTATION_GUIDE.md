@@ -74,8 +74,8 @@ Grove must distinguish:
 - **Build identity**: identifies the exact built artifact/version.
 
 On startup, the process discovers reachable Grove clusters for the same application identity:
-- If no matching cluster exists, the first process bootstraps a new cluster.
-- If a matching cluster exists and its build identity matches the local binary, the TUI immediately suggests joining that cluster. Joining is the primary/default action; creating a second cluster for the same application is an explicit secondary/advanced action.
+- If no matching cluster exists, the first process offers **Start new cluster** and bootstraps one node after confirmation.
+- If a matching cluster exists and its build identity matches the local binary, **Join cluster** is the only startup action. The flow does not offer a second cluster for the same application and build.
 - If a matching cluster exists but the build identity differs, the TUI treats the local binary as a rollout candidate and immediately suggests rolling that build out to the existing cluster.
 - Unrelated Grove applications must not be presented as join or rollout targets.
 
@@ -96,6 +96,8 @@ The Cluster view is a live projection of shared control-plane state, not a local
 Changes must propagate to all open Cluster views promptly enough that tiled terminals visibly behave as views into one cluster.
 
 During node failure/recovery, all surviving terminals must show the membership change and resulting service relocation. During a rollout, all terminals must transition into rollout state and display progress as the candidate replaces the previous build. When the rollout completes or rolls back, all terminals must converge on the resulting stable state.
+
+Graceful terminal exit relocates the departing node's services before removing its authoritative membership record. Abrupt process loss remains visible as an unavailable member; Grove must not silently forget a failed node as though it had completed a graceful retirement.
 
 ### Build-and-run rollout demo
 

@@ -132,16 +132,9 @@ func TestConfiguredArtifactRolloutIdentityConverges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	kv, err := js.KeyValue(ctx, systemnats.DeploymentBucket)
+	kv, err := waitForDeploymentReplicas(ctx, js, systemnats.DeploymentReplicas)
 	if err != nil {
 		t.Fatal(err)
-	}
-	status, err := kv.Status(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status.Config().Replicas != systemnats.DeploymentReplicas {
-		t.Errorf("deployment state replicas = %d; want %d", status.Config().Replicas, systemnats.DeploymentReplicas)
 	}
 	for _, record := range wantArtifacts {
 		key, err := systemnats.DeploymentArtifactKey(record.ArtifactDigest)
@@ -158,6 +151,41 @@ func TestConfiguredArtifactRolloutIdentityConverges(t *testing.T) {
 	}
 	if _, err := kv.Get(ctx, rolloutKey); err != nil {
 		t.Errorf("read persisted rollout: %v", err)
+	}
+}
+
+func waitForDeploymentReplicas(
+	ctx context.Context,
+	js jetstream.JetStream,
+	want int,
+) (jetstream.KeyValue, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	var last int
+	var lastErr error
+	for {
+		attemptCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		kv, err := js.KeyValue(attemptCtx, systemnats.DeploymentBucket)
+		if err == nil {
+			status, statusErr := kv.Status(attemptCtx)
+			if statusErr == nil {
+				last = status.Config().Replicas
+				if last == want {
+					cancel()
+					return kv, nil
+				}
+			} else {
+				lastErr = statusErr
+			}
+		} else {
+			lastErr = err
+		}
+		cancel()
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("deployment state replicas = %d, error=%v, want %d: %w", last, lastErr, want, ctx.Err())
+		}
 	}
 }
 

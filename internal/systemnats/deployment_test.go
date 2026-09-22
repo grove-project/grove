@@ -145,8 +145,8 @@ func TestDeploymentStateConvergesThroughControlAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Config().Replicas != systemnats.DeploymentReplicas {
-		t.Errorf("deployment replicas = %d; want %d", status.Config().Replicas, systemnats.DeploymentReplicas)
+	if status.Config().Replicas != 1 {
+		t.Errorf("deployment bootstrap replicas = %d; want 1", status.Config().Replicas)
 	}
 }
 

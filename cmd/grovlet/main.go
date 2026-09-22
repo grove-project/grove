@@ -23,6 +23,8 @@ import (
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
+const gracefulLeaveTimeout = 30 * time.Second
+
 var (
 	errRuntimeDirRequired            = errors.New("runtime directory is required")
 	errSystemNATSConflict            = errors.New("embedded System NATS configuration and URL are mutually exclusive")
@@ -30,7 +32,7 @@ var (
 	errSystemNATSRouteListenRequired = errors.New("system NATS route listener requires an embedded client listener")
 	errSystemNATSSeedRouteRequired   = errors.New("system NATS seed requires a route listener")
 	errSystemNATSClusterIdentity     = errors.New("system NATS clustering requires node identity")
-	errSystemNATSMembershipCluster   = errors.New("system NATS membership requires a route listener and seed")
+	errSystemNATSMembershipCluster   = errors.New("system NATS membership requires a route listener")
 	errSystemNATSRecoveryCluster     = errors.New("system NATS recovery requires membership")
 	errGroveShopEndpoint             = errors.New("reference application service placement requires a System NATS endpoint")
 	errGroveShopPlacementCluster     = errors.New("placed Grove Shop components require System NATS membership")
@@ -49,6 +51,7 @@ type config struct {
 	systemNATSSeed             string
 	systemNATSMembership       bool
 	systemNATSRecovery         bool
+	systemNATSRetireOnStop     bool
 	systemNATSURL              string
 	systemNATSSubject          string
 	groveShopOrders            bool
@@ -180,12 +183,18 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 
 	<-ctx.Done()
+	var leaveErr error
+	if cfg.systemNATSRetireOnStop {
+		leaveCtx, leaveCancel := context.WithTimeout(context.Background(), gracefulLeaveTimeout)
+		leaveErr = systemRuntime.gracefulLeave(leaveCtx, cfg.nodeID)
+		leaveCancel()
+	}
 	systemRuntime.stop()
 
 	if err := encoder.Encode(lifecycleEvent{Event: "stopped"}); err != nil {
 		return fmt.Errorf("encode stopped event: %w", err)
 	}
-	return nil
+	return leaveErr
 }
 
 func parseConfig(args []string, stderr io.Writer) (config, error) {
@@ -198,6 +207,7 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.StringVar(&cfg.systemNATSSeed, "system-nats-seed", "", "explicit System NATS seed route URL")
 	flags.BoolVar(&cfg.systemNATSMembership, "system-nats-membership", false, "register and observe replicated Grove membership")
 	flags.BoolVar(&cfg.systemNATSRecovery, "system-nats-recovery", false, "recover placed services from unavailable Grovlets")
+	flags.BoolVar(&cfg.systemNATSRetireOnStop, "system-nats-retire-on-stop", false, "retire this logical node after graceful service relocation")
 	flags.StringVar(&cfg.systemNATSURL, "system-nats-url", "", "System NATS server URL")
 	flags.StringVar(&cfg.systemNATSSubject, "system-nats-subject", "", "System NATS transport endpoint subject")
 	flags.BoolVar(&cfg.groveShopOrders, "grove-shop-orders", false, "place Grove Shop Orders on this Grovlet")
@@ -238,10 +248,13 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 			)
 		}
 	}
-	if cfg.systemNATSMembership && (cfg.systemNATSRouteListen == "" || cfg.systemNATSSeed == "") {
+	if cfg.systemNATSMembership && cfg.systemNATSRouteListen == "" {
 		return config{}, errSystemNATSMembershipCluster
 	}
 	if cfg.systemNATSRecovery && !cfg.systemNATSMembership {
+		return config{}, errSystemNATSRecoveryCluster
+	}
+	if cfg.systemNATSRetireOnStop && !cfg.systemNATSRecovery {
 		return config{}, errSystemNATSRecoveryCluster
 	}
 	if cfg.systemNATSSubject != "" && cfg.systemNATSListen == "" && cfg.systemNATSURL == "" {
@@ -253,7 +266,7 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	if (cfg.groveShopOrders || cfg.groveShopPayment || cfg.groveShopShipping || cfg.groveShopWeb) && !cfg.systemNATSMembership {
 		return config{}, errGroveShopPlacementCluster
 	}
-	if cfg.groveShopDistributedOrders && !cfg.groveShopOrders {
+	if cfg.groveShopDistributedOrders && !cfg.groveShopOrders && !cfg.systemNATSRecovery {
 		return config{}, errGroveShopDistributedOrders
 	}
 	if cfg.groveShopOrders && cfg.groveShopInventorySubject != "" {
@@ -262,7 +275,7 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	if cfg.groveShopWeb && cfg.groveShopWebListen == "" {
 		return config{}, errGroveShopWebListenRequired
 	}
-	if !cfg.groveShopWeb && cfg.groveShopWebListen != "" {
+	if !cfg.groveShopWeb && cfg.groveShopWebListen != "" && !cfg.systemNATSRecovery {
 		return config{}, errGroveShopWebListenRequired
 	}
 	if (cfg.nodeID == "") != (cfg.advertisedEndpoint == "") {
@@ -318,6 +331,8 @@ type systemNATSRuntime struct {
 	recoveryDone      chan struct{}
 	reconcileCancel   context.CancelFunc
 	reconcileDone     chan struct{}
+	membership        *systemnats.Membership
+	placement         *systemnats.Placement
 }
 
 func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error) {
@@ -383,6 +398,13 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 			return nil, err
 		}
 		runtime.startMembership(ctx, membership)
+		runtime.membership = membership
+		if runtime.server != nil {
+			if err := transport.ServePeer(ctx, cfg.nodeID, runtime.server); err != nil {
+				runtime.stop()
+				return nil, err
+			}
+		}
 
 		deployments := systemnats.NewDeployments()
 		if err := transport.ServeDeployments(ctx, cfg.nodeID, deployments); err != nil {
@@ -418,6 +440,7 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 			return nil, err
 		}
 		runtime.startPlacement(ctx, placement)
+		runtime.placement = placement
 		if !restoreControlState {
 			if err := transport.ServeDesired(ctx, cfg.nodeID, desired); err != nil {
 				runtime.stop()
@@ -629,12 +652,17 @@ func groveShopComponentSpecs(cfg config) []componentSpec {
 }
 
 func groveShopRecoveryComponentSpecs(cfg config) []componentSpec {
+	ordersArgs := []string(nil)
+	if cfg.groveShopDistributedOrders {
+		ordersArgs = []string{"--distributed-orders"}
+	}
 	components := []componentSpec{
 		{
-			serviceID: groveshop.ServiceOrders,
-			name:      "Orders",
-			kind:      workerOrders,
-			subject:   componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceOrders),
+			serviceID:  groveshop.ServiceOrders,
+			name:       "Orders",
+			kind:       workerOrders,
+			subject:    componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceOrders),
+			workerArgs: ordersArgs,
 		},
 		{
 			serviceID: groveshop.ServiceInventory,
@@ -642,8 +670,20 @@ func groveShopRecoveryComponentSpecs(cfg config) []componentSpec {
 			kind:      workerInventory,
 			subject:   componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceInventory),
 		},
+		{
+			serviceID: groveshop.ServicePayment,
+			name:      "Payment",
+			kind:      workerPayment,
+			subject:   componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServicePayment),
+		},
+		{
+			serviceID: groveshop.ServiceShipping,
+			name:      "Shipping",
+			kind:      workerShipping,
+			subject:   componentInvocationSubject(cfg.systemNATSSubject, groveshop.ServiceShipping),
+		},
 	}
-	if cfg.groveShopWeb {
+	if cfg.groveShopWebListen != "" {
 		components = append(components, componentSpec{
 			serviceID:  groveshop.ServiceWeb,
 			name:       "Web",
@@ -827,6 +867,173 @@ func (r *systemNATSRuntime) stop() {
 	if r.server != nil {
 		r.server.Shutdown()
 	}
+}
+
+func (r *systemNATSRuntime) gracefulLeave(ctx context.Context, nodeID string) error {
+	if r.membership == nil || r.transport == nil {
+		return nil
+	}
+	membership := r.membership.Snapshot()
+	if !membership.Ready {
+		return nil
+	}
+	if err := r.membership.BeginLeave(ctx, r.transport); err != nil {
+		return err
+	}
+	if r.reconcileCancel != nil {
+		r.reconcileCancel()
+		<-r.reconcileDone
+		r.reconcileCancel = nil
+	}
+	if r.recoveryCancel != nil {
+		r.recoveryCancel()
+		<-r.recoveryDone
+		r.recoveryCancel = nil
+	}
+	if r.components != nil {
+		if err := r.components.stopAll(ctx); err != nil {
+			return fmt.Errorf("stop components before node retirement: %w", err)
+		}
+	}
+	if r.healthCancel != nil {
+		r.healthCancel()
+		<-r.healthDone
+		r.healthCancel = nil
+	}
+	peerIDs := make([]string, 0, len(membership.Members)-1)
+	for _, member := range membership.Members {
+		if member.NodeID != nodeID {
+			peerIDs = append(peerIDs, member.NodeID)
+		}
+	}
+	if r.placement != nil && len(peerIDs) != 0 {
+		shouldRetire, err := r.waitForPlacementRetirement(ctx, nodeID, peerIDs, membership.Members)
+		if err != nil {
+			return err
+		}
+		if !shouldRetire {
+			return nil
+		}
+	}
+	if r.server != nil {
+		if r.server.HasPeer() && len(peerIDs) != 0 {
+			var transferErr error
+			for _, peerID := range peerIDs {
+				if err := r.transport.RequestPeer(ctx, peerID); err == nil {
+					transferErr = nil
+					break
+				} else {
+					transferErr = errors.Join(transferErr, err)
+				}
+			}
+			if transferErr != nil {
+				return fmt.Errorf("transfer System NATS metadata witness: %w", transferErr)
+			}
+		}
+		if err := r.server.PrepareRetire(ctx); err != nil {
+			return err
+		}
+	}
+	if err := r.membership.Leave(ctx, r.transport); err != nil {
+		return err
+	}
+	if len(peerIDs) != 0 {
+		if err := r.waitForMembershipRetirement(ctx, nodeID, peerIDs); err != nil {
+			return err
+		}
+	}
+	if r.server != nil {
+		if err := r.server.Retire(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *systemNATSRuntime) waitForMembershipRetirement(
+	ctx context.Context,
+	nodeID string,
+	peerIDs []string,
+) error {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	var last systemnats.MembershipView
+	var lastErr error
+	for {
+		for _, peerID := range peerIDs {
+			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			view, err := r.transport.RequestMembership(requestCtx, peerID)
+			cancel()
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			last = view
+			retired := view.Ready
+			for _, member := range view.Members {
+				if member.NodeID == nodeID {
+					retired = false
+					break
+				}
+			}
+			if retired {
+				return nil
+			}
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return fmt.Errorf("wait for membership retirement of %s: membership=%#v: %w", nodeID, last, errors.Join(lastErr, ctx.Err()))
+		}
+	}
+}
+
+func (r *systemNATSRuntime) waitForPlacementRetirement(
+	ctx context.Context,
+	nodeID string,
+	peerIDs []string,
+	members []systemnats.MembershipRecord,
+) (bool, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	var last systemnats.PlacementView
+	var lastErr error
+	for {
+		allLeaving, err := r.membership.AllLeaving(ctx, r.transport, members)
+		if err == nil && allLeaving {
+			return false, nil
+		}
+		if err != nil {
+			lastErr = err
+		}
+		for _, peerID := range peerIDs {
+			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			view, err := r.transport.RequestPlacement(requestCtx, peerID)
+			cancel()
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			last = view
+			if view.Ready && !placementReferencesNode(view, nodeID) {
+				return true, nil
+			}
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return false, fmt.Errorf("wait for service relocation from %s: placement=%#v: %w", nodeID, last, errors.Join(lastErr, ctx.Err()))
+		}
+	}
+}
+
+func placementReferencesNode(view systemnats.PlacementView, nodeID string) bool {
+	for _, placement := range view.Placements {
+		if placement.NodeID == nodeID {
+			return true
+		}
+	}
+	return false
 }
 
 func prepareRuntimeDir(path string) error {

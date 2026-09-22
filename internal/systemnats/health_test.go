@@ -101,6 +101,29 @@ func TestHealthRun(t *testing.T) {
 		}
 	}
 
+	// Graceful intent is authoritative and must make the node immediately
+	// unavailable for placement recovery even while its final heartbeats are
+	// still arriving.
+	membership.mu.Lock()
+	membership.view.Members[0].Leaving = true
+	membership.mu.Unlock()
+	leaving, err := waitForClusterView(ctx, query, "node-a", func(view ClusterView) bool {
+		return view.Ready &&
+			len(view.Nodes) == 2 &&
+			view.Nodes[0].Health == HealthHealthy &&
+			view.Nodes[1].NodeID == "node-b" &&
+			view.Nodes[1].Health == HealthUnavailable
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leaving.Nodes[1].LastSeen == "" {
+		t.Fatal("gracefully leaving node lost its last heartbeat timestamp")
+	}
+	membership.mu.Lock()
+	membership.view.Members[0].Leaving = false
+	membership.mu.Unlock()
+
 	cancelNodeB()
 	unavailable, err := waitForClusterView(ctx, query, "node-a", func(view ClusterView) bool {
 		return view.Ready &&

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
+	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/console"
 	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/internal/systemnats"
@@ -95,6 +97,10 @@ func buildApplicationLogsView(
 		len(status.Nodes),
 		len(status.Placements),
 	))
+	placedComponents := make(map[string]struct{}, len(status.Placements))
+	for _, placement := range status.Placements {
+		placedComponents[placementComponentKey(placement.NodeID, placement.ServiceID)] = struct{}{}
+	}
 	for _, node := range status.Nodes {
 		line := fmt.Sprintf("node=%s health=%s components=%d", node.NodeID, node.Health, len(node.Components))
 		if node.Error != "" {
@@ -120,7 +126,8 @@ func buildApplicationLogsView(
 				componentLine += " error=" + component.Error
 			}
 			view.Application = append(view.Application, componentLine)
-			if component.State != string(systemnats.ComponentHealthy) && component.State != string(systemnats.ComponentDebugging) {
+			_, placed := placedComponents[placementComponentKey(node.NodeID, component.ServiceID)]
+			if placed && component.State != string(systemnats.ComponentHealthy) && component.State != string(systemnats.ComponentDebugging) {
 				cause := fmt.Sprintf("%s on %s is %s", component.Name, node.NodeID, component.State)
 				if component.Error != "" {
 					cause += ": " + component.Error
@@ -178,7 +185,12 @@ func buildApplicationLogsView(
 	return view
 }
 
+func placementComponentKey(nodeID string, serviceID grove.ServiceID) string {
+	return nodeID + ":" + strconv.FormatUint(uint64(serviceID), 10)
+}
+
 func classifyApplicationNodeLogs(node applicationNodeLogs, view *applicationLogsView) {
+	nodeID := node.NodeID
 	for _, rawLine := range strings.Split(node.Output, "\n") {
 		line := strings.TrimSpace(rawLine)
 		if line == "" {
@@ -186,18 +198,21 @@ func classifyApplicationNodeLogs(node applicationNodeLogs, view *applicationLogs
 		}
 		var event lifecycleEvent
 		if json.Unmarshal([]byte(line), &event) == nil && event.Event != "" {
-			view.Cluster = append(view.Cluster, fmt.Sprintf("node=%s event=%s", node.NodeID, event.Event))
+			if event.NodeID != "" {
+				nodeID = event.NodeID
+			}
+			view.Cluster = append(view.Cluster, fmt.Sprintf("node=%s event=%s", nodeID, event.Event))
 			if event.SystemNATSURL != "" {
 				view.SystemNATS = append(view.SystemNATS, fmt.Sprintf(
 					"node=%s client=%s route=%s",
-					node.NodeID,
+					nodeID,
 					event.SystemNATSURL,
 					displayApplicationLogValue(event.SystemNATSRouteURL),
 				))
 			}
 			continue
 		}
-		entry := node.NodeID + " " + line
+		entry := nodeID + " " + line
 		lower := strings.ToLower(line)
 		if strings.Contains(lower, "nats") || strings.Contains(lower, "jetstream") ||
 			strings.Contains(lower, "raft") || strings.Contains(lower, "subject") {

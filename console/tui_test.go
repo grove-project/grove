@@ -64,3 +64,57 @@ func TestTUIRendersStateAndUsesRegisteredAction(t *testing.T) {
 		t.Errorf("Select() = %q, selected = %q; want shared rollout handler", result, selected)
 	}
 }
+
+func TestTUIRendersClusterStartupContracts(t *testing.T) {
+	var registry console.Registry
+	for _, action := range []console.Action{
+		{Name: "cluster.start", Label: "Start new cluster", Section: "Cluster", Handler: func(context.Context, []string) (any, error) { return nil, nil }},
+		{Name: "cluster.join", Label: "Join cluster", Section: "Cluster", Handler: func(context.Context, []string) (any, error) { return nil, nil }},
+		{Name: "cluster.status", Label: "Status", Section: "Cluster", Handler: func(context.Context, []string) (any, error) { return nil, nil }},
+	} {
+		if err := registry.Register(action); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tests := []struct {
+		name  string
+		model console.Model
+		want  []string
+		not   []string
+	}{
+		{
+			name:  "new cluster",
+			model: console.Model{Application: "GroveShop", StartupAction: "cluster.start", StartupBuild: "a82f19c"},
+			want:  []string{"No GroveShop cluster discovered", "> Start new cluster", "Application  GroveShop", "Build        a82f19c", "Enter select"},
+			not:   []string{"Join cluster", "Status  [cluster.status]"},
+		},
+		{
+			name:  "join cluster",
+			model: console.Model{Application: "GroveShop", StartupAction: "cluster.join", StartupCluster: "groveshop-local", StartupNodes: 1, StartupBuild: "a82f19c", StartupStatus: "Healthy"},
+			want:  []string{"Grove cluster discovered", "Cluster  groveshop-local", "Nodes    1", "Build    a82f19c", "Status   Healthy", "> Join cluster", "Enter join   Esc cancel"},
+			not:   []string{"Start new cluster", "Status  [cluster.status]"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			tui, err := console.NewTUI(&registry, func(context.Context) (console.Model, error) { return test.model, nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := tui.Render(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range test.want {
+				if !strings.Contains(snapshot, want) {
+					t.Errorf("startup Render() = %q; want %q", snapshot, want)
+				}
+			}
+			for _, unwanted := range test.not {
+				if strings.Contains(snapshot, unwanted) {
+					t.Errorf("startup Render() = %q; must not contain %q", snapshot, unwanted)
+				}
+			}
+		})
+	}
+}

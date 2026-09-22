@@ -62,6 +62,15 @@ func runApplicationConsole(ctx context.Context, args []string, input io.Reader, 
 	}
 	controller := newApplicationController(executable, runtimeDir)
 	defer controller.close()
+	inspection, _, err := loadEmbeddedGroveShopConfiguration()
+	if err != nil {
+		return fmt.Errorf("load Grove Shop startup identity: %w", err)
+	}
+	if !inspection.ConfigEmpty {
+		if err := controller.prepareConfiguredApplicationStartup(ctx, inspection); err != nil {
+			return fmt.Errorf("prepare Grove Shop startup: %w", err)
+		}
+	}
 	var registry console.Registry
 	if err := registerApplicationConsoleActions(&registry, controller); err != nil {
 		return err
@@ -151,6 +160,8 @@ func summarizeInteractiveResult(result any) string {
 			value.WorkerID,
 			value.DAPEndpoint,
 		)
+	case applicationJoinResult:
+		return fmt.Sprintf("Cluster: %s\nNode: %s", value.State, value.NodeID)
 	case groveshop.ClusterStatusView:
 		return fmt.Sprintf("Cluster: %s\nNodes: %d\nServices: %d", value.Health, len(value.Nodes), len(value.Placements))
 	}
@@ -185,6 +196,10 @@ func resolveTUISelection(line string) (string, []string, bool) {
 		switch {
 		case parts[0] == "Cluster" && parts[1] == "Status" && len(parts) == 2:
 			return "cluster.status", nil, true
+		case parts[0] == "Cluster" && parts[1] == "Start new cluster" && len(parts) == 2:
+			return "cluster.start", nil, true
+		case parts[0] == "Cluster" && (parts[1] == "Join" || parts[1] == "Join cluster") && len(parts) == 2:
+			return "cluster.join", nil, true
 		case parts[0] == "Cluster" && parts[1] == "Restart cluster" && len(parts) == 2:
 			return "cluster.restart", nil, true
 		case parts[0] == "Deployments" && parts[1] == "New rollout" && len(parts) == 3 && parts[2] != "":
