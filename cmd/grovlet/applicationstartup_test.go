@@ -65,7 +65,7 @@ func TestApplicationDiscoveryRecordLifecycle(t *testing.T) {
 }
 
 func TestConfiguredArtifactBootstrapsThenJoinsOneCluster(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Minute)
 	defer cancel()
 	directory := t.TempDir()
 	discoveryAddress := testApplicationDiscoveryAddress(t)
@@ -199,15 +199,66 @@ func TestConfiguredArtifactBootstrapsThenJoinsOneCluster(t *testing.T) {
 		}
 	}
 
-	consoles[3].stop(t)
-	record = waitForApplicationDiscoveryNodes(t, ctx, discovery, 2)
-	waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 2, "node-4")
-	waitForApplicationControlReplicas(t, ctx, record.Nodes[0].SystemNATSURL, 2)
-	consoles[2].stop(t)
-	record = waitForApplicationDiscoveryNodes(t, ctx, discovery, 1)
-	waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 1, "node-3")
-	waitForApplicationControlReplicas(t, ctx, record.Nodes[0].SystemNATSURL, 1)
+	// Replace the complete original generation so the final membership is
+	// exactly node-4,node-5,node-6. This catches placement observers that
+	// restart empty during stream migration and never rediscover existing keys.
 	consoles[0].stop(t)
+	record = waitForApplicationDiscoveryNodes(t, ctx, discovery, 2)
+	waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 2, "node-1")
+	waitForApplicationControlReplicas(t, ctx, record.Nodes[0].SystemNATSURL, 2)
+
+	joinReplacement := func(nodeNumber, existingNodes int) *testArtifactConsole {
+		console := startTestArtifactConsole(
+			t, ctx, configuredPath, discoveryAddress,
+			filepath.Join(directory, "console-"+strconv.Itoa(nodeNumber)+".json"),
+		)
+		waitForArtifactConsoleText(t, ctx, console, "Grove cluster discovered")
+		if output := console.output.String(); !strings.Contains(output, "Nodes    "+strconv.Itoa(existingNodes)) {
+			t.Fatalf("replacement startup screen for node-%d = %q", nodeNumber, output)
+		}
+		output := runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, "cluster.join")
+		var joined applicationJoinResult
+		if err := json.Unmarshal(output, &joined); err != nil {
+			t.Fatalf("decode node-%d join result %q: %v", nodeNumber, output, err)
+		}
+		wantNodeID := "node-" + strconv.Itoa(nodeNumber)
+		if joined.State != "joined" || joined.NodeID != wantNodeID {
+			t.Fatalf("replacement join result = %#v; want %s joined", joined, wantNodeID)
+		}
+		return console
+	}
+
+	consoles = append(consoles, joinReplacement(5, 2))
+	record = waitForApplicationDiscoveryNodes(t, ctx, discovery, 3)
+	waitForApplicationClusterStage(t, ctx, record.WebAddress, inspection.ArtifactDigest, 3, 5)
+	waitForApplicationControlReplicas(t, ctx, record.Nodes[0].SystemNATSURL, 3)
+
+	consoles[2].stop(t)
+	record = waitForApplicationDiscoveryNodes(t, ctx, discovery, 2)
+	waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 2, "node-3")
+	waitForApplicationControlReplicas(t, ctx, record.Nodes[0].SystemNATSURL, 2)
+
+	consoles = append(consoles, joinReplacement(6, 2))
+	record = waitForApplicationDiscoveryNodes(t, ctx, discovery, 3)
+	status = waitForApplicationClusterStage(t, ctx, record.WebAddress, inspection.ArtifactDigest, 3, 5)
+	waitForApplicationControlReplicas(t, ctx, record.Nodes[0].SystemNATSURL, 3)
+	wantFinalNodes := []string{"node-4", "node-5", "node-6"}
+	for index, node := range status.Nodes {
+		if index >= len(wantFinalNodes) || node.NodeID != wantFinalNodes[index] {
+			t.Fatalf("final replacement nodes = %#v; want %v", status.Nodes, wantFinalNodes)
+		}
+	}
+	if len(status.Nodes) != len(wantFinalNodes) || len(status.Placements) != 5 {
+		t.Fatalf("final replacement status = %#v; want nodes 4,5,6 and five placements", status)
+	}
+	finalOrder, orderErr := waitForApplicationOrder(ctx, record.WebAddress, "after-complete-node-replacement")
+	if orderErr != nil || !applicationOrderCompleted(finalOrder) {
+		t.Fatalf("order after complete node replacement = %#v, error=%v", finalOrder, orderErr)
+	}
+
+	for _, index := range []int{5, 4, 3} {
+		consoles[index].stop(t)
+	}
 	if _, exists, err := discovery.discover(ctx); err != nil || exists {
 		t.Errorf("discovery after every console stopped: exists=%t error=%v", exists, err)
 	}

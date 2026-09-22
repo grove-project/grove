@@ -221,9 +221,27 @@ func refreshPlacementRecords(
 	kv jetstream.KeyValue,
 	records map[grove.ServiceID]PlacementRecord,
 ) (map[grove.ServiceID]PlacementRecord, error) {
-	refreshed := make(map[grove.ServiceID]PlacementRecord, len(records))
+	keys, err := kv.Keys(ctx)
+	if errors.Is(err, jetstream.ErrNoKeysFound) {
+		keys = nil
+	}
+	if err != nil {
+		if !errors.Is(err, jetstream.ErrNoKeysFound) {
+			return nil, fmt.Errorf("list placement records: %w", err)
+		}
+	}
+	// A key-list snapshot can be temporarily incomplete while a KV stream is
+	// moving leaders. Union it with the current view, then use point reads as
+	// the authority for both additions and deletions.
+	candidates := make(map[string]struct{}, len(keys)+len(records))
+	for _, key := range keys {
+		candidates[key] = struct{}{}
+	}
 	for serviceID := range records {
-		key := PlacementKey(serviceID)
+		candidates[PlacementKey(serviceID)] = struct{}{}
+	}
+	refreshed := make(map[grove.ServiceID]PlacementRecord, len(candidates))
+	for key := range candidates {
 		entry, err := kv.Get(ctx, key)
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			continue
@@ -235,7 +253,7 @@ func refreshPlacementRecords(
 		if err != nil {
 			return nil, err
 		}
-		refreshed[serviceID] = record
+		refreshed[record.ServiceID] = record
 	}
 	return refreshed, nil
 }

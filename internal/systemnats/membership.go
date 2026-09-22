@@ -55,6 +55,7 @@ func (m *Membership) BeginLeave(ctx context.Context, transport *Transport) error
 	m.mu.Lock()
 	m.record.Leaving = true
 	record := m.record
+	knownMembers := append([]MembershipRecord(nil), m.view.Members...)
 	m.mu.Unlock()
 	encoded, err := json.Marshal(record)
 	if err != nil {
@@ -71,7 +72,7 @@ func (m *Membership) BeginLeave(ctx context.Context, transport *Transport) error
 	if _, err := kv.Put(ctx, MembershipKey(record.NodeID), encoded); err != nil {
 		return &Error{Operation: "mark Grove membership leaving", Err: err}
 	}
-	records, err := readMembershipRecords(ctx, kv)
+	records, err := readKnownMembershipRecords(ctx, kv, knownMembers, record)
 	if err != nil {
 		return &Error{Operation: "read Grove membership for graceful replica shrink", Err: err}
 	}
@@ -79,6 +80,35 @@ func (m *Membership) BeginLeave(ctx context.Context, transport *Transport) error
 		return &Error{Operation: "shrink Grove control-state replicas", Err: err}
 	}
 	return nil
+}
+
+func readKnownMembershipRecords(
+	ctx context.Context,
+	kv jetstream.KeyValue,
+	known []MembershipRecord,
+	local MembershipRecord,
+) (map[string]MembershipRecord, error) {
+	records := make(map[string]MembershipRecord, len(known)+1)
+	records[local.NodeID] = local
+	for _, expected := range known {
+		entry, err := kv.Get(ctx, MembershipKey(expected.NodeID))
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			delete(records, expected.NodeID)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		var observed MembershipRecord
+		if err := json.Unmarshal(entry.Value(), &observed); err != nil {
+			return nil, fmt.Errorf("decode membership record %q: %w", entry.Key(), err)
+		}
+		if entry.Key() != MembershipKey(observed.NodeID) || observed.AdvertisedEndpoint == "" {
+			return nil, fmt.Errorf("validate membership record %q: %w", entry.Key(), ErrMembershipRecordInvalid)
+		}
+		records[observed.NodeID] = observed
+	}
+	return records, nil
 }
 
 // AllLeaving reports whether every still-registered member has announced a

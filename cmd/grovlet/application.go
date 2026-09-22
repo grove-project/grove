@@ -1058,7 +1058,11 @@ func cleanupApplicationNodes(nodes []*grovetest.Node) {
 
 func gracefullyStopApplicationNodes(nodes []*grovetest.Node) {
 	for _, node := range nodes {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		// A configured application node may spend up to gracefulLeaveTimeout
+		// relocating services and evacuating its JetStream peers. Keep the
+		// supervising console alive slightly longer so q cannot kill the child
+		// halfway through that protocol and then remove it from discovery.
+		ctx, cancel := context.WithTimeout(context.Background(), gracefulLeaveTimeout+5*time.Second)
 		_ = node.Stop(ctx)
 		cancel()
 		_ = node.Cleanup()

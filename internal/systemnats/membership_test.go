@@ -19,7 +19,7 @@ import (
 // Three observers build the same deterministic local view from one
 // three-replica authoritative membership bucket.
 func TestMembershipConverges(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 	defer cancel()
 	servers := make([]*systemnats.Server, 0, systemnats.MembershipReplicas)
 	transports := make([]*systemnats.Transport, 0, systemnats.MembershipReplicas)
@@ -198,10 +198,15 @@ func TestMembershipConverges(t *testing.T) {
 		t.Errorf("nil membership endpoint error = %v; want %v", err, systemnats.ErrMembershipRequired)
 	}
 
-	if err := memberships[1].BeginLeave(ctx, transports[1]); err != nil {
+	// Retire the bootstrap logical node first. Its paired metadata peer must be
+	// evacuated without making the surviving membership observers unavailable.
+	if err := memberships[0].BeginLeave(ctx, transports[0]); err != nil {
 		t.Fatal(err)
 	}
-	if err := servers[1].PrepareRetire(ctx); err != nil {
+	if err := servers[1].EnsurePeer(ctx); err != nil {
+		t.Fatalf("transfer internal metadata witness to node-2: %v", err)
+	}
+	if err := servers[0].PrepareRetire(ctx); err != nil {
 		t.Fatal(err)
 	}
 	for _, bucket := range []string{
@@ -210,34 +215,34 @@ func TestMembershipConverges(t *testing.T) {
 		systemnats.DesiredBucket,
 		systemnats.DeploymentBucket,
 	} {
-		if err := waitForBucketReplicas(ctx, servers[0].URL(), bucket, 2); err != nil {
-			t.Fatalf("%s replicas after node-2 began graceful leave: %v", bucket, err)
+		if err := waitForBucketReplicas(ctx, servers[1].URL(), bucket, 2); err != nil {
+			t.Fatalf("%s replicas after node-1 began graceful leave: %v", bucket, err)
 		}
 	}
-	if allLeaving, err := memberships[1].AllLeaving(ctx, transports[1], want); err != nil {
+	if allLeaving, err := memberships[0].AllLeaving(ctx, transports[0], want); err != nil {
 		t.Fatal(err)
 	} else if allLeaving {
 		t.Fatal("one leaving node reported whole-cluster shutdown")
 	}
-	if err := memberships[1].Leave(ctx, transports[1]); err != nil {
+	if err := memberships[0].Leave(ctx, transports[0]); err != nil {
 		t.Fatal(err)
 	}
-	wantAfterLeave := []systemnats.MembershipRecord{want[0], want[2]}
-	survivorTransports := []*systemnats.Transport{transports[0], transports[2]}
-	survivorNodeIDs := []string{nodeIDs[0], nodeIDs[2]}
+	wantAfterLeave := []systemnats.MembershipRecord{want[1], want[2]}
+	survivorTransports := []*systemnats.Transport{transports[1], transports[2]}
+	survivorNodeIDs := []string{nodeIDs[1], nodeIDs[2]}
 	views, err = waitForMembershipViews(ctx, survivorTransports, survivorNodeIDs, wantAfterLeave)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for i, view := range views {
 		if !slices.Equal(view.Members, wantAfterLeave) {
-			t.Errorf("%s membership after node-2 leave = %#v; want %#v", survivorNodeIDs[i], view.Members, wantAfterLeave)
+			t.Errorf("%s membership after node-1 leave = %#v; want %#v", survivorNodeIDs[i], view.Members, wantAfterLeave)
 		}
 	}
-	if err := servers[1].Retire(ctx); err != nil {
+	if err := servers[0].Retire(ctx); err != nil {
 		t.Fatal(err)
 	}
-	servers[1].Shutdown()
+	servers[0].Shutdown()
 
 	if err := memberships[2].BeginLeave(ctx, transports[2]); err != nil {
 		t.Fatal(err)
@@ -251,14 +256,14 @@ func TestMembershipConverges(t *testing.T) {
 		systemnats.DesiredBucket,
 		systemnats.DeploymentBucket,
 	} {
-		if err := waitForBucketReplicas(ctx, servers[0].URL(), bucket, 1); err != nil {
+		if err := waitForBucketReplicas(ctx, servers[1].URL(), bucket, 1); err != nil {
 			t.Fatalf("%s replicas after node-3 began final graceful leave: %v", bucket, err)
 		}
 	}
 	if err := memberships[2].Leave(ctx, transports[2]); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := waitForMembershipViews(ctx, transports[:1], nodeIDs[:1], want[:1]); err != nil {
+	if _, err := waitForMembershipViews(ctx, transports[1:2], nodeIDs[1:2], want[1:2]); err != nil {
 		t.Fatal(err)
 	}
 	if err := servers[2].Retire(ctx); err != nil {
@@ -271,7 +276,7 @@ func TestMembershipConverges(t *testing.T) {
 		systemnats.DesiredBucket,
 		systemnats.DeploymentBucket,
 	} {
-		if err := waitForBucketReplicas(ctx, servers[0].URL(), bucket, 1); err != nil {
+		if err := waitForBucketReplicas(ctx, servers[1].URL(), bucket, 1); err != nil {
 			t.Fatalf("%s unavailable after node-3 retired: %v", bucket, err)
 		}
 	}

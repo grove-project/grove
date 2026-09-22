@@ -60,7 +60,7 @@ func TestGroveShopArtifactDeploys(t *testing.T) {
 		[]string{"--system-nats-subject", "_GROVE.system.artifact.node-3"},
 	)
 	defer func() {
-		stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		stopCtx, stopCancel := context.WithTimeout(context.Background(), gracefulLeaveTimeout+5*time.Second)
 		defer stopCancel()
 		if err := stopGrovlets(stopCtx, cluster.nodes); err != nil {
 			t.Errorf("stop artifact cluster: %v\n%s", err, clusterLogs(cluster.nodes))

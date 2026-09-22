@@ -190,6 +190,7 @@ func placementComponentKey(nodeID string, serviceID grove.ServiceID) string {
 }
 
 func classifyApplicationNodeLogs(node applicationNodeLogs, view *applicationLogsView) {
+	nodeID := node.NodeID
 	for _, rawLine := range strings.Split(node.Output, "\n") {
 		line := strings.TrimSpace(rawLine)
 		if line == "" {
@@ -197,18 +198,21 @@ func classifyApplicationNodeLogs(node applicationNodeLogs, view *applicationLogs
 		}
 		var event lifecycleEvent
 		if json.Unmarshal([]byte(line), &event) == nil && event.Event != "" {
-			view.Cluster = append(view.Cluster, fmt.Sprintf("node=%s event=%s", node.NodeID, event.Event))
+			if event.NodeID != "" {
+				nodeID = event.NodeID
+			}
+			view.Cluster = append(view.Cluster, fmt.Sprintf("node=%s event=%s", nodeID, event.Event))
 			if event.SystemNATSURL != "" {
 				view.SystemNATS = append(view.SystemNATS, fmt.Sprintf(
 					"node=%s client=%s route=%s",
-					node.NodeID,
+					nodeID,
 					event.SystemNATSURL,
 					displayApplicationLogValue(event.SystemNATSRouteURL),
 				))
 			}
 			continue
 		}
-		entry := node.NodeID + " " + line
+		entry := nodeID + " " + line
 		lower := strings.ToLower(line)
 		if strings.Contains(lower, "nats") || strings.Contains(lower, "jetstream") ||
 			strings.Contains(lower, "raft") || strings.Contains(lower, "subject") {

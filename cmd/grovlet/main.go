@@ -399,6 +399,12 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 		}
 		runtime.startMembership(ctx, membership)
 		runtime.membership = membership
+		if runtime.server != nil {
+			if err := transport.ServePeer(ctx, cfg.nodeID, runtime.server); err != nil {
+				runtime.stop()
+				return nil, err
+			}
+		}
 
 		deployments := systemnats.NewDeployments()
 		if err := transport.ServeDeployments(ctx, cfg.nodeID, deployments); err != nil {
@@ -910,6 +916,20 @@ func (r *systemNATSRuntime) gracefulLeave(ctx context.Context, nodeID string) er
 		}
 	}
 	if r.server != nil {
+		if r.server.HasPeer() && len(peerIDs) != 0 {
+			var transferErr error
+			for _, peerID := range peerIDs {
+				if err := r.transport.RequestPeer(ctx, peerID); err == nil {
+					transferErr = nil
+					break
+				} else {
+					transferErr = errors.Join(transferErr, err)
+				}
+			}
+			if transferErr != nil {
+				return fmt.Errorf("transfer System NATS metadata witness: %w", transferErr)
+			}
+		}
 		if err := r.server.PrepareRetire(ctx); err != nil {
 			return err
 		}

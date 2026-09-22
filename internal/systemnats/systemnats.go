@@ -70,6 +70,7 @@ func (e *Error) Unwrap() error {
 type Server struct {
 	server       *server.Server
 	peer         *server.Server
+	peerOptions  *server.Options
 	once         sync.Once
 	retireMu     sync.Mutex
 	peerPrepared bool
@@ -271,7 +272,75 @@ func startJoinedClusterServer(ctx context.Context, cfg ClusterConfig, routes []*
 		primary.Shutdown()
 		return nil, &Error{Operation: "wait for joined System NATS metadata leader", Err: err}
 	}
+	primaryRoute, err := url.Parse(primary.RouteURL())
+	if err != nil {
+		primary.Shutdown()
+		return nil, &Error{Operation: "parse joined System NATS route", Err: err}
+	}
+	primary.peerOptions = &server.Options{
+		ServerName: cfg.Name + "-peer",
+		Host:       cfg.Host,
+		Port:       server.RANDOM_PORT,
+		Cluster: server.ClusterOpts{
+			Name: systemClusterName,
+			Host: cfg.RouteHost,
+			Port: server.RANDOM_PORT,
+		},
+		Routes:             []*url.URL{primaryRoute},
+		JetStream:          true,
+		StoreDir:           peerStoreDir(cfg.JetStreamStoreDir),
+		Tags:               jwt.TagList{logicalNodeTag(cfg.Name)},
+		JetStreamUniqueTag: logicalNodeTagPrefix,
+		NoLog:              true,
+		NoSigs:             true,
+	}
 	return primary, nil
+}
+
+// EnsurePeer adds this logical node's internal metadata witness after its
+// primary has registered membership and control-stream replica growth has
+// settled. Delaying the witness avoids changing the metadata quorum while the
+// same node is performing its initial authoritative writes.
+func (s *Server) EnsurePeer(ctx context.Context) error {
+	s.retireMu.Lock()
+	defer s.retireMu.Unlock()
+	if s.peer != nil || s.peerOptions == nil {
+		return nil
+	}
+	peer, err := startServer(ctx, s.peerOptions, true)
+	if err != nil {
+		return &Error{Operation: "start paired System NATS peer", Err: err}
+	}
+	if err := waitForJetStreamPeerCurrent(ctx, peer.server); err != nil {
+		peer.Shutdown()
+		return &Error{Operation: "wait for paired System NATS peer", Err: err}
+	}
+	s.peer = peer.server
+	s.peerOptions = nil
+	return nil
+}
+
+// HasPeer reports whether this logical node currently owns the cluster's
+// internal metadata witness.
+func (s *Server) HasPeer() bool {
+	s.retireMu.Lock()
+	defer s.retireMu.Unlock()
+	return s.peer != nil && !s.peerPrepared
+}
+
+func waitForJetStreamPeerCurrent(ctx context.Context, natsServer *server.Server) error {
+	ticker := time.NewTicker(routeCheckInterval)
+	defer ticker.Stop()
+	for {
+		if natsServer.JetStreamEnabled() && natsServer.JetStreamIsCurrent() {
+			return nil
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return errors.Join(ErrServerNotReady, ctx.Err())
+		}
+	}
 }
 
 func logicalNodeTag(nodeName string) string {
@@ -519,34 +588,7 @@ func evacuateControlStreamPeer(ctx context.Context, serverURL, peer string) erro
 				err = moveControlStreamLeadership(ctx, connection, js, "KV_"+bucket, peer)
 			}
 			if err == nil && streamClusterContains(info.Cluster, peer) {
-				operationCtx, operationCancel := context.WithTimeout(ctx, controlStateOperationTimeout)
-				var message *nats.Msg
-				message, err = connection.RequestWithContext(
-					operationCtx,
-					"$JS.API.STREAM.PEER.REMOVE.KV_"+bucket,
-					payload,
-				)
-				operationCancel()
-				if err == nil {
-					var response struct {
-						Success bool `json:"success"`
-						Error   *struct {
-							Code        int    `json:"code"`
-							Description string `json:"description"`
-						} `json:"error,omitempty"`
-					}
-					if decodeErr := json.Unmarshal(message.Data, &response); decodeErr != nil {
-						err = decodeErr
-					} else if !response.Success {
-						if response.Error == nil {
-							err = errors.New("stream peer removal was not accepted")
-						} else if strings.Contains(strings.ToLower(response.Error.Description), "not a member") {
-							err = nil
-						} else {
-							err = fmt.Errorf("API error %d: %s", response.Error.Code, response.Error.Description)
-						}
-					}
-				}
+				err = removeControlStreamPeer(ctx, connection, js, bucket, peer, payload)
 			}
 		} else {
 			cancel()
@@ -559,6 +601,70 @@ func evacuateControlStreamPeer(ctx context.Context, serverURL, peer string) erro
 		}
 	}
 	return waitForMetadataPeerEvacuation(ctx, serverURL, peer)
+}
+
+func removeControlStreamPeer(
+	ctx context.Context,
+	connection *nats.Conn,
+	js jetstream.JetStream,
+	bucket string,
+	peer string,
+	payload []byte,
+) error {
+	ticker := time.NewTicker(routeCheckInterval)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		operationCtx, cancel := context.WithTimeout(ctx, controlStateOperationTimeout)
+		message, err := connection.RequestWithContext(
+			operationCtx,
+			"$JS.API.STREAM.PEER.REMOVE.KV_"+bucket,
+			payload,
+		)
+		cancel()
+		if err == nil {
+			var response struct {
+				Success bool `json:"success"`
+				Error   *struct {
+					Code        int    `json:"code"`
+					Description string `json:"description"`
+				} `json:"error,omitempty"`
+			}
+			if decodeErr := json.Unmarshal(message.Data, &response); decodeErr != nil {
+				lastErr = decodeErr
+			} else if response.Success || response.Error != nil && strings.Contains(strings.ToLower(response.Error.Description), "not a member") {
+				return nil
+			} else if response.Error == nil {
+				lastErr = errors.New("stream peer removal was not accepted")
+			} else {
+				lastErr = fmt.Errorf("API error %d: %s", response.Error.Code, response.Error.Description)
+			}
+		} else {
+			lastErr = err
+		}
+
+		// A leader can commit the request before its response reaches the
+		// retiring node. Treat the authoritative stream topology as success.
+		checkCtx, checkCancel := context.WithTimeout(ctx, controlStateOperationTimeout)
+		stream, streamErr := js.Stream(checkCtx, "KV_"+bucket)
+		if streamErr == nil {
+			var info *jetstream.StreamInfo
+			info, streamErr = stream.Info(checkCtx)
+			if streamErr == nil && !streamClusterContains(info.Cluster, peer) {
+				checkCancel()
+				return nil
+			}
+		}
+		checkCancel()
+		if streamErr != nil {
+			lastErr = errors.Join(lastErr, streamErr)
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return errors.Join(lastErr, ctx.Err())
+		}
+	}
 }
 
 func waitForControlStreamPeerEvacuation(

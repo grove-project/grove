@@ -92,6 +92,32 @@ func TestBuildApplicationLogsViewSurvivesStatusFailure(t *testing.T) {
 	}
 }
 
+func TestBuildApplicationLogsViewUsesLifecycleNodeIdentity(t *testing.T) {
+	view := buildApplicationLogsView(
+		groveshop.ClusterStatusView{Health: "healthy", Ready: true},
+		nil,
+		[]applicationNodeLogs{{
+			NodeID: "node-1",
+			Output: strings.Join([]string{
+				`{"event":"ready","node_id":"node-4","system_nats_url":"nats://127.0.0.1:4222"}`,
+				"worker lifecycle complete",
+			}, "\n"),
+		}},
+		"nats://127.0.0.1:4222",
+		nil,
+	)
+	if !containsApplicationLogLine(view.Cluster, "node=node-4 event=ready") ||
+		!containsApplicationLogLine(view.SystemNATS, "node=node-4 client=") ||
+		!containsApplicationLogLine(view.Application, "node-4 worker lifecycle complete") {
+		t.Fatalf("logs view = %#v; want lifecycle identity node-4", view)
+	}
+	for _, lines := range [][]string{view.Cluster, view.SystemNATS, view.Application} {
+		if containsApplicationLogLine(lines, "node=node-1") || containsApplicationLogLine(lines, "node-1 ") {
+			t.Fatalf("logs view = %#v; stale slice identity node-1 must not be displayed", view)
+		}
+	}
+}
+
 func TestBuildApplicationLogsViewIgnoresStoppedUnplacedComponents(t *testing.T) {
 	status := groveshop.ClusterStatusView{
 		Health: "healthy",
