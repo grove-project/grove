@@ -745,17 +745,15 @@ func startMembershipGrovlets(t *testing.T, ctx context.Context, nodeArgs ...[]st
 		t.Fatalf("node argument sets = %d; want 0 or %d", len(nodeArgs), len(cluster.nodeIDs))
 	}
 	for i, nodeID := range cluster.nodeIDs {
-		seedIndex := 0
-		if i == 0 {
-			seedIndex = 1
-		}
 		args := []string{
 			"--node-id", nodeID,
 			"--advertise-endpoint", cluster.endpoints[i],
 			"--system-nats-listen", "127.0.0.1:0",
 			"--system-nats-route-listen", fmt.Sprintf("127.0.0.1:%d", routePorts[i]),
-			"--system-nats-seed", fmt.Sprintf("nats-route://127.0.0.1:%d", routePorts[seedIndex]),
 			"--system-nats-membership",
+		}
+		if i != 0 {
+			args = append(args, "--system-nats-seed", fmt.Sprintf("nats-route://127.0.0.1:%d", routePorts[0]))
 		}
 		if len(nodeArgs) != 0 {
 			args = append(args, nodeArgs[i]...)
@@ -859,7 +857,7 @@ func waitForGrovletMembership(
 // Both surviving Grovlets retain the killed node's membership record and
 // independently transition its heartbeat-derived health to unavailable.
 func TestGrovletNodeHealthConverges(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
 	cluster := startMembershipGrovlets(t, ctx)
 	allNodes := []int{0, 1, 2}

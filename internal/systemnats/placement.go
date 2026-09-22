@@ -140,13 +140,7 @@ func (p *Placement) watch(ctx context.Context, transport *Transport) error {
 		return fmt.Errorf("new JetStream client: %w", err)
 	}
 	setupCtx, cancel := operationContext(ctx)
-	kv, err := js.CreateOrUpdateKeyValue(setupCtx, jetstream.KeyValueConfig{
-		Bucket:      PlacementBucket,
-		Description: "Authoritative Grove service placement",
-		History:     1,
-		Storage:     jetstream.FileStorage,
-		Replicas:    PlacementReplicas,
-	})
+	kv, err := openOrCreateKeyValue(setupCtx, js, placementKeyValueConfig(controlStateBootstrapReplicas))
 	if err != nil {
 		cancel()
 		return fmt.Errorf("create placement bucket: %w", err)

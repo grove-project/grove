@@ -238,6 +238,9 @@ func (c *applicationController) startDiscoveredApplicationNode(
 	case 1:
 		args = append(args,
 			"--grove-shop-orders",
+			"--grove-shop-inventory",
+			"--grove-shop-payment",
+			"--grove-shop-shipping",
 			"--grove-shop-web",
 		)
 	case 2:

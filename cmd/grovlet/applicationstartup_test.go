@@ -18,6 +18,8 @@ import (
 	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/internal/artifact"
 	"github.com/grove-project/grove/internal/systemnats"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 func TestApplicationDiscoveryRecordLifecycle(t *testing.T) {
@@ -63,7 +65,7 @@ func TestApplicationDiscoveryRecordLifecycle(t *testing.T) {
 }
 
 func TestConfiguredArtifactBootstrapsThenJoinsOneCluster(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 75*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 	defer cancel()
 	directory := t.TempDir()
 	discoveryAddress := testApplicationDiscoveryAddress(t)
@@ -98,9 +100,16 @@ func TestConfiguredArtifactBootstrapsThenJoinsOneCluster(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	discovery, err := newApplicationDiscovery(inspection.Manifest.ApplicationID, inspection.Config.Facts["cluster.name"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer discovery.close()
 
-	consoles := make([]*testArtifactConsole, 0, 3)
-	for index := range 3 {
+	consoles := make([]*testArtifactConsole, 0, 4)
+	existingNodeCounts := []int{0, 1, 1, 2}
+	clusterNodeCounts := []int{1, 2, 2, 3}
+	for index := range 4 {
 		console := startTestArtifactConsole(t, ctx, configuredPath, discoveryAddress, filepath.Join(directory, "console-"+strconv.Itoa(index+1)+".json"))
 		consoles = append(consoles, console)
 		if index == 0 {
@@ -116,30 +125,48 @@ func TestConfiguredArtifactBootstrapsThenJoinsOneCluster(t *testing.T) {
 			if started.State != "started" || started.NodeID != "node-1" {
 				t.Fatalf("cluster start result = %#v", started)
 			}
-			continue
+		} else {
+			waitForArtifactConsoleText(t, ctx, console, "Grove cluster discovered")
+			if output := console.output.String(); !strings.Contains(output, "> Join cluster") ||
+				!strings.Contains(output, "Nodes    "+strconv.Itoa(existingNodeCounts[index])) ||
+				strings.Contains(output, "Start new cluster") || strings.Contains(output, "New rollout") {
+				t.Fatalf("join startup screen for node-%d = %q", index+1, output)
+			}
+			output := runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, "cluster.join")
+			var joined applicationJoinResult
+			if err := json.Unmarshal(output, &joined); err != nil {
+				t.Fatalf("decode join result %q: %v", output, err)
+			}
+			wantNode := "node-" + strconv.Itoa(index+1)
+			if joined.State != "joined" || joined.NodeID != wantNode {
+				t.Fatalf("join result = %#v; want node %s joined", joined, wantNode)
+			}
 		}
-		waitForArtifactConsoleText(t, ctx, console, "Grove cluster discovered")
-		if output := console.output.String(); !strings.Contains(output, "> Join cluster") ||
-			!strings.Contains(output, "Nodes    "+strconv.Itoa(index)) ||
-			strings.Contains(output, "Start new cluster") || strings.Contains(output, "New rollout") {
-			t.Fatalf("join startup screen for node-%d = %q", index+1, output)
+
+		wantNodes := clusterNodeCounts[index]
+		record := waitForApplicationDiscoveryNodes(t, ctx, discovery, wantNodes)
+		waitForApplicationClusterStage(t, ctx, record.WebAddress, inspection.ArtifactDigest, wantNodes, 5)
+		waitForApplicationControlReplicas(t, ctx, record.Nodes[0].SystemNATSURL, wantNodes)
+		order, err := waitForApplicationOrder(ctx, record.WebAddress, "cluster-stage-"+strconv.Itoa(index+1))
+		if err != nil || !applicationOrderCompleted(order) {
+			t.Fatalf("order after starting node-%d in %d-node cluster = %#v, error=%v", index+1, wantNodes, order, err)
 		}
-		output := runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, "cluster.join")
-		var joined applicationJoinResult
-		if err := json.Unmarshal(output, &joined); err != nil {
-			t.Fatalf("decode join result %q: %v", output, err)
-		}
-		wantNode := "node-" + strconv.Itoa(index+1)
-		if joined.State != "joined" || joined.NodeID != wantNode {
-			t.Fatalf("join result = %#v; want node %s joined", joined, wantNode)
+
+		if index == 1 {
+			// Exercise the reported replacement sequence exactly: node-2 leaves
+			// gracefully, node-1 remains a ready R1 cluster, and the next joiner
+			// receives node-3 while the logical cluster returns to two nodes.
+			consoles[1].stop(t)
+			record = waitForApplicationDiscoveryNodes(t, ctx, discovery, 1)
+			waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 1, "node-2")
+			waitForApplicationControlReplicas(t, ctx, record.Nodes[0].SystemNATSURL, 1)
+			order, err = waitForApplicationOrder(ctx, record.WebAddress, "after-node-2-retirement")
+			if err != nil || !applicationOrderCompleted(order) {
+				t.Fatalf("order after returning to one node = %#v, error=%v", order, err)
+			}
 		}
 	}
 
-	discovery, err := newApplicationDiscovery(inspection.Manifest.ApplicationID, inspection.Config.Facts["cluster.name"])
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer discovery.close()
 	record, exists, err := discovery.discover(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -150,12 +177,18 @@ func TestConfiguredArtifactBootstrapsThenJoinsOneCluster(t *testing.T) {
 	if len(record.Nodes) != 3 {
 		t.Fatalf("discovered nodes = %#v; want one three-node cluster", record.Nodes)
 	}
+	for _, node := range record.Nodes {
+		if node.NodeID == "node-2" {
+			t.Fatalf("retired node-2 remains in replacement cluster: %#v", record.Nodes)
+		}
+	}
 
 	status := waitForJoinedApplicationStatus(t, ctx, record.WebAddress, inspection.ArtifactDigest)
 	if len(status.Nodes) != 3 || len(status.Placements) != 5 {
 		t.Fatalf("joined status = %#v; want 3 nodes and 5 services", status)
 	}
-	for _, console := range consoles {
+	for _, index := range []int{0, 2, 3} {
+		console := consoles[index]
 		output := runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, "cluster.status")
 		var observed groveshop.ClusterStatusView
 		if err := json.Unmarshal(output, &observed); err != nil {
@@ -166,11 +199,130 @@ func TestConfiguredArtifactBootstrapsThenJoinsOneCluster(t *testing.T) {
 		}
 	}
 
-	for index := len(consoles) - 1; index >= 0; index-- {
-		consoles[index].stop(t)
-	}
+	consoles[3].stop(t)
+	record = waitForApplicationDiscoveryNodes(t, ctx, discovery, 2)
+	waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 2, "node-4")
+	waitForApplicationControlReplicas(t, ctx, record.Nodes[0].SystemNATSURL, 2)
+	consoles[2].stop(t)
+	record = waitForApplicationDiscoveryNodes(t, ctx, discovery, 1)
+	waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 1, "node-3")
+	waitForApplicationControlReplicas(t, ctx, record.Nodes[0].SystemNATSURL, 1)
+	consoles[0].stop(t)
 	if _, exists, err := discovery.discover(ctx); err != nil || exists {
 		t.Errorf("discovery after every console stopped: exists=%t error=%v", exists, err)
+	}
+}
+
+func waitForApplicationDiscoveryNodes(
+	t *testing.T,
+	ctx context.Context,
+	discovery *applicationDiscovery,
+	want int,
+) applicationDiscoveryRecord {
+	t.Helper()
+	ticker := time.NewTicker(applicationConditionInterval)
+	defer ticker.Stop()
+	var last applicationDiscoveryRecord
+	var lastErr error
+	for {
+		record, exists, err := discovery.discover(ctx)
+		last = record
+		lastErr = err
+		if err == nil && exists && len(record.Nodes) == want {
+			return record
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatalf("wait for discovery with %d nodes: record=%#v error=%v: %v", want, last, lastErr, ctx.Err())
+		}
+	}
+}
+
+func waitForApplicationClusterStage(
+	t *testing.T,
+	ctx context.Context,
+	webAddress string,
+	artifactDigest string,
+	nodeCount int,
+	placementCount int,
+) groveshop.ClusterStatusView {
+	t.Helper()
+	ticker := time.NewTicker(applicationConditionInterval)
+	defer ticker.Stop()
+	var last groveshop.ClusterStatusView
+	var lastErr error
+	for {
+		attemptCtx, cancel := context.WithTimeout(ctx, time.Second)
+		err := readApplicationJSON(attemptCtx, "http://"+webAddress+"/grove/status", &last)
+		cancel()
+		ready := err == nil && last.Ready && last.Health == "healthy" && len(last.Nodes) == nodeCount &&
+			len(last.Placements) == placementCount && last.ActiveArtifact != nil &&
+			last.ActiveArtifact.ArtifactDigest == artifactDigest
+		if ready {
+			return last
+		}
+		lastErr = err
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatalf("wait for %d-node/%d-service cluster stage: status=%#v error=%v: %v", nodeCount, placementCount, last, lastErr, ctx.Err())
+		}
+	}
+}
+
+func waitForApplicationControlReplicas(t *testing.T, ctx context.Context, systemNATSURL string, want int) {
+	t.Helper()
+	connection, err := nats.Connect(systemNATSURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	js, err := jetstream.New(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buckets := []string{
+		systemnats.MembershipBucket,
+		systemnats.PlacementBucket,
+		systemnats.DesiredBucket,
+		systemnats.DeploymentBucket,
+	}
+	ticker := time.NewTicker(applicationConditionInterval)
+	defer ticker.Stop()
+	last := make(map[string]int, len(buckets))
+	var lastErr error
+	for {
+		ready := true
+		for _, bucket := range buckets {
+			attemptCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+			kv, err := js.KeyValue(attemptCtx, bucket)
+			if err != nil {
+				cancel()
+				lastErr = err
+				ready = false
+				continue
+			}
+			status, err := kv.Status(attemptCtx)
+			cancel()
+			if err != nil {
+				lastErr = err
+				ready = false
+				continue
+			}
+			last[bucket] = status.Config().Replicas
+			if last[bucket] != want {
+				ready = false
+			}
+		}
+		if ready {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatalf("wait for control bucket replicas=%d: replicas=%v error=%v: %v", want, last, lastErr, ctx.Err())
+		}
 	}
 }
 

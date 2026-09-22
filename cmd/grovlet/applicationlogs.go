@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
+	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/console"
 	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/internal/systemnats"
@@ -95,6 +97,10 @@ func buildApplicationLogsView(
 		len(status.Nodes),
 		len(status.Placements),
 	))
+	placedComponents := make(map[string]struct{}, len(status.Placements))
+	for _, placement := range status.Placements {
+		placedComponents[placementComponentKey(placement.NodeID, placement.ServiceID)] = struct{}{}
+	}
 	for _, node := range status.Nodes {
 		line := fmt.Sprintf("node=%s health=%s components=%d", node.NodeID, node.Health, len(node.Components))
 		if node.Error != "" {
@@ -120,7 +126,8 @@ func buildApplicationLogsView(
 				componentLine += " error=" + component.Error
 			}
 			view.Application = append(view.Application, componentLine)
-			if component.State != string(systemnats.ComponentHealthy) && component.State != string(systemnats.ComponentDebugging) {
+			_, placed := placedComponents[placementComponentKey(node.NodeID, component.ServiceID)]
+			if placed && component.State != string(systemnats.ComponentHealthy) && component.State != string(systemnats.ComponentDebugging) {
 				cause := fmt.Sprintf("%s on %s is %s", component.Name, node.NodeID, component.State)
 				if component.Error != "" {
 					cause += ": " + component.Error
@@ -176,6 +183,10 @@ func buildApplicationLogsView(
 	view.Cluster = tailApplicationLogLines(view.Cluster, applicationLogLineLimit)
 	view.SystemNATS = tailApplicationLogLines(view.SystemNATS, applicationLogLineLimit)
 	return view
+}
+
+func placementComponentKey(nodeID string, serviceID grove.ServiceID) string {
+	return nodeID + ":" + strconv.FormatUint(uint64(serviceID), 10)
 }
 
 func classifyApplicationNodeLogs(node applicationNodeLogs, view *applicationLogsView) {

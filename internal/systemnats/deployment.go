@@ -30,6 +30,7 @@ const (
 	deploymentArtifactCommandRoot = "_GROVE.system.deployment_artifacts."
 	deploymentRolloutCommandRoot  = "_GROVE.system.rollouts."
 	deploymentRetryDelay          = 50 * time.Millisecond
+	deploymentWriteTimeout        = 30 * time.Second
 )
 
 var (
@@ -196,10 +197,7 @@ func (d *Deployments) watch(ctx context.Context, transport *Transport) error {
 		return fmt.Errorf("new JetStream client: %w", err)
 	}
 	setupCtx, cancel := operationContext(ctx)
-	kv, err := js.CreateOrUpdateKeyValue(setupCtx, jetstream.KeyValueConfig{
-		Bucket: DeploymentBucket, Description: "Authoritative Grove deployment artifacts and rollouts",
-		History: 1, Storage: jetstream.FileStorage, Replicas: DeploymentReplicas,
-	})
+	kv, err := openOrCreateKeyValue(setupCtx, js, deploymentKeyValueConfig(controlStateBootstrapReplicas))
 	cancel()
 	if err != nil {
 		return fmt.Errorf("create deployment bucket: %w", err)
@@ -684,16 +682,45 @@ func (t *Transport) requestDeploymentWrite(ctx context.Context, subject string, 
 	if err != nil {
 		return &Error{Operation: "encode Grove " + operation + " command", Err: err}
 	}
-	message, err := t.connection.RequestWithContext(ctx, subject, encoded)
-	if err != nil {
-		return &Error{Operation: "request Grove " + operation + " command", Err: err}
+	writeCtx := ctx
+	cancel := func() {}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		writeCtx, cancel = context.WithTimeout(ctx, deploymentWriteTimeout)
 	}
-	var response deploymentCommandResponse
-	if err := json.Unmarshal(message.Data, &response); err != nil {
-		return &Error{Operation: "decode Grove " + operation + " command", Err: err}
+	defer cancel()
+	ticker := time.NewTicker(deploymentRetryDelay)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		message, requestErr := t.connection.RequestWithContext(writeCtx, subject, encoded)
+		if requestErr == nil {
+			var response deploymentCommandResponse
+			if err := json.Unmarshal(message.Data, &response); err != nil {
+				return &Error{Operation: "decode Grove " + operation + " command", Err: err}
+			}
+			if response.Error == "" {
+				return nil
+			}
+			requestErr = errors.New(response.Error)
+			if !transientControlStateError(requestErr) {
+				return &Error{Operation: "run Grove " + operation + " command", Err: requestErr}
+			}
+		}
+		lastErr = requestErr
+		select {
+		case <-ticker.C:
+		case <-writeCtx.Done():
+			return &Error{Operation: "run Grove " + operation + " command", Err: errors.Join(lastErr, writeCtx.Err())}
+		}
 	}
-	if response.Error != "" {
-		return &Error{Operation: "run Grove " + operation + " command", Err: errors.New(response.Error)}
+}
+
+func transientControlStateError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
+		return true
 	}
-	return nil
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "no response from stream") ||
+		strings.Contains(message, "jetstream system temporarily unavailable")
 }

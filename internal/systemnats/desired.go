@@ -22,10 +22,11 @@ const (
 	// authoritative desired deployments.
 	DesiredReplicas = 3
 
-	desiredKeyPrefix   = "applications."
-	desiredSubjectRoot = "_GROVE.system.desired."
-	desiredCommandRoot = "_GROVE.system.desired_commands."
-	desiredRetryDelay  = 50 * time.Millisecond
+	desiredKeyPrefix    = "applications."
+	desiredSubjectRoot  = "_GROVE.system.desired."
+	desiredCommandRoot  = "_GROVE.system.desired_commands."
+	desiredRetryDelay   = 50 * time.Millisecond
+	desiredWriteTimeout = 30 * time.Second
 )
 
 var (
@@ -111,10 +112,7 @@ func (d *Desired) watch(ctx context.Context, transport *Transport) error {
 		return fmt.Errorf("new JetStream client: %w", err)
 	}
 	setupCtx, cancel := operationContext(ctx)
-	kv, err := js.CreateOrUpdateKeyValue(setupCtx, jetstream.KeyValueConfig{
-		Bucket: DesiredBucket, Description: "Authoritative Grove desired deployments",
-		History: 1, Storage: jetstream.FileStorage, Replicas: DesiredReplicas,
-	})
+	kv, err := openOrCreateKeyValue(setupCtx, js, desiredKeyValueConfig(controlStateBootstrapReplicas))
 	cancel()
 	if err != nil {
 		return fmt.Errorf("create desired deployment bucket: %w", err)
@@ -177,14 +175,32 @@ func (d *Desired) Put(ctx context.Context, transport *Transport, deployment Desi
 	if err != nil {
 		return &Error{Operation: "write desired deployment", Err: err}
 	}
-	kv, err := js.KeyValue(ctx, DesiredBucket)
-	if err != nil {
-		return &Error{Operation: "write desired deployment", Err: err}
+	writeCtx := ctx
+	cancel := func() {}
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		writeCtx, cancel = context.WithTimeout(ctx, desiredWriteTimeout)
 	}
-	if _, err := kv.Put(ctx, DesiredKey(deployment.ApplicationID), encoded); err != nil {
-		return &Error{Operation: "write desired deployment", Err: err}
+	defer cancel()
+	ticker := time.NewTicker(desiredRetryDelay)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		attemptCtx, attemptCancel := context.WithTimeout(writeCtx, controlStateOperationTimeout)
+		kv, err := js.KeyValue(attemptCtx, DesiredBucket)
+		if err == nil {
+			_, err = kv.Put(attemptCtx, DesiredKey(deployment.ApplicationID), encoded)
+		}
+		attemptCancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		select {
+		case <-ticker.C:
+		case <-writeCtx.Done():
+			return &Error{Operation: "write desired deployment", Err: errors.Join(lastErr, writeCtx.Err())}
+		}
 	}
-	return nil
 }
 
 func validateDesiredDeployment(deployment DesiredDeployment) (DesiredDeployment, error) {

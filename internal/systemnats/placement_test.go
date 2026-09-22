@@ -105,8 +105,8 @@ func TestPlacementConvergesAndRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if replicas := status.Config().Replicas; replicas != systemnats.PlacementReplicas {
-		t.Errorf("placement replicas = %d; want %d", replicas, systemnats.PlacementReplicas)
+	if replicas := status.Config().Replicas; replicas != 1 {
+		t.Errorf("placement bootstrap replicas = %d; want 1", replicas)
 	}
 	entry, err := kv.Get(ctx, systemnats.PlacementKey(2))
 	if err != nil {

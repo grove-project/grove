@@ -92,6 +92,38 @@ func TestBuildApplicationLogsViewSurvivesStatusFailure(t *testing.T) {
 	}
 }
 
+func TestBuildApplicationLogsViewIgnoresStoppedUnplacedComponents(t *testing.T) {
+	status := groveshop.ClusterStatusView{
+		Health: "healthy",
+		Ready:  true,
+		Nodes: []groveshop.NodeStatusView{
+			{NodeID: "node-1", Health: "healthy"},
+			{
+				NodeID: "node-3", Health: "healthy",
+				Components: []groveshop.ComponentStatusView{
+					{ServiceID: grove.ServiceID(1), Name: "Orders", State: "stopped"},
+					{ServiceID: grove.ServiceID(2), Name: "Inventory", State: "stopped"},
+					{ServiceID: grove.ServiceID(3), Name: "Payment", WorkerID: "payment-1", State: "healthy"},
+					{ServiceID: grove.ServiceID(4), Name: "Shipping", State: "stopped"},
+					{ServiceID: grove.ServiceID(5), Name: "Web", State: "stopped"},
+				},
+			},
+		},
+		Placements: []groveshop.PlacementStatusView{
+			{ServiceID: grove.ServiceID(3), Name: "Payment", NodeID: "node-3", Health: "healthy"},
+		},
+	}
+	view := buildApplicationLogsView(status, nil, nil, "nats://127.0.0.1:4222", nil)
+	if view.Health != "healthy" || len(view.Causes) != 0 {
+		t.Fatalf("logs view = %#v; stopped components without authoritative placement must not degrade health", view)
+	}
+	for _, component := range []string{"Orders", "Inventory", "Shipping", "Web"} {
+		if !containsApplicationLogLine(view.Application, "service="+component+" worker= state=stopped") {
+			t.Errorf("application diagnostics = %#v; want stopped %s visible", view.Application, component)
+		}
+	}
+}
+
 func containsApplicationLogLine(lines []string, fragment string) bool {
 	for _, line := range lines {
 		if strings.Contains(line, fragment) {

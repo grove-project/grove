@@ -23,6 +23,8 @@ import (
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
+const gracefulLeaveTimeout = 30 * time.Second
+
 var (
 	errRuntimeDirRequired            = errors.New("runtime directory is required")
 	errSystemNATSConflict            = errors.New("embedded System NATS configuration and URL are mutually exclusive")
@@ -183,7 +185,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	<-ctx.Done()
 	var leaveErr error
 	if cfg.systemNATSRetireOnStop {
-		leaveCtx, leaveCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		leaveCtx, leaveCancel := context.WithTimeout(context.Background(), gracefulLeaveTimeout)
 		leaveErr = systemRuntime.gracefulLeave(leaveCtx, cfg.nodeID)
 		leaveCancel()
 	}
@@ -907,10 +909,63 @@ func (r *systemNATSRuntime) gracefulLeave(ctx context.Context, nodeID string) er
 			return nil
 		}
 	}
+	if r.server != nil {
+		if err := r.server.PrepareRetire(ctx); err != nil {
+			return err
+		}
+	}
 	if err := r.membership.Leave(ctx, r.transport); err != nil {
 		return err
 	}
+	if len(peerIDs) != 0 {
+		if err := r.waitForMembershipRetirement(ctx, nodeID, peerIDs); err != nil {
+			return err
+		}
+	}
+	if r.server != nil {
+		if err := r.server.Retire(ctx); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (r *systemNATSRuntime) waitForMembershipRetirement(
+	ctx context.Context,
+	nodeID string,
+	peerIDs []string,
+) error {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	var last systemnats.MembershipView
+	var lastErr error
+	for {
+		for _, peerID := range peerIDs {
+			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			view, err := r.transport.RequestMembership(requestCtx, peerID)
+			cancel()
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			last = view
+			retired := view.Ready
+			for _, member := range view.Members {
+				if member.NodeID == nodeID {
+					retired = false
+					break
+				}
+			}
+			if retired {
+				return nil
+			}
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return fmt.Errorf("wait for membership retirement of %s: membership=%#v: %w", nodeID, last, errors.Join(lastErr, ctx.Err()))
+		}
+	}
 }
 
 func (r *systemNATSRuntime) waitForPlacementRetirement(
@@ -931,7 +986,6 @@ func (r *systemNATSRuntime) waitForPlacementRetirement(
 		if err != nil {
 			lastErr = err
 		}
-		responded := false
 		for _, peerID := range peerIDs {
 			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 			view, err := r.transport.RequestPlacement(requestCtx, peerID)
@@ -940,16 +994,10 @@ func (r *systemNATSRuntime) waitForPlacementRetirement(
 				lastErr = err
 				continue
 			}
-			responded = true
 			last = view
 			if view.Ready && !placementReferencesNode(view, nodeID) {
 				return true, nil
 			}
-		}
-		if !responded {
-			// Concurrent whole-cluster shutdown leaves no observer that needs a
-			// recovered placement. Retire this member without delaying shutdown.
-			return false, nil
 		}
 		select {
 		case <-ticker.C:

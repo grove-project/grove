@@ -16,6 +16,7 @@ Keep active work intentionally small: at most 3–5 tasks.
 
 | Task | Workstream | Status | Depends on |
 | --- | --- | --- | --- |
+| [CLUSTER-002](cluster/CLUSTER-002-elastic-control-plane-replication.md) Elastic control-plane replication | cluster | done | CLUSTER-001 |
 | [DEBUG-001](debugging/DEBUG-001-runtime-flow-capture.md) Runtime Grove call-flow capture | debugging | todo | — |
 | [DEMO-001](demo/DEMO-001-standalone-load-generator.md) Standalone load generator | demo | todo | NET-001 |
 
