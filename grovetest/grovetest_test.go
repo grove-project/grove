@@ -154,7 +154,7 @@ func TestMain(m *testing.M) {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	path, buildErr := grovetest.BuildGrovlet(ctx, buildDir)
+	path, buildErr := grovetest.BuildGrovlet(ctx, buildDir, "./internal/testapp/cmd/testapp")
 	cancel()
 	if buildErr != nil {
 		fmt.Fprintln(os.Stderr, buildErr)

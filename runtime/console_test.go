@@ -1,0 +1,441 @@
+package runtime
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/console"
+	"github.com/grove-project/grove/grovetest"
+	"github.com/grove-project/grove/internal/systemnats"
+	groveshop "github.com/grove-project/grove/internal/testapp"
+)
+
+func TestApplicationConsoleDispatchesStructuredActions(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "console.json")
+	t.Setenv(consoleStateEnvironment, statePath)
+	input, writeInput := io.Pipe()
+	var tuiOutput bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		done <- runApplicationConsole(t.Context(), nil, input, &tuiOutput)
+	}()
+	waitForConsoleState(t, statePath)
+
+	var actionOutput bytes.Buffer
+	if err := runApplicationAction(t.Context(), []string{groveshop.ActionVerifyOrders}, &actionOutput); err != nil {
+		t.Fatal(err)
+	}
+	var result groveshop.IntegrityResult
+	if err := json.NewDecoder(&actionOutput).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Service != "orders" || result.Status != "healthy" || len(result.Workflow) != 5 {
+		t.Errorf("application action result = %#v", result)
+	}
+	if _, err := io.WriteString(writeInput, "q\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	_ = writeInput.Close()
+	_ = input.Close()
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("console state after exit error = %v; want not exist", err)
+	}
+	if output := tuiOutput.String(); !strings.Contains(output, "GroveShop Grove Test App") || !strings.Contains(output, "Run integrity check") {
+		t.Errorf("TUI output = %q", output)
+	}
+}
+
+func TestResolveTUISelection(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantName string
+		wantArgs []string
+		wantOK   bool
+	}{
+		{name: "cluster status", input: "Cluster > Status", wantName: "cluster.status", wantOK: true},
+		{name: "cluster start", input: "Cluster > Start new cluster", wantName: "cluster.start", wantOK: true},
+		{name: "cluster join", input: "Cluster > Join", wantName: "cluster.join", wantOK: true},
+		{name: "new rollout", input: "Deployments > New rollout > configs/acme.yaml", wantName: "rollout.start", wantArgs: []string{"--config", "configs/acme.yaml"}, wantOK: true},
+		{name: "debug demo", input: "Deployments > Debug demo > Start", wantName: "debug.demo.start", wantOK: true},
+		{name: "application action", input: "Application > Run integrity check", wantName: groveshop.ActionVerifyOrders, wantOK: true},
+		{name: "debug attach", input: "Services > Orders > Instances > node-2 > Debug > Attach", wantName: "debug.attach", wantArgs: []string{"orders", "--listen", "127.0.0.1:0"}, wantOK: true},
+		{name: "raw action fallback", input: "cluster.status", wantName: "cluster.status", wantOK: true},
+		{name: "blank", input: "   ", wantOK: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			name, args, ok := resolveTUISelection(test.input)
+			if name != test.wantName || !slices.Equal(args, test.wantArgs) || ok != test.wantOK {
+				t.Errorf("resolveTUISelection(%q) = (%q, %q, %t); want (%q, %q, %t)", test.input, name, args, ok, test.wantName, test.wantArgs, test.wantOK)
+			}
+		})
+	}
+}
+
+func TestRunApplicationActionStreamsLongRunningResult(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "console.json")
+	t.Setenv(consoleStateEnvironment, statePath)
+	runtimeDir, err := os.MkdirTemp("", "grove-action-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(runtimeDir) })
+	listener, err := net.Listen("unix", filepath.Join(runtimeDir, "actions.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var registry console.Registry
+	if err := registry.Register(console.Action{
+		Name: "session.start", Label: "Start", Section: "Test",
+		Handler: func(context.Context, []string) (any, error) {
+			return &testConsoleActionSession{started: started, release: release}, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := newConsoleActionServer(t.Context(), listener, &registry)
+	t.Cleanup(server.close)
+	if err := writeConsoleConnection(consoleConnection{SocketPath: listener.Addr().String()}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { removeConsoleConnection(consoleConnection{SocketPath: listener.Addr().String()}) })
+
+	writes := make(chan []byte, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- runApplicationAction(t.Context(), []string{"session.start"}, channelWriter{writes: writes})
+	}()
+	select {
+	case output := <-writes:
+		if string(output) != "{\"state\":\"waiting\"}\n" {
+			t.Errorf("initial action output = %q", output)
+		}
+	case <-t.Context().Done():
+		t.Fatal(t.Context().Err())
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("long-running action returned before release: %v", err)
+	default:
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	default:
+		t.Fatal("long-running action session did not start")
+	}
+}
+
+type testConsoleActionSession struct {
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (s *testConsoleActionSession) InitialResult() any {
+	return map[string]string{"state": "waiting"}
+}
+
+func (s *testConsoleActionSession) Wait(ctx context.Context) error {
+	close(s.started)
+	select {
+	case <-s.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+type channelWriter struct {
+	writes chan<- []byte
+}
+
+func (w channelWriter) Write(data []byte) (int, error) {
+	w.writes <- append([]byte(nil), data...)
+	return len(data), nil
+}
+
+func TestGroveShopBinaryRunsConsoleActionsAndNodeRuntime(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	statePath := filepath.Join(t.TempDir(), "console.json")
+	consoleCommand := exec.CommandContext(ctx, grovletPath)
+	consoleCommand.Env = append(os.Environ(), consoleStateEnvironment+"="+statePath)
+	input, err := consoleCommand.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var consoleOutput bytes.Buffer
+	consoleCommand.Stdout = &consoleOutput
+	consoleCommand.Stderr = &consoleOutput
+	if err := consoleCommand.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForConsoleState(t, statePath)
+
+	actionCommand := exec.CommandContext(ctx, grovletPath, "action", groveshop.ActionVerifyOrders)
+	actionCommand.Env = append(os.Environ(), consoleStateEnvironment+"="+statePath)
+	actionOutput, err := actionCommand.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run structured action: %v; output=%q; console=%q", err, actionOutput, consoleOutput.String())
+	}
+	var result groveshop.IntegrityResult
+	if err := json.Unmarshal(actionOutput, &result); err != nil {
+		t.Fatalf("decode structured action output %q: %v", actionOutput, err)
+	}
+	if result.Status != "healthy" {
+		t.Errorf("structured action result = %#v", result)
+	}
+	if _, err := io.WriteString(input, "q\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := consoleCommand.Wait(); err != nil {
+		t.Fatalf("stop application console: %v; output=%q", err, consoleOutput.String())
+	}
+	if !strings.Contains(consoleOutput.String(), "Application") {
+		t.Errorf("application console output = %q", consoleOutput.String())
+	}
+
+	node, err := grovetest.StartNode(grovletPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = node.Cleanup() })
+	if err := node.WaitReady(ctx); err != nil {
+		t.Fatalf("same binary node runtime: %v", err)
+	}
+}
+
+// runGroveShopLifecycleDemo drives the non-debug portion of the documented
+// application demo. It remains a helper so the complete demo is accepted by
+// one production-shaped E2E rather than by independent tests.
+func runGroveShopLifecycleDemo(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	statePath := filepath.Join(t.TempDir(), "console.json")
+	consoleCommand := exec.CommandContext(ctx, grovletPath)
+	consoleCommand.Env = append(os.Environ(), consoleStateEnvironment+"="+statePath)
+	input, err := consoleCommand.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var consoleOutput bytes.Buffer
+	consoleCommand.Stdout = &consoleOutput
+	consoleCommand.Stderr = &consoleOutput
+	if err := consoleCommand.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitForConsoleState(t, statePath)
+	stopped := false
+	t.Cleanup(func() {
+		if stopped {
+			return
+		}
+		_, _ = io.WriteString(input, "q\n")
+		_ = consoleCommand.Wait()
+	})
+
+	goodConfig := filepath.Join("..", "configs", "acme.yaml")
+	activeOutput := runGroveShopAction(t, ctx, statePath, "rollout.start", "--config", goodConfig)
+	var active rolloutActionResult
+	if err := json.Unmarshal(activeOutput, &active); err != nil {
+		t.Fatalf("decode active rollout %q: %v", activeOutput, err)
+	}
+	if active.State != "active" || active.WebURL == "" || !applicationStatusHealthy(active.Status, active.Status.ActiveArtifact.ArtifactDigest) {
+		t.Fatalf("active rollout = %#v; console=%q", active, consoleOutput.String())
+	}
+	if active.Status.ActiveArtifact.ConfigRevision != "acme-r42" || active.Status.Rollout == nil || active.Status.Rollout.Phase != string(systemnats.RolloutActive) {
+		t.Errorf("active artifact status = %#v rollout=%#v", active.Status.ActiveArtifact, active.Status.Rollout)
+	}
+	if applicationPlacementNodeFromStatus(active.Status, groveshop.ServiceOrders) != "node-1" || applicationPlacementNodeFromStatus(active.Status, groveshop.ServiceInventory) != "node-2" {
+		t.Errorf("initial placement = %#v; want Orders on node-1 and Inventory on node-2", active.Status.Placements)
+	}
+	assertGroveShopWebArtifact(t, ctx, active)
+	before, err := createApplicationOrder(ctx, strings.TrimPrefix(active.WebURL, "http://"), "console-before-rollback")
+	if err != nil || !applicationOrderCompleted(before) {
+		t.Fatalf("order before rollback = %#v, %v", before, err)
+	}
+
+	statusOutput := runGroveShopAction(t, ctx, statePath, "cluster.status")
+	var actionStatus ClusterStatus
+	if err := json.Unmarshal(statusOutput, &actionStatus); err != nil {
+		t.Fatalf("decode cluster.status %q: %v", statusOutput, err)
+	}
+	if !applicationStatusHealthy(actionStatus, active.Status.ActiveArtifact.ArtifactDigest) {
+		t.Errorf("cluster.status = %#v", actionStatus)
+	}
+	if _, err := io.WriteString(input, "Cluster > Status\n"); err != nil {
+		t.Fatal(err)
+	}
+	resilienceOutput := runGroveShopAction(t, ctx, statePath, "resilience.run")
+	var resilience resilienceActionResult
+	if err := json.Unmarshal(resilienceOutput, &resilience); err != nil {
+		t.Fatalf("decode resilience result %q: %v", resilienceOutput, err)
+	}
+	if resilience.FailedNodeID != "node-2" || resilience.RecoveredNodeID != "node-1" || resilience.Result == nil {
+		t.Errorf("resilience result = %#v", resilience)
+	}
+	if resilience.Status.Health != "degraded" {
+		t.Errorf("resilience status health = %q; want degraded while node-2 is unavailable", resilience.Status.Health)
+	}
+	restartOutput := runGroveShopAction(t, ctx, statePath, "cluster.restart")
+	var restarted ClusterStatus
+	if err := json.Unmarshal(restartOutput, &restarted); err != nil {
+		t.Fatalf("decode restart status %q: %v", restartOutput, err)
+	}
+	if !applicationStatusHealthy(restarted, active.Status.ActiveArtifact.ArtifactDigest) || applicationPlacementNodeFromStatus(restarted, groveshop.ServiceInventory) != "node-1" {
+		t.Errorf("restarted status = %#v", restarted)
+	}
+	afterRestart, err := createApplicationOrder(ctx, strings.TrimPrefix(active.WebURL, "http://"), "console-after-restart")
+	if err != nil || !applicationOrderCompleted(afterRestart) {
+		t.Fatalf("order after restart = %#v, %v", afterRestart, err)
+	}
+
+	brokenConfig := filepath.Join("..", "configs", "acme-broken.yaml")
+	rollbackOutput := runGroveShopAction(t, ctx, statePath, "rollout.start", "--config", brokenConfig)
+	var rollback rolloutActionResult
+	if err := json.Unmarshal(rollbackOutput, &rollback); err != nil {
+		t.Fatalf("decode rollback %q: %v", rollbackOutput, err)
+	}
+	if rollback.State != "rolled-back" || len(rollback.Transitions) != 2 {
+		t.Fatalf("rollback result = %#v", rollback)
+	}
+	if pending := rollback.Transitions[0]; pending.Rollout == nil || pending.Rollout.Phase != string(systemnats.RolloutPending) || pending.CandidateArtifact == nil || pending.CandidateArtifact.ConfigRevision != "acme-broken-r43" {
+		t.Errorf("pending transition = %#v", pending)
+	}
+	if final := rollback.Status; !applicationStatusHealthy(final, active.Status.ActiveArtifact.ArtifactDigest) || final.Rollout == nil || final.Rollout.Phase != string(systemnats.RolloutRolledBack) || final.Rollout.Failure == nil || final.Rollout.Failure.Field != "inventory.reservation_buffer" {
+		t.Errorf("rolled-back status = %#v", final)
+	}
+	logsOutput := runGroveShopAction(t, ctx, statePath, "logs.view")
+	var logs applicationLogsView
+	if err := json.Unmarshal(logsOutput, &logs); err != nil {
+		t.Fatalf("decode logs view %q: %v", logsOutput, err)
+	}
+	if len(logs.Application) == 0 || len(logs.Cluster) == 0 || len(logs.SystemNATS) == 0 ||
+		!containsApplicationLogLine(logs.Causes, "inventory.reservation_buffer") {
+		t.Fatalf("logs view = %#v; want application, cluster, System NATS, and rollback diagnostics", logs)
+	}
+	after, err := createApplicationOrder(ctx, strings.TrimPrefix(active.WebURL, "http://"), "console-after-rollback")
+	if err != nil || !applicationOrderCompleted(after) {
+		t.Fatalf("order after rollback = %#v, %v", after, err)
+	}
+
+	if _, err := io.WriteString(input, "q\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := consoleCommand.Wait(); err != nil {
+		t.Fatalf("stop application console: %v; output=%q", err, consoleOutput.String())
+	}
+	stopped = true
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("console state after lifecycle error = %v; want not exist", err)
+	}
+	for _, want := range []string{
+		"GroveShop Grove Test App", "Cluster  healthy", "Nodes    3 / 3 healthy", "Services 3 / 3 healthy",
+		"Services\n", "Nodes\n", "Deployments\n", "Configuration\n", "Logs\n", "Debug\n", "Application\n", "New rollout",
+	} {
+		if !strings.Contains(consoleOutput.String(), want) {
+			t.Errorf("application TUI output missing %q:\n%s", want, consoleOutput.String())
+		}
+	}
+}
+
+func assertGroveShopWebArtifact(t *testing.T, ctx context.Context, active rolloutActionResult) {
+	t.Helper()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, active.WebURL+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatalf("GET Grove Shop UI: %v", err)
+	}
+	defer response.Body.Close()
+	page, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("GET Grove Shop UI status = %s: %s", response.Status, page)
+	}
+	wantPage, err := groveshop.WebAsset("index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(page, wantPage) {
+		t.Error("Grove Shop UI does not serve the embedded index.html asset")
+	}
+	var configuration groveshop.RuntimeConfigurationView
+	if err := readApplicationJSON(ctx, active.WebURL+"/grove/config", &configuration); err != nil {
+		t.Fatalf("read Grove Shop runtime configuration: %v", err)
+	}
+	if configuration.Revision != active.Status.ActiveArtifact.ConfigRevision || configuration.ConfigDigest != active.Status.ActiveArtifact.ConfigDigest || configuration.CustomerName != "Acme Retail" || configuration.ReservationBuffer != 100 {
+		t.Errorf("Grove Shop runtime configuration = %#v", configuration)
+	}
+	var webStatus ClusterStatus
+	if err := readApplicationJSON(ctx, active.WebURL+"/grove/status", &webStatus); err != nil {
+		t.Fatalf("read Grove Shop Web status: %v", err)
+	}
+	if !applicationStatusHealthy(webStatus, active.Status.ActiveArtifact.ArtifactDigest) {
+		t.Errorf("Grove Shop Web status = %#v", webStatus)
+	}
+}
+
+func runGroveShopAction(t *testing.T, ctx context.Context, statePath string, args ...string) []byte {
+	t.Helper()
+	command := exec.CommandContext(ctx, grovletPath, append([]string{"action"}, args...)...)
+	command.Env = append(os.Environ(), consoleStateEnvironment+"="+statePath)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("groveshop action %q: %v; output=%q", args, err, output)
+	}
+	return output
+}
+
+func applicationPlacementNodeFromStatus(status ClusterStatus, serviceID grove.ServiceID) string {
+	for _, placement := range status.Placements {
+		if placement.ServiceID == serviceID {
+			return placement.NodeID
+		}
+	}
+	return ""
+}
+
+func waitForConsoleState(t *testing.T, path string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatalf("wait for application console state %q: %v", path, ctx.Err())
+		}
+	}
+}

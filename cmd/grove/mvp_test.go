@@ -17,10 +17,10 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
-	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/artifact"
 	"github.com/grove-project/grove/internal/systemnats"
+	groveshop "github.com/grove-project/grove/internal/testapp"
 )
 
 const mvpTestTimeout = 4 * time.Minute
@@ -206,7 +206,7 @@ func TestGroveShopMVPLifecycle(t *testing.T) {
 		"--advertise-endpoint", "nats-subject://system/node-2-candidate",
 		"--system-nats-url", systemNATSURL,
 		"--system-nats-subject", candidateInventorySubject,
-		"--grove-shop-inventory",
+		"--component", "inventory",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -289,8 +289,8 @@ func startMVPCluster(t *testing.T, ctx context.Context, artifactPath string) (*m
 		webAddress: "127.0.0.1:" + strconv.Itoa(webPort),
 	}
 	extra := [][]string{
-		{"--grove-shop-orders", "--grove-shop-web", "--grove-shop-web-listen", cluster.webAddress},
-		{"--grove-shop-inventory"},
+		{"--component", "orders", "--component", "web", "--component-listen", "web=" + cluster.webAddress},
+		{"--component", "inventory"},
 		{},
 	}
 	for i := range cluster.subjects {

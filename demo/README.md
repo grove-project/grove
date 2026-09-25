@@ -5,6 +5,8 @@ Grove Shop is the permanent reference application for the Grove MVP. It proves G
 
 The demo must feel like one distributed application rather than a collection of infrastructure processes.
 
+Grove Shop's application code lives in its own repository, [grove-project/groveshop](https://github.com/grove-project/groveshop), as an ordinary external consumer of this repository's public packages (`grove`, `console`, `runtime`). This `demo/` folder is the normative contract Grove's own runtime is built and tested against — using Grove's own fixture application under `internal/testapp` — not the GroveShop application code itself.
+
 ## Core story
 A developer builds one Grove Shop application artifact containing application services, embedded Web UI, Grove runtime/operational surface, deployment metadata, and embedded customer configuration.
 
@@ -57,6 +59,17 @@ For either a code change or a config change, produce a new Grove Shop artifact w
 Because its application identity matches but artifact identity differs, Grove suggests rollout. After confirmation, all existing Cluster views show the same rollout progress live while the browser continues using the same ingress URL.
 
 For the failure proof, build/embed the invalid config into another artifact and run that artifact. The exact same rollout path detects the unhealthy candidate and rolls back the complete artifact.
+
+## Local development without a cluster
+Grove Shop's business logic is ordinary Go in [grove-project/groveshop](https://github.com/grove-project/groveshop): no Grove cluster, System NATS, or Grovlet process required.
+
+```bash
+$ git clone https://github.com/grove-project/groveshop && cd groveshop
+$ go test ./...
+ok  	github.com/grove-project/groveshop	0.169s
+```
+
+Set a breakpoint in the business code and run/debug the same tests in an IDE or with `dlv test` exactly like any other Go package. The same business code runs unchanged inside the distributed artifact; only `groveshop`'s `runtimeapp` package adds the Grove wiring that connects it to this repository's public `runtime` package.
 
 ## Supporting docs
 - `ARCHITECTURE.md` — demo services, artifact composition, topology, identity, ingress, and rollout model.

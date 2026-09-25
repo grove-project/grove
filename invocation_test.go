@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
-	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/grovetest"
+	groveshop "github.com/grove-project/grove/internal/testapp"
 )
 
 var grovletPath string
@@ -216,7 +216,7 @@ func TestMain(m *testing.M) {
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	path, buildErr := grovetest.BuildGrovlet(ctx, buildDir)
+	path, buildErr := grovetest.BuildGrovlet(ctx, buildDir, "./internal/testapp/cmd/testapp")
 	cancel()
 	if buildErr != nil {
 		fmt.Fprintln(os.Stderr, buildErr)

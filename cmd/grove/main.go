@@ -34,7 +34,7 @@ var (
 	errBinaryPathRequired    = errors.New("binary path is required")
 	errConfigPathRequired    = errors.New("config path is required")
 	errOutputPathRequired    = errors.New("output path is required")
-	errTestApplication       = errors.New("test artifact must contain Grove Shop")
+	errTestApplication       = errors.New("test artifact must contain Grove's test application")
 	errResilienceRequired    = errors.New("service selection requires resilience mode")
 	errServiceNameRequired   = errors.New("service name is required")
 	errDebugListenRequired   = errors.New("local DAP listen address is required")

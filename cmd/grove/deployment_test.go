@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/internal/artifact"
 	"github.com/grove-project/grove/internal/systemnats"
+	groveshop "github.com/grove-project/grove/internal/testapp"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -145,7 +145,7 @@ func TestConfiguredArtifactRolloutIdentityConverges(t *testing.T) {
 			t.Errorf("read persisted artifact %q: %v", record.ArtifactDigest, err)
 		}
 	}
-	rolloutKey, err := systemnats.DeploymentRolloutKey("grove-shop")
+	rolloutKey, err := systemnats.DeploymentRolloutKey(groveshop.ApplicationID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,9 +213,9 @@ func rolloutRecord(generation uint64, current, candidate string, phase systemnat
 		}
 	}
 	return systemnats.Rollout{
-		ApplicationID:           "grove-shop",
+		ApplicationID:           groveshop.ApplicationID,
 		ClusterID:               "production",
-		RolloutID:               fmt.Sprintf("grove-shop-%d", generation),
+		RolloutID:               fmt.Sprintf("%s-%d", groveshop.ApplicationID, generation),
 		Generation:              generation,
 		CurrentArtifactDigest:   current,
 		CandidateArtifactDigest: candidate,

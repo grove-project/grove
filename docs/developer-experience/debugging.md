@@ -11,7 +11,8 @@ ports.
 Build a debug-capable application and open its console:
 
 ```bash
-go build -gcflags="all=-N -l" -o ./bin/groveshop ./cmd/grovlet
+git clone https://github.com/grove-project/groveshop && cd groveshop
+go build -gcflags="all=-N -l" -o ./bin/groveshop ./cmd/groveshop
 ./bin/groveshop
 ```
 

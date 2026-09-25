@@ -1,0 +1,1765 @@
+package runtime
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"testing"
+	"testing/synctest"
+	"time"
+
+	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/grovetest"
+	"github.com/grove-project/grove/internal/artifact"
+	"github.com/grove-project/grove/internal/systemnats"
+	groveshop "github.com/grove-project/grove/internal/testapp"
+)
+
+var (
+	grovletPath           string
+	debugGrovletPath      string
+	delvePath             string
+	grovletArtifactDigest string
+)
+
+func TestStandaloneGrovletReportsBootstrapReadiness(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	server, err := systemnats.StartServer(ctx, "127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Shutdown)
+	node, err := grovetest.StartNode(
+		grovletPath,
+		"--node-id", "candidate-inventory",
+		"--advertise-endpoint", "nats-subject://system/candidate-inventory",
+		"--system-nats-url", server.URL(),
+		"--system-nats-subject", "_GROVE.system.candidate.inventory",
+		"--component", "inventory",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = node.Cleanup() })
+	if err := node.WaitReady(ctx); err != nil {
+		t.Fatalf("wait for candidate: %v; logs=%q", err, node.Logs())
+	}
+	transport, err := systemnats.Connect(ctx, server.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(transport.Close)
+	if err := transport.WaitBootstrapHealthy(ctx, "candidate-inventory", grovletArtifactDigest); err != nil {
+		t.Fatalf("wait for exact candidate readiness: %v; logs=%q", err, node.Logs())
+	}
+}
+
+// A Grovlet announces when it is ready and when a graceful shutdown completes.
+func Example() {
+	runtimeDir, err := os.MkdirTemp("", "grovlet-example-")
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer os.RemoveAll(runtimeDir)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var stdout bytes.Buffer
+	if err := run(ctx, []string{"--runtime-dir", runtimeDir}, &stdout, io.Discard); err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	fmt.Print(stdout.String())
+	// Output:
+	// {"event":"ready"}
+	// {"event":"stopped"}
+}
+
+func TestParseConfig(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	cfg, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-url", "nats://127.0.0.1:4222",
+		"--system-nats-subject", "_GROVE.system.invoke.node-a",
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.runtimeDir != runtimeDir {
+		t.Errorf("runtime directory = %q; want %q", cfg.runtimeDir, runtimeDir)
+	}
+	if cfg.systemNATSURL != "nats://127.0.0.1:4222" {
+		t.Errorf("System NATS URL = %q; want nats://127.0.0.1:4222", cfg.systemNATSURL)
+	}
+	if cfg.systemNATSSubject != "_GROVE.system.invoke.node-a" {
+		t.Errorf("System NATS subject = %q; want _GROVE.system.invoke.node-a", cfg.systemNATSSubject)
+	}
+	clusterCfg, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+		"--advertise-endpoint", "nats-subject://system/node-a",
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-route-listen", "127.0.0.1:0",
+		"--system-nats-seed", "nats-route://127.0.0.1:6222",
+		"--system-nats-membership",
+		"--system-nats-recovery",
+		"--system-nats-subject", "_GROVE.system.invoke.node-a",
+		"--component", "orders",
+		"--component", "web",
+		"--component-listen", "web=127.0.0.1:8080",
+	}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if clusterCfg.systemNATSRouteListen != "127.0.0.1:0" {
+		t.Errorf("System NATS route listener = %q; want 127.0.0.1:0", clusterCfg.systemNATSRouteListen)
+	}
+	if clusterCfg.systemNATSSeed != "nats-route://127.0.0.1:6222" {
+		t.Errorf("System NATS seed = %q; want nats-route://127.0.0.1:6222", clusterCfg.systemNATSSeed)
+	}
+	if !clusterCfg.systemNATSMembership {
+		t.Error("System NATS membership is disabled; want enabled")
+	}
+	if !clusterCfg.systemNATSRecovery {
+		t.Error("System NATS recovery is disabled; want enabled")
+	}
+	if !slices.Contains(clusterCfg.componentKinds, "orders") {
+		t.Error("Orders placement is disabled; want enabled")
+	}
+	if !slices.Contains(clusterCfg.componentKinds, "web") || configuredValue(clusterCfg.componentListeners, "web") != "127.0.0.1:8080" {
+		t.Errorf("Web config = components %v, listeners %v", clusterCfg.componentKinds, clusterCfg.componentListeners)
+	}
+
+	if _, err := parseConfig(nil, io.Discard); !errors.Is(err, errRuntimeDirRequired) {
+		t.Errorf("error = %v; want %v", err, errRuntimeDirRequired)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-listen", "127.0.0.1:4222",
+		"--system-nats-url", "nats://127.0.0.1:4222",
+	}, io.Discard); !errors.Is(err, errSystemNATSConflict) {
+		t.Errorf("listen and URL error = %v; want %v", err, errSystemNATSConflict)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-subject", "_GROVE.system.invoke.node-a",
+	}, io.Discard); !errors.Is(err, errSystemNATSRequired) {
+		t.Errorf("endpoint without connection error = %v; want %v", err, errSystemNATSRequired)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-url", "nats://127.0.0.1:4222",
+		"--system-nats-subject", "_GROVE.system.invoke.node-a",
+		"--component", "orders",
+		"--component", "inventory",
+	}, io.Discard); !errors.Is(err, errApplicationPlacementCluster) {
+		t.Errorf("components without placement cluster error = %v; want %v", err, errApplicationPlacementCluster)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+		"--advertise-endpoint", "nats-subject://system/node-a",
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-route-listen", "127.0.0.1:0",
+		"--system-nats-seed", "nats-route://127.0.0.1:6222",
+		"--system-nats-membership",
+		"--system-nats-subject", "_GROVE.system.invoke.node-a",
+		"--component", "orders",
+		"--component", "orders", "--route-subject", "_GROVE.system.invoke.node-b",
+	}, io.Discard); !errors.Is(err, ErrApplicationDefinitionInvalid) {
+		t.Errorf("duplicate component error = %v; want %v", err, ErrApplicationDefinitionInvalid)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+		"--advertise-endpoint", "nats-subject://system/node-a",
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-route-listen", "127.0.0.1:0",
+		"--system-nats-seed", "nats-route://127.0.0.1:6222",
+		"--system-nats-membership",
+		"--system-nats-subject", "_GROVE.system.invoke.node-a",
+		"--component", "web",
+	}, io.Discard); !errors.Is(err, errApplicationListenRequired) {
+		t.Errorf("Web without listen error = %v; want %v", err, errApplicationListenRequired)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--component-listen", "web=127.0.0.1:8080",
+	}, io.Discard); err == nil {
+		t.Error("component listener without placement succeeded")
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-route-listen", "127.0.0.1:0",
+	}, io.Discard); !errors.Is(err, errSystemNATSRouteListenRequired) {
+		t.Errorf("route without embedded server error = %v; want %v", err, errSystemNATSRouteListenRequired)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-url", "nats://127.0.0.1:4222",
+		"--system-nats-subject", "_GROVE.system.invoke.node-a",
+		"--system-nats-recovery",
+	}, io.Discard); !errors.Is(err, errSystemNATSRecoveryCluster) {
+		t.Errorf("recovery without membership error = %v; want %v", err, errSystemNATSRecoveryCluster)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-seed", "nats-route://127.0.0.1:6222",
+	}, io.Discard); !errors.Is(err, errSystemNATSSeedRouteRequired) {
+		t.Errorf("seed without route listener error = %v; want %v", err, errSystemNATSSeedRouteRequired)
+	}
+	bootstrap, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+		"--advertise-endpoint", "nats-subject://system/node-a",
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-route-listen", "127.0.0.1:0",
+		"--system-nats-membership",
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("seedless membership bootstrap: %v", err)
+	}
+	if bootstrap.systemNATSSeed != "" {
+		t.Errorf("bootstrap seed = %q; want empty", bootstrap.systemNATSSeed)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-membership",
+	}, io.Discard); !errors.Is(err, errSystemNATSMembershipCluster) {
+		t.Errorf("membership without route listener error = %v; want %v", err, errSystemNATSMembershipCluster)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-route-listen", "127.0.0.1:0",
+	}, io.Discard); !errors.Is(err, errSystemNATSClusterIdentity) {
+		t.Errorf("cluster without identity error = %v; want %v", err, errSystemNATSClusterIdentity)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+		"--advertise-endpoint", "nats-subject://system/node-a",
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-route-listen", "127.0.0.1:0",
+		"--system-nats-seed", "nats://127.0.0.1:6222",
+	}, io.Discard); !errors.Is(err, systemnats.ErrSeedURLInvalid) {
+		t.Errorf("invalid seed URL error = %v; want %v", err, systemnats.ErrSeedURLInvalid)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+	}, io.Discard); !errors.Is(err, errNodeIdentityPair) {
+		t.Errorf("incomplete identity error = %v; want %v", err, errNodeIdentityPair)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "bad node",
+		"--advertise-endpoint", "nats-subject://system/node",
+	}, io.Discard); !errors.Is(err, errNodeIDInvalid) {
+		t.Errorf("invalid node ID error = %v; want %v", err, errNodeIDInvalid)
+	}
+	if _, err := parseConfig([]string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+		"--advertise-endpoint", "relative-endpoint",
+	}, io.Discard); !errors.Is(err, errAdvertiseInvalid) {
+		t.Errorf("invalid advertised endpoint error = %v; want %v", err, errAdvertiseInvalid)
+	}
+}
+
+func TestApplicationStartupStateUsesRestoredIntent(t *testing.T) {
+	cfg := config{
+		systemNATSRecovery:        true,
+		systemNATSSubject:         "_GROVE.system.restart.node-1",
+		componentKinds:            []string{"orders"},
+		applicationArtifactDigest: grovletArtifactDigest,
+	}
+	placements, services := applicationStartupState(cfg, systemnats.DesiredView{Ready: true})
+	if len(placements) != 1 || !slices.Equal(services, []grove.ServiceID{groveshop.ServiceOrders}) {
+		t.Fatalf("first-boot state = %#v, %v; want Orders placement and worker", placements, services)
+	}
+	restored := systemnats.DesiredView{Ready: true, Deployments: []systemnats.DesiredDeployment{{
+		ApplicationID:  "grove-shop",
+		Version:        "current",
+		ArtifactDigest: grovletArtifactDigest,
+		Components:     []systemnats.DesiredComponent{{ServiceID: groveshop.ServiceOrders, NodeID: "node-1"}},
+	}}}
+	placements, services = applicationStartupState(cfg, restored)
+	if len(placements) != 0 || len(services) != 0 {
+		t.Errorf("restored state = %#v, %v; want observation-only placement and no boot workers", placements, services)
+	}
+}
+
+func TestApplicationDebugTopologyIncludesFiveDedicatedWorkers(t *testing.T) {
+	cfgs := []config{
+		{nodeID: "node-1", systemNATSSubject: "debug.node-1", componentKinds: []string{"web"}, componentListeners: []string{"web=127.0.0.1:8080"}, applicationArtifactDigest: grovletArtifactDigest},
+		{nodeID: "node-2", systemNATSSubject: "debug.node-2", componentKinds: []string{"orders"}, componentOptions: []string{"orders=distributed"}, applicationArtifactDigest: grovletArtifactDigest},
+		{nodeID: "node-3", systemNATSSubject: "debug.node-3", componentKinds: []string{"inventory"}, applicationArtifactDigest: grovletArtifactDigest},
+		{nodeID: "node-4", systemNATSSubject: "debug.node-4", componentKinds: []string{"payment"}, applicationArtifactDigest: grovletArtifactDigest},
+		{nodeID: "node-5", systemNATSSubject: "debug.node-5", componentKinds: []string{"shipping"}, applicationArtifactDigest: grovletArtifactDigest},
+	}
+	wantServices := []grove.ServiceID{
+		groveshop.ServiceWeb,
+		groveshop.ServiceOrders,
+		groveshop.ServiceInventory,
+		groveshop.ServicePayment,
+		groveshop.ServiceShipping,
+	}
+	for i, cfg := range cfgs {
+		placements := applicationPlacements(cfg)
+		specs := applicationComponentSpecs(cfg)
+		serviceIDs := applicationPlacedServiceIDs(cfg)
+		if len(placements) != 1 || len(specs) != 1 || len(serviceIDs) != 1 {
+			t.Fatalf("node-%d topology = placements %#v specs %#v services %v", i+1, placements, specs, serviceIDs)
+		}
+		if placements[0].ServiceID != wantServices[i] || placements[0].NodeID != cfg.nodeID || specs[0].serviceID != wantServices[i] || serviceIDs[0] != wantServices[i] {
+			t.Errorf("node-%d topology = placement %#v spec %#v services %v; want service %d", i+1, placements[0], specs[0], serviceIDs, wantServices[i])
+		}
+	}
+	if got := applicationComponentSpecs(cfgs[1])[0].options; !slices.Equal(got, []string{"distributed"}) {
+		t.Errorf("Orders worker arguments = %q; want distributed Orders", got)
+	}
+}
+
+func TestSystemNATSStateExists(t *testing.T) {
+	runtimeDir := t.TempDir()
+	if systemNATSStateExists(runtimeDir) {
+		t.Fatal("new runtime directory reports persisted System NATS state")
+	}
+	if err := os.Mkdir(filepath.Join(runtimeDir, "system-nats"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !systemNATSStateExists(runtimeDir) {
+		t.Fatal("existing System NATS directory does not report persisted state")
+	}
+}
+
+func TestPrepareRuntimeDir(t *testing.T) {
+	runtimeDir := filepath.Join(t.TempDir(), "runtime")
+	if err := prepareRuntimeDir(runtimeDir); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(runtimeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() {
+		t.Errorf("runtime path %q is not a directory", runtimeDir)
+	}
+
+	runtimeFile := filepath.Join(t.TempDir(), "runtime-file")
+	if err := os.WriteFile(runtimeFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = prepareRuntimeDir(runtimeFile)
+	var runtimeErr runtimeDirError
+	if !errors.As(err, &runtimeErr) {
+		t.Fatalf("error type = %T; want runtimeDirError", err)
+	}
+	if runtimeErr.path != runtimeFile {
+		t.Errorf("error path = %q; want %q", runtimeErr.path, runtimeFile)
+	}
+}
+
+func TestRun(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		var stdout bytes.Buffer
+		done := make(chan error, 1)
+		go func() {
+			done <- run(ctx, []string{"--runtime-dir", t.TempDir()}, &stdout, io.Discard)
+		}()
+
+		synctest.Wait()
+		const readyOutput = "{\"event\":\"ready\"}\n"
+		if got := stdout.String(); got != readyOutput {
+			t.Errorf("output before shutdown = %q; want %q", got, readyOutput)
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("run returned before shutdown: %v", err)
+		default:
+		}
+
+		cancel()
+		synctest.Wait()
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+
+		const stoppedOutput = readyOutput + "{\"event\":\"stopped\"}\n"
+		if got := stdout.String(); got != stoppedOutput {
+			t.Errorf("output after shutdown = %q; want %q", got, stoppedOutput)
+		}
+	})
+
+	wantErr := errors.New("write failed")
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if err := run(ctx, []string{"--runtime-dir", t.TempDir()}, errorWriter{err: wantErr}, io.Discard); !errors.Is(err, wantErr) {
+		t.Errorf("error = %v; want %v", err, wantErr)
+	}
+}
+
+func TestGrovletProcess(t *testing.T) {
+	node, err := grovetest.StartNode(grovletPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := node.Cleanup(); err != nil {
+			t.Errorf("cleanup: %v", err)
+		}
+	})
+
+	waitCtx, cancelWait := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWait()
+	if err := node.WaitReady(waitCtx); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(node.TempDir()); err != nil || !info.IsDir() {
+		t.Fatalf("runtime directory is not ready: %v; logs: %q", err, node.Logs())
+	}
+	if err := node.Stop(waitCtx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Two Grovlets must exchange the transport-independent envelope through the
+// embedded System NATS process rather than a same-process shortcut.
+func TestGrovletSystemNATSTransport(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	const (
+		hostSubject = "_GROVE.system.invoke.host"
+		peerSubject = "_GROVE.system.invoke.peer"
+	)
+
+	host, err := grovetest.StartNode(
+		grovletPath,
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-subject", hostSubject,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := host.Cleanup(); err != nil {
+			t.Errorf("cleanup host: %v", err)
+		}
+	})
+	if err := host.WaitReady(ctx); err != nil {
+		t.Fatal(err)
+	}
+	serverURL := readyEventFromLogs(t, host.Logs()).SystemNATSURL
+
+	peer, err := grovetest.StartNode(
+		grovletPath,
+		"--system-nats-url", serverURL,
+		"--system-nats-subject", peerSubject,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := peer.Cleanup(); err != nil {
+			t.Errorf("cleanup peer: %v", err)
+		}
+	})
+	if err := peer.WaitReady(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	transport, err := systemnats.Connect(ctx, serverURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(transport.Close)
+	payload, err := grove.Encode("inventory request")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := grove.RequestEnvelope{
+		RequestID: "request-between-grovlets",
+		ServiceID: 2,
+		MethodID:  1,
+		Payload:   payload,
+	}
+	for _, subject := range []string{hostSubject, peerSubject} {
+		response, err := transport.Request(ctx, subject, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got string
+		if err := grove.Decode(response.Payload, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got != "inventory request" {
+			t.Errorf("response through %s = %q; want inventory request", subject, got)
+		}
+	}
+
+	if err := peer.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Three independently embedded NATS servers exchange control traffic after two
+// Grovlets join through the first Grovlet's explicit seed route.
+func TestGrovletSystemNATSCluster(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	subjects := []string{
+		"_GROVE.system.invoke.cluster.node-1",
+		"_GROVE.system.invoke.cluster.node-2",
+		"_GROVE.system.invoke.cluster.node-3",
+	}
+	nodes := make([]*grovetest.Node, 0, len(subjects))
+	readyEvents := make([]lifecycleEvent, 0, len(subjects))
+
+	seed, err := grovetest.StartNode(
+		grovletPath,
+		"--node-id", "node-1",
+		"--advertise-endpoint", "nats-subject://system/node-1",
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-route-listen", "127.0.0.1:0",
+		"--system-nats-subject", subjects[0],
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nodes = append(nodes, seed)
+	t.Cleanup(func() {
+		if err := seed.Cleanup(); err != nil {
+			t.Errorf("cleanup seed: %v", err)
+		}
+	})
+	if err := seed.WaitReady(ctx); err != nil {
+		t.Fatal(err)
+	}
+	seedReady := readyEventFromLogs(t, seed.Logs())
+	readyEvents = append(readyEvents, seedReady)
+	if seedReady.SystemNATSRouteURL == "" {
+		t.Fatalf("seed route URL is empty; logs: %q", seed.Logs())
+	}
+
+	for i := 1; i < len(subjects); i++ {
+		nodeID := fmt.Sprintf("node-%d", i+1)
+		node, err := grovetest.StartNode(
+			grovletPath,
+			"--node-id", nodeID,
+			"--advertise-endpoint", "nats-subject://system/"+nodeID,
+			"--system-nats-listen", "127.0.0.1:0",
+			"--system-nats-route-listen", "127.0.0.1:0",
+			"--system-nats-seed", seedReady.SystemNATSRouteURL,
+			"--system-nats-subject", subjects[i],
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nodes = append(nodes, node)
+		t.Cleanup(func() {
+			if err := node.Cleanup(); err != nil {
+				t.Errorf("cleanup %s: %v", nodeID, err)
+			}
+		})
+		if err := node.WaitReady(ctx); err != nil {
+			t.Fatal(err)
+		}
+		readyEvents = append(readyEvents, readyEventFromLogs(t, node.Logs()))
+	}
+
+	clientURLs := make(map[string]struct{}, len(readyEvents))
+	routeURLs := make(map[string]struct{}, len(readyEvents))
+	for i, ready := range readyEvents {
+		wantNodeID := fmt.Sprintf("node-%d", i+1)
+		if ready.NodeID != wantNodeID {
+			t.Errorf("ready node ID = %q; want %q", ready.NodeID, wantNodeID)
+		}
+		if ready.SystemNATSURL == "" || ready.SystemNATSRouteURL == "" {
+			t.Errorf("%s readiness lacks NATS client or route URL: %#v", wantNodeID, ready)
+		}
+		clientURLs[ready.SystemNATSURL] = struct{}{}
+		routeURLs[ready.SystemNATSRouteURL] = struct{}{}
+	}
+	if len(clientURLs) != len(nodes) || len(routeURLs) != len(nodes) {
+		t.Errorf("cluster addresses are not distinct: client=%v route=%v", clientURLs, routeURLs)
+	}
+
+	transport, err := systemnats.Connect(ctx, seedReady.SystemNATSURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(transport.Close)
+	payload, err := grove.Encode("shared control plane")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, subject := range subjects {
+		request := grove.RequestEnvelope{
+			RequestID: fmt.Sprintf("request-node-%d", i+1),
+			ServiceID: 2,
+			MethodID:  1,
+			Payload:   payload,
+		}
+		response, err := requestGrovletEventually(ctx, transport, subject, request)
+		if err != nil {
+			t.Fatalf("request %s through seed: %v\n%s", subject, err, clusterLogs(nodes))
+		}
+		var got string
+		if err := grove.Decode(response.Payload, &got); err != nil {
+			t.Fatal(err)
+		}
+		if response.RequestID != request.RequestID || got != "shared control plane" {
+			t.Errorf("response through %s = %#v, %q; want correlated shared control plane", subject, response, got)
+		}
+	}
+
+	for i := len(nodes) - 1; i >= 0; i-- {
+		if err := nodes[i].Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func requestGrovletEventually(
+	ctx context.Context,
+	transport *systemnats.Transport,
+	subject string,
+	request grove.RequestEnvelope,
+) (grove.ResponseEnvelope, error) {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		requestCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+		response, err := transport.Request(requestCtx, subject, request)
+		cancel()
+		if err == nil {
+			return response, nil
+		}
+		lastErr = err
+		if err := ctx.Err(); err != nil {
+			return grove.ResponseEnvelope{}, errors.Join(lastErr, err)
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return grove.ResponseEnvelope{}, errors.Join(lastErr, ctx.Err())
+		}
+	}
+}
+
+func clusterLogs(nodes []*grovetest.Node) string {
+	var logs strings.Builder
+	for i, node := range nodes {
+		nodeLogs := node.Logs()
+		fmt.Fprintf(&logs, "node-%d logs:\n%s", i+1, nodeLogs)
+		if !strings.HasSuffix(nodeLogs, "\n") {
+			logs.WriteByte('\n')
+		}
+	}
+	return logs.String()
+}
+
+func stopGrovlets(ctx context.Context, nodes []*grovetest.Node) error {
+	errorsByNode := make(chan error, len(nodes))
+	for _, node := range nodes {
+		go func() { errorsByNode <- node.Stop(ctx) }()
+	}
+	var stopErr error
+	for range nodes {
+		stopErr = errors.Join(stopErr, <-errorsByNode)
+	}
+	return stopErr
+}
+
+// Every Grovlet reports the same logical membership after its local watcher
+// converges on the replicated JetStream/KV bucket.
+func TestGrovletMembershipConverges(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	cluster := startMembershipGrovlets(t, ctx)
+
+	want := []systemnats.MembershipRecord{
+		{NodeID: cluster.nodeIDs[0], AdvertisedEndpoint: cluster.endpoints[0]},
+		{NodeID: cluster.nodeIDs[1], AdvertisedEndpoint: cluster.endpoints[1]},
+		{NodeID: cluster.nodeIDs[2], AdvertisedEndpoint: cluster.endpoints[2]},
+	}
+	views, err := waitForGrovletMembership(ctx, cluster.transports, cluster.nodeIDs, want)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	for i, view := range views {
+		if view.Error != "" || !slices.Equal(view.Members, want) {
+			t.Errorf("%s membership = %#v; want %#v", cluster.nodeIDs[i], view, want)
+		}
+	}
+
+	for i := len(cluster.nodes) - 1; i >= 0; i-- {
+		if err := cluster.nodes[i].Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type membershipGrovlets struct {
+	nodeIDs    []string
+	endpoints  []string
+	nodes      []*grovetest.Node
+	transports []*systemnats.Transport
+}
+
+func startMembershipGrovlets(t *testing.T, ctx context.Context, nodeArgs ...[]string) membershipGrovlets {
+	t.Helper()
+	cluster := membershipGrovlets{
+		nodeIDs: []string{"node-1", "node-2", "node-3"},
+		endpoints: []string{
+			"nats-subject://system/node-1",
+			"nats-subject://system/node-2",
+			"nats-subject://system/node-3",
+		},
+	}
+	routePorts := reserveGrovletRoutePorts(t, len(cluster.nodeIDs))
+	if len(nodeArgs) != 0 && len(nodeArgs) != len(cluster.nodeIDs) {
+		t.Fatalf("node argument sets = %d; want 0 or %d", len(nodeArgs), len(cluster.nodeIDs))
+	}
+	for i, nodeID := range cluster.nodeIDs {
+		args := []string{
+			"--node-id", nodeID,
+			"--advertise-endpoint", cluster.endpoints[i],
+			"--system-nats-listen", "127.0.0.1:0",
+			"--system-nats-route-listen", fmt.Sprintf("127.0.0.1:%d", routePorts[i]),
+			"--system-nats-membership",
+		}
+		if i != 0 {
+			args = append(args, "--system-nats-seed", fmt.Sprintf("nats-route://127.0.0.1:%d", routePorts[0]))
+		}
+		if len(nodeArgs) != 0 {
+			args = append(args, nodeArgs[i]...)
+		}
+		node, err := grovetest.StartNode(grovletPath, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cluster.nodes = append(cluster.nodes, node)
+		t.Cleanup(func() {
+			if err := node.Cleanup(); err != nil {
+				t.Errorf("cleanup %s: %v", nodeID, err)
+			}
+		})
+	}
+	for i, node := range cluster.nodes {
+		if err := node.WaitReady(ctx); err != nil {
+			t.Fatalf("wait for %s: %v\n%s", cluster.nodeIDs[i], err, clusterLogs(cluster.nodes))
+		}
+		ready := readyEventFromLogs(t, node.Logs())
+		transport, err := systemnats.Connect(ctx, ready.SystemNATSURL)
+		if err != nil {
+			t.Fatalf("connect to %s: %v\n%s", cluster.nodeIDs[i], err, clusterLogs(cluster.nodes))
+		}
+		cluster.transports = append(cluster.transports, transport)
+		t.Cleanup(transport.Close)
+	}
+	return cluster
+}
+
+func reserveGrovletRoutePorts(t *testing.T, count int) []int {
+	t.Helper()
+	listeners := make([]net.Listener, 0, count)
+	defer func() {
+		for _, listener := range listeners {
+			if err := listener.Close(); err != nil {
+				t.Errorf("close route-port reservation: %v", err)
+			}
+		}
+	}()
+	ports := make([]int, 0, count)
+	for range count {
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listeners = append(listeners, listener)
+		_, portText, err := net.SplitHostPort(listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ports = append(ports, port)
+	}
+	return ports
+}
+
+func waitForGrovletMembership(
+	ctx context.Context,
+	transports []*systemnats.Transport,
+	nodeIDs []string,
+	want []systemnats.MembershipRecord,
+) ([]systemnats.MembershipView, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	views := make([]systemnats.MembershipView, len(nodeIDs))
+	var lastErr error
+	for {
+		converged := true
+		for i, nodeID := range nodeIDs {
+			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			view, err := transports[i].RequestMembership(requestCtx, nodeID)
+			cancel()
+			if err != nil {
+				lastErr = err
+				converged = false
+				continue
+			}
+			views[i] = view
+			if !view.Ready || !slices.Equal(view.Members, want) {
+				converged = false
+			}
+		}
+		if converged {
+			return views, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("grovlet membership did not converge: views=%#v: %w", views, errors.Join(lastErr, err))
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("grovlet membership did not converge: views=%#v: %w", views, errors.Join(lastErr, ctx.Err()))
+		}
+	}
+}
+
+// Both surviving Grovlets retain the killed node's membership record and
+// independently transition its heartbeat-derived health to unavailable.
+func TestGrovletNodeHealthConverges(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	defer cancel()
+	cluster := startMembershipGrovlets(t, ctx)
+	allNodes := []int{0, 1, 2}
+	healthyViews, err := waitForGrovletHealth(ctx, cluster, allNodes, func(view systemnats.ClusterView) bool {
+		if !view.Ready || len(view.Nodes) != 3 {
+			return false
+		}
+		for _, node := range view.Nodes {
+			if node.Health != systemnats.HealthHealthy || node.LastSeen == "" {
+				return false
+			}
+		}
+		return true
+	})
+	if err != nil {
+		t.Fatalf("wait for healthy cluster: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	for i, view := range healthyViews {
+		if view.Nodes[0].NodeID != "node-1" || view.Nodes[1].NodeID != "node-2" || view.Nodes[2].NodeID != "node-3" {
+			t.Errorf("%s healthy view order = %#v", cluster.nodeIDs[i], view.Nodes)
+		}
+	}
+
+	if err := cluster.nodes[1].Kill(ctx); err != nil {
+		t.Fatal(err)
+	}
+	survivors := []int{0, 2}
+	unavailableViews, err := waitForGrovletHealth(ctx, cluster, survivors, func(view systemnats.ClusterView) bool {
+		return view.Ready &&
+			len(view.Nodes) == 3 &&
+			view.Nodes[0].NodeID == "node-1" &&
+			view.Nodes[0].Health == systemnats.HealthHealthy &&
+			view.Nodes[1].NodeID == "node-2" &&
+			view.Nodes[1].Health == systemnats.HealthUnavailable &&
+			view.Nodes[2].NodeID == "node-3" &&
+			view.Nodes[2].Health == systemnats.HealthHealthy
+	})
+	if err != nil {
+		t.Fatalf("wait for unavailable node: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	for i, view := range unavailableViews {
+		if view.Nodes[1].AdvertisedEndpoint != cluster.endpoints[1] || view.Nodes[1].LastSeen == "" {
+			t.Errorf("%s unavailable node = %#v; want retained node-2 identity and last seen", cluster.nodeIDs[survivors[i]], view.Nodes[1])
+		}
+	}
+
+	for _, i := range []int{2, 0} {
+		if err := cluster.nodes[i].Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func waitForGrovletHealth(
+	ctx context.Context,
+	cluster membershipGrovlets,
+	observers []int,
+	condition func(systemnats.ClusterView) bool,
+) ([]systemnats.ClusterView, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	views := make([]systemnats.ClusterView, len(observers))
+	var lastErr error
+	for {
+		converged := true
+		for i, observer := range observers {
+			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			view, err := cluster.transports[observer].RequestClusterView(requestCtx, cluster.nodeIDs[observer])
+			cancel()
+			if err != nil {
+				lastErr = err
+				converged = false
+				continue
+			}
+			views[i] = view
+			if !condition(view) {
+				converged = false
+			}
+		}
+		if converged {
+			return views, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("grovlet health did not converge: views=%#v: %w", views, errors.Join(lastErr, err))
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("grovlet health did not converge: views=%#v: %w", views, errors.Join(lastErr, ctx.Err()))
+		}
+	}
+}
+
+// Every Grovlet observes Orders on node 1 and Inventory on node 2 before the
+// Orders implementation resolves its Inventory call from replicated placement.
+func TestGrovletServicePlacementConvergesAndRoutes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	const (
+		ordersSubject    = "_GROVE.system.invoke.node-1"
+		inventorySubject = "_GROVE.system.invoke.node-2"
+		observerSubject  = "_GROVE.system.invoke.node-3"
+	)
+	cluster := startMembershipGrovlets(
+		t,
+		ctx,
+		[]string{"--system-nats-subject", ordersSubject, "--component", "orders"},
+		[]string{"--system-nats-subject", inventorySubject, "--component", "inventory"},
+		[]string{"--system-nats-subject", observerSubject},
+	)
+	want := []systemnats.PlacementRecord{
+		{
+			ServiceID:         groveshop.ServiceOrders,
+			NodeID:            cluster.nodeIDs[0],
+			InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders),
+			ArtifactDigest:    grovletArtifactDigest,
+		},
+		{
+			ServiceID:         groveshop.ServiceInventory,
+			NodeID:            cluster.nodeIDs[1],
+			InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory),
+			ArtifactDigest:    grovletArtifactDigest,
+		},
+	}
+	views, err := waitForGrovletPlacement(ctx, cluster, want)
+	if err != nil {
+		t.Fatalf("%v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	for i, view := range views {
+		if view.Error != "" || !slices.Equal(view.Placements, want) {
+			t.Errorf("%s placement = %#v; want %#v", cluster.nodeIDs[i], view, want)
+		}
+	}
+
+	client, err := cluster.transports[2].RoutedClient(want[0].InvocationSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](
+		ctx,
+		client,
+		groveshop.ServiceOrders,
+		groveshop.MethodCreateOrder,
+		groveshop.CreateOrderRequest{
+			OrderID:         "order-placement",
+			SKU:             "coffee-beans",
+			Quantity:        2,
+			AmountCents:     2400,
+			ShippingAddress: "15 Grove Lane",
+		},
+	)
+	if err != nil {
+		t.Fatalf("placement-routed order: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if created.Status != groveshop.OrderCompleted {
+		t.Errorf("placement-routed order status = %q; want %q", created.Status, groveshop.OrderCompleted)
+	}
+	if created.Reservation.ID != "reservation-order-placement" {
+		t.Errorf("placement-routed reservation ID = %q; want reservation-order-placement", created.Reservation.ID)
+	}
+
+	for i := len(cluster.nodes) - 1; i >= 0; i-- {
+		if err := cluster.nodes[i].Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func waitForGrovletPlacement(
+	ctx context.Context,
+	cluster membershipGrovlets,
+	want []systemnats.PlacementRecord,
+) ([]systemnats.PlacementView, error) {
+	observers := make([]int, len(cluster.nodeIDs))
+	for i := range observers {
+		observers[i] = i
+	}
+	return waitForGrovletPlacementObservers(ctx, cluster, observers, want)
+}
+
+func waitForGrovletPlacementObservers(
+	ctx context.Context,
+	cluster membershipGrovlets,
+	observers []int,
+	want []systemnats.PlacementRecord,
+) ([]systemnats.PlacementView, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	views := make([]systemnats.PlacementView, len(observers))
+	var lastErr error
+	for {
+		converged := true
+		for i, observer := range observers {
+			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			view, err := cluster.transports[observer].RequestPlacement(requestCtx, cluster.nodeIDs[observer])
+			cancel()
+			if err != nil {
+				lastErr = err
+				converged = false
+				continue
+			}
+			views[i] = view
+			if !view.Ready || !slices.Equal(view.Placements, want) {
+				converged = false
+			}
+		}
+		if converged {
+			return views, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("grovlet placement did not converge: views=%#v: %w", views, errors.Join(lastErr, err))
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("grovlet placement did not converge: views=%#v: %w", views, errors.Join(lastErr, ctx.Err()))
+		}
+	}
+}
+
+func waitForGrovletDesired(
+	ctx context.Context,
+	cluster membershipGrovlets,
+	want []systemnats.DesiredDeployment,
+) ([]systemnats.DesiredView, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	views := make([]systemnats.DesiredView, len(cluster.nodeIDs))
+	var lastErr error
+	for {
+		converged := true
+		for i, nodeID := range cluster.nodeIDs {
+			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			view, err := cluster.transports[i].RequestDesired(requestCtx, nodeID)
+			cancel()
+			if err != nil {
+				lastErr = err
+				converged = false
+				continue
+			}
+			views[i] = view
+			if !view.Ready || !slices.EqualFunc(view.Deployments, want, func(a, b systemnats.DesiredDeployment) bool {
+				return a.ApplicationID == b.ApplicationID && a.Version == b.Version && a.ArtifactDigest == b.ArtifactDigest && slices.Equal(a.Components, b.Components)
+			}) {
+				converged = false
+			}
+		}
+		if converged {
+			return views, nil
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return nil, fmt.Errorf("grovlet desired state did not converge: views=%#v: %w", views, errors.Join(lastErr, ctx.Err()))
+		}
+	}
+}
+
+// A Grovlet stops and restarts its hosted Inventory worker while replicated
+// placement remains stable and the cross-node Orders flow becomes healthy
+// again.
+func TestGrovletComponentLifecycle(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	const (
+		ordersSubject    = "_GROVE.system.lifecycle.node-1"
+		inventorySubject = "_GROVE.system.lifecycle.node-2"
+		observerSubject  = "_GROVE.system.lifecycle.node-3"
+	)
+	cluster := startMembershipGrovlets(
+		t,
+		ctx,
+		[]string{"--system-nats-subject", ordersSubject, "--component", "orders"},
+		[]string{"--system-nats-subject", inventorySubject, "--component", "inventory"},
+		[]string{"--system-nats-subject", observerSubject},
+	)
+	wantPlacement := []systemnats.PlacementRecord{
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest},
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, wantPlacement); err != nil {
+		t.Fatalf("%v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletComponentState(ctx, cluster.transports[1], "node-2", groveshop.ServiceInventory, systemnats.ComponentHealthy); err != nil {
+		t.Fatalf("wait for healthy Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := cluster.transports[0].RequestStopComponent(ctx, "node-2", groveshop.ServiceInventory); err != nil {
+		t.Fatalf("stop Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletComponentState(ctx, cluster.transports[1], "node-2", groveshop.ServiceInventory, systemnats.ComponentStopped); err != nil {
+		t.Fatalf("wait for stopped Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, wantPlacement); err != nil {
+		t.Fatalf("placement changed after stop: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := cluster.transports[2].RequestStartComponent(ctx, "node-2", groveshop.ServiceInventory); err != nil {
+		t.Fatalf("restart Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletComponentState(ctx, cluster.transports[1], "node-2", groveshop.ServiceInventory, systemnats.ComponentHealthy); err != nil {
+		t.Fatalf("wait for restarted Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+
+	client, err := cluster.transports[2].RoutedClient(wantPlacement[0].InvocationSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](ctx, client, groveshop.ServiceOrders, groveshop.MethodCreateOrder, groveshop.CreateOrderRequest{
+		OrderID: "order-restarted", SKU: "coffee-beans", Quantity: 1, AmountCents: 1200, ShippingAddress: "16 Grove Lane",
+	})
+	if err != nil {
+		t.Fatalf("order after restart: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if created.Status != groveshop.OrderCompleted {
+		t.Errorf("order after restart status = %q; want %q", created.Status, groveshop.OrderCompleted)
+	}
+	for i := len(cluster.nodes) - 1; i >= 0; i-- {
+		if err := cluster.nodes[i].Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func waitForGrovletComponentState(
+	ctx context.Context,
+	transport *systemnats.Transport,
+	nodeID string,
+	serviceID grove.ServiceID,
+	want systemnats.ComponentState,
+) (systemnats.ComponentStatus, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	var lastView systemnats.ComponentView
+	var lastErr error
+	for {
+		requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+		view, err := transport.RequestComponents(requestCtx, nodeID)
+		cancel()
+		if err == nil {
+			lastView = view
+			for _, component := range view.Components {
+				if component.ServiceID == serviceID && component.State == want {
+					return component, nil
+				}
+			}
+		} else {
+			lastErr = err
+		}
+		if err := ctx.Err(); err != nil {
+			return systemnats.ComponentStatus{}, fmt.Errorf("component did not reach %s: view=%#v: %w", want, lastView, errors.Join(lastErr, err))
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return systemnats.ComponentStatus{}, fmt.Errorf("component did not reach %s: view=%#v: %w", want, lastView, errors.Join(lastErr, ctx.Err()))
+		}
+	}
+}
+
+// Both survivors correlate abrupt Inventory-node loss with the authoritative
+// placement that remains affected, without moving or restarting the service.
+func TestGrovletNodeFailureIdentifiesAffectedPlacement(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	const ordersSubject = "_GROVE.system.failure.node-1"
+	const inventorySubject = "_GROVE.system.failure.node-2"
+	cluster := startMembershipGrovlets(
+		t, ctx,
+		[]string{"--system-nats-subject", ordersSubject, "--component", "orders"},
+		[]string{"--system-nats-subject", inventorySubject, "--component", "inventory"},
+		[]string{"--system-nats-subject", "_GROVE.system.failure.node-3"},
+	)
+	wantPlacement := []systemnats.PlacementRecord{
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest},
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, wantPlacement); err != nil {
+		t.Fatalf("%v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletHealth(ctx, cluster, []int{0, 1, 2}, func(view systemnats.ClusterView) bool {
+		if !view.Ready || len(view.Nodes) != 3 {
+			return false
+		}
+		for _, node := range view.Nodes {
+			if node.Health != systemnats.HealthHealthy || node.LastSeen == "" {
+				return false
+			}
+		}
+		return true
+	}); err != nil {
+		t.Fatalf("wait for initially healthy cluster: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	client, err := cluster.transports[2].RoutedClient(wantPlacement[0].InvocationSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := groveshop.CreateOrderRequest{OrderID: "before-failure", SKU: "coffee", Quantity: 1, AmountCents: 900, ShippingAddress: "17 Grove Lane"}
+	if _, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](ctx, client, groveshop.ServiceOrders, groveshop.MethodCreateOrder, request); err != nil {
+		t.Fatalf("initial order: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if err := cluster.nodes[1].Kill(ctx); err != nil {
+		t.Fatal(err)
+	}
+	survivors := []int{0, 2}
+	if _, err := waitForGrovletHealth(ctx, cluster, survivors, func(view systemnats.ClusterView) bool {
+		return view.Ready && len(view.Nodes) == 3 && view.Nodes[1].NodeID == "node-2" && view.Nodes[1].Health == systemnats.HealthUnavailable
+	}); err != nil {
+		t.Fatalf("wait for failed hosting node: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	for _, survivor := range survivors {
+		view, err := cluster.transports[survivor].RequestPlacement(ctx, cluster.nodeIDs[survivor])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !view.Ready || !slices.Equal(view.Placements, wantPlacement) || view.Placements[1].NodeID != "node-2" {
+			t.Errorf("%s affected placement = %#v; want Inventory retained on unavailable node-2", cluster.nodeIDs[survivor], view)
+		}
+	}
+	failureCtx, cancelFailure := context.WithTimeout(ctx, time.Second)
+	defer cancelFailure()
+	request.OrderID = "after-failure"
+	_, err = grove.Call[groveshop.CreateOrderRequest, groveshop.Order](failureCtx, client, groveshop.ServiceOrders, groveshop.MethodCreateOrder, request)
+	var responseErr *grove.ResponseError
+	if !errors.As(err, &responseErr) || responseErr.Code != grove.ErrorTransport {
+		t.Errorf("order after hosting-node loss error = %v; want transport ResponseError", err)
+	}
+	if err := stopGrovlets(ctx, []*grovetest.Node{cluster.nodes[0], cluster.nodes[2]}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The deterministic recovery coordinator starts Inventory on the first
+// healthy survivor and commits its new invocation subject to replicated
+// placement before Orders resumes the same Grove call path.
+func TestGrovletRecoversServiceAfterHostingNodeFailure(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	defer cancel()
+	const (
+		ordersSubject    = "_GROVE.system.recovery.node-1"
+		inventorySubject = "_GROVE.system.recovery.node-2"
+		observerSubject  = "_GROVE.system.recovery.node-3"
+	)
+	cluster := startMembershipGrovlets(
+		t, ctx,
+		[]string{"--system-nats-subject", ordersSubject, "--component", "orders", "--system-nats-recovery"},
+		[]string{"--system-nats-subject", inventorySubject, "--component", "inventory", "--system-nats-recovery"},
+		[]string{"--system-nats-subject", observerSubject, "--system-nats-recovery"},
+	)
+	initialPlacement := []systemnats.PlacementRecord{
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest},
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, initialPlacement); err != nil {
+		t.Fatalf("wait for initial placement: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletHealth(ctx, cluster, []int{0, 1, 2}, func(view systemnats.ClusterView) bool {
+		if !view.Ready || len(view.Nodes) != 3 {
+			return false
+		}
+		for _, node := range view.Nodes {
+			if node.Health != systemnats.HealthHealthy || node.LastSeen == "" {
+				return false
+			}
+		}
+		return true
+	}); err != nil {
+		t.Fatalf("wait for initially healthy cluster: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	client, err := cluster.transports[2].RoutedClient(initialPlacement[0].InvocationSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := groveshop.CreateOrderRequest{OrderID: "before-recovery", SKU: "coffee", Quantity: 1, AmountCents: 900, ShippingAddress: "18 Grove Lane"}
+	if _, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](ctx, client, groveshop.ServiceOrders, groveshop.MethodCreateOrder, request); err != nil {
+		t.Fatalf("initial order: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if err := cluster.nodes[1].Kill(ctx); err != nil {
+		t.Fatal(err)
+	}
+	survivors := []int{0, 2}
+	if _, err := waitForGrovletHealth(ctx, cluster, survivors, func(view systemnats.ClusterView) bool {
+		return view.Ready && len(view.Nodes) == 3 && view.Nodes[1].NodeID == "node-2" && view.Nodes[1].Health == systemnats.HealthUnavailable
+	}); err != nil {
+		t.Fatalf("wait for failed Inventory node: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	recoveredPlacement := []systemnats.PlacementRecord{
+		initialPlacement[0],
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest},
+	}
+	if _, err := waitForGrovletPlacementObservers(ctx, cluster, survivors, recoveredPlacement); err != nil {
+		t.Fatalf("wait for recovered placement: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	component, err := waitForGrovletComponentState(ctx, cluster.transports[0], "node-1", groveshop.ServiceInventory, systemnats.ComponentHealthy)
+	if err != nil {
+		t.Fatalf("wait for recovered Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if component.InvocationSubject != recoveredPlacement[1].InvocationSubject {
+		t.Errorf("recovered Inventory subject = %q; want %q", component.InvocationSubject, recoveredPlacement[1].InvocationSubject)
+	}
+	request.OrderID = "after-recovery"
+	created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](ctx, client, groveshop.ServiceOrders, groveshop.MethodCreateOrder, request)
+	if err != nil {
+		t.Fatalf("order after recovery: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if created.Status != groveshop.OrderCompleted || created.Reservation.ID != "reservation-after-recovery" {
+		t.Errorf("order after recovery = %#v; want completed with recovered reservation", created)
+	}
+	if err := stopGrovlets(ctx, []*grovetest.Node{cluster.nodes[0], cluster.nodes[2]}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Desired deployment intent remains separate from observed worker state and
+// starts a new Inventory worker generation after abrupt component loss.
+func TestGrovletDesiredStateRestartsKilledComponent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	defer cancel()
+	const (
+		ordersSubject    = "_GROVE.system.desired.node-1"
+		inventorySubject = "_GROVE.system.desired.node-2"
+	)
+	cluster := startMembershipGrovlets(
+		t, ctx,
+		[]string{"--system-nats-subject", ordersSubject, "--component", "orders", "--system-nats-recovery"},
+		[]string{"--system-nats-subject", inventorySubject, "--component", "inventory", "--system-nats-recovery"},
+		[]string{"--system-nats-subject", "_GROVE.system.desired.node-3", "--system-nats-recovery"},
+	)
+	placement := []systemnats.PlacementRecord{
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest},
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, placement); err != nil {
+		t.Fatalf("wait for placement: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletDesired(ctx, cluster, nil); err != nil {
+		t.Fatalf("wait for empty desired state: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	desired := systemnats.DesiredDeployment{
+		ApplicationID:  "grove-shop",
+		Version:        "current",
+		ArtifactDigest: grovletArtifactDigest,
+		Components: []systemnats.DesiredComponent{
+			{ServiceID: groveshop.ServiceOrders, NodeID: "node-1"},
+			{ServiceID: groveshop.ServiceInventory, NodeID: "node-2"},
+		},
+	}
+	if err := cluster.transports[2].PutDesired(ctx, "node-1", desired); err != nil {
+		t.Fatalf("write desired deployment: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletDesired(ctx, cluster, []systemnats.DesiredDeployment{desired}); err != nil {
+		t.Fatalf("wait for desired deployment: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	initial, err := waitForGrovletComponentState(ctx, cluster.transports[1], "node-2", groveshop.ServiceInventory, systemnats.ComponentHealthy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cluster.transports[0].RequestKillComponent(ctx, "node-2", groveshop.ServiceInventory); err != nil {
+		t.Fatalf("kill Inventory worker: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	restarted, err := waitForGrovletComponentGeneration(ctx, cluster.transports[1], "node-2", groveshop.ServiceInventory, initial.Generation)
+	if err != nil {
+		t.Fatalf("wait for reconciled Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if restarted.Generation <= initial.Generation {
+		t.Errorf("restarted generation = %d; want greater than %d", restarted.Generation, initial.Generation)
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, placement); err != nil {
+		t.Fatalf("wait for placement after reconciliation: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	client, err := cluster.transports[2].RoutedClient(componentInvocationSubject(ordersSubject, groveshop.ServiceOrders))
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](ctx, client, groveshop.ServiceOrders, groveshop.MethodCreateOrder, groveshop.CreateOrderRequest{
+		OrderID: "after-desired-reconcile", SKU: "coffee", Quantity: 1, AmountCents: 900, ShippingAddress: "19 Grove Lane",
+	})
+	if err != nil || created.Status != groveshop.OrderCompleted {
+		t.Fatalf("order after desired reconciliation = %#v, %v\n%s", created, err, clusterLogs(cluster.nodes))
+	}
+	for i := len(cluster.nodes) - 1; i >= 0; i-- {
+		if err := cluster.nodes[i].Stop(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A complete cluster restart reuses only the Grovlets' persisted System NATS
+// state; desired reconciliation creates fresh workers from recovered intent.
+func TestGrovletClusterRestartReconstructsDesiredDeployment(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	defer cancel()
+	const (
+		ordersSubject    = "_GROVE.system.restart.node-1"
+		inventorySubject = "_GROVE.system.restart.node-2"
+	)
+	cluster := startMembershipGrovlets(
+		t, ctx,
+		[]string{"--system-nats-subject", ordersSubject, "--component", "orders", "--system-nats-recovery"},
+		[]string{"--system-nats-subject", inventorySubject, "--component", "inventory", "--system-nats-recovery"},
+		[]string{"--system-nats-subject", "_GROVE.system.restart.node-3", "--system-nats-recovery"},
+	)
+	runtimeDirs := make([]string, len(cluster.nodes))
+	for i, node := range cluster.nodes {
+		runtimeDirs[i] = node.TempDir()
+		if _, err := os.Stat(filepath.Join(runtimeDirs[i], "system-nats")); err != nil {
+			t.Fatalf("%s System NATS state: %v", cluster.nodeIDs[i], err)
+		}
+	}
+	placement := []systemnats.PlacementRecord{
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest},
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, placement); err != nil {
+		t.Fatalf("wait for initial placement: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	desired := systemnats.DesiredDeployment{
+		ApplicationID:  "grove-shop",
+		Version:        "current",
+		ArtifactDigest: grovletArtifactDigest,
+		Components: []systemnats.DesiredComponent{
+			{ServiceID: groveshop.ServiceOrders, NodeID: "node-1"},
+			{ServiceID: groveshop.ServiceInventory, NodeID: "node-2"},
+		},
+	}
+	if err := cluster.transports[2].PutDesired(ctx, "node-1", desired); err != nil {
+		t.Fatalf("write desired deployment: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletDesired(ctx, cluster, []systemnats.DesiredDeployment{desired}); err != nil {
+		t.Fatalf("wait for initial desired state: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	callOrder := func(orderID string) {
+		t.Helper()
+		client, err := cluster.transports[2].RoutedClient(placement[0].InvocationSubject)
+		if err != nil {
+			t.Fatal(err)
+		}
+		created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](ctx, client, groveshop.ServiceOrders, groveshop.MethodCreateOrder, groveshop.CreateOrderRequest{
+			OrderID: orderID, SKU: "coffee", Quantity: 1, AmountCents: 900, ShippingAddress: "20 Grove Lane",
+		})
+		if err != nil || created.Status != groveshop.OrderCompleted {
+			t.Fatalf("order %q = %#v, %v\n%s", orderID, created, err, clusterLogs(cluster.nodes))
+		}
+	}
+	callOrder("before-cluster-restart")
+
+	if err := stopGrovlets(ctx, cluster.nodes); err != nil {
+		t.Fatalf("stop cluster: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	for _, transport := range cluster.transports {
+		transport.Close()
+	}
+	for i, node := range cluster.nodes {
+		if node.TempDir() != runtimeDirs[i] {
+			t.Fatalf("%s runtime directory = %q; want %q", cluster.nodeIDs[i], node.TempDir(), runtimeDirs[i])
+		}
+		if err := node.Restart(); err != nil {
+			t.Fatalf("restart %s: %v\n%s", cluster.nodeIDs[i], err, clusterLogs(cluster.nodes))
+		}
+	}
+	for i, node := range cluster.nodes {
+		if err := node.WaitReady(ctx); err != nil {
+			t.Fatalf("wait for restarted %s: %v\n%s", cluster.nodeIDs[i], err, clusterLogs(cluster.nodes))
+		}
+		ready := readyEventFromLogs(t, node.Logs())
+		transport, err := systemnats.Connect(ctx, ready.SystemNATSURL)
+		if err != nil {
+			t.Fatalf("reconnect to %s: %v\n%s", cluster.nodeIDs[i], err, clusterLogs(cluster.nodes))
+		}
+		cluster.transports[i] = transport
+		t.Cleanup(transport.Close)
+	}
+	members := make([]systemnats.MembershipRecord, len(cluster.nodeIDs))
+	for i := range cluster.nodeIDs {
+		members[i] = systemnats.MembershipRecord{NodeID: cluster.nodeIDs[i], AdvertisedEndpoint: cluster.endpoints[i]}
+	}
+	if _, err := waitForGrovletMembership(ctx, cluster.transports, cluster.nodeIDs, members); err != nil {
+		t.Fatalf("wait for restored membership: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletDesired(ctx, cluster, []systemnats.DesiredDeployment{desired}); err != nil {
+		t.Fatalf("wait for restored desired state: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletPlacement(ctx, cluster, placement); err != nil {
+		t.Fatalf("wait for restored placement: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletComponentState(ctx, cluster.transports[0], "node-1", groveshop.ServiceOrders, systemnats.ComponentHealthy); err != nil {
+		t.Fatalf("wait for reconstructed Orders: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	if _, err := waitForGrovletComponentState(ctx, cluster.transports[1], "node-2", groveshop.ServiceInventory, systemnats.ComponentHealthy); err != nil {
+		t.Fatalf("wait for reconstructed Inventory: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	callOrder("after-cluster-restart")
+	if err := stopGrovlets(ctx, cluster.nodes); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForGrovletComponentGeneration(
+	ctx context.Context,
+	transport *systemnats.Transport,
+	nodeID string,
+	serviceID grove.ServiceID,
+	after uint64,
+) (systemnats.ComponentStatus, error) {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	var last systemnats.ComponentView
+	for {
+		view, err := transport.RequestComponents(ctx, nodeID)
+		if err == nil {
+			last = view
+			for _, component := range view.Components {
+				if component.ServiceID == serviceID && component.State == systemnats.ComponentHealthy && component.Generation > after {
+					return component, nil
+				}
+			}
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return systemnats.ComponentStatus{}, fmt.Errorf("component generation did not advance: view=%#v: %w", last, ctx.Err())
+		}
+	}
+}
+
+// Orders and Inventory keep one Grove call path when placed in separate real
+// Grovlet processes.
+func TestGrovletCrossNodeServiceInvocation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	const (
+		ordersSubject    = "_GROVE.system.invoke.orders-node"
+		inventorySubject = "_GROVE.system.invoke.inventory-node"
+	)
+
+	ordersNode, err := grovetest.StartNode(
+		grovletPath,
+		"--node-id", "orders-node",
+		"--advertise-endpoint", "nats-subject://system/orders-node",
+		"--system-nats-listen", "127.0.0.1:0",
+		"--system-nats-subject", ordersSubject,
+		"--component", "orders", "--route-subject", inventorySubject,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := ordersNode.Cleanup(); err != nil {
+			t.Errorf("cleanup Orders node: %v", err)
+		}
+	})
+	if err := ordersNode.WaitReady(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ordersReady := readyEventFromLogs(t, ordersNode.Logs())
+	serverURL := ordersReady.SystemNATSURL
+	if ordersReady.NodeID != "orders-node" || ordersReady.AdvertisedEndpoint != "nats-subject://system/orders-node" {
+		t.Errorf("Orders readiness identity = (%q, %q); want orders-node endpoint", ordersReady.NodeID, ordersReady.AdvertisedEndpoint)
+	}
+
+	inventoryNode, err := grovetest.StartNode(
+		grovletPath,
+		"--node-id", "inventory-node",
+		"--advertise-endpoint", "nats-subject://system/inventory-node",
+		"--system-nats-url", serverURL,
+		"--system-nats-subject", inventorySubject,
+		"--component", "inventory",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := inventoryNode.Cleanup(); err != nil {
+			t.Errorf("cleanup Inventory node: %v", err)
+		}
+	})
+	if err := inventoryNode.WaitReady(ctx); err != nil {
+		t.Fatal(err)
+	}
+	inventoryReady := readyEventFromLogs(t, inventoryNode.Logs())
+	if inventoryReady.NodeID != "inventory-node" || inventoryReady.AdvertisedEndpoint != "nats-subject://system/inventory-node" {
+		t.Errorf("Inventory readiness identity = (%q, %q); want inventory-node endpoint", inventoryReady.NodeID, inventoryReady.AdvertisedEndpoint)
+	}
+	if inventoryReady.NodeID == ordersReady.NodeID || inventoryReady.AdvertisedEndpoint == ordersReady.AdvertisedEndpoint {
+		t.Error("same-host Grovlets did not retain distinct identities and endpoints")
+	}
+
+	transport, err := systemnats.Connect(ctx, serverURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(transport.Close)
+	client, err := transport.RoutedClient(ordersSubject)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](
+		ctx,
+		client,
+		groveshop.ServiceOrders,
+		groveshop.MethodCreateOrder,
+		groveshop.CreateOrderRequest{
+			OrderID:         "order-cross-node",
+			SKU:             "coffee-beans",
+			Quantity:        2,
+			AmountCents:     2400,
+			ShippingAddress: "12 Grove Lane",
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != groveshop.OrderCompleted {
+		t.Errorf("cross-node order status = %q; want %q", created.Status, groveshop.OrderCompleted)
+	}
+	if created.Reservation.ID != "reservation-order-cross-node" {
+		t.Errorf("cross-node reservation ID = %q; want reservation-order-cross-node", created.Reservation.ID)
+	}
+
+	_, err = grove.Call[groveshop.CreateOrderRequest, groveshop.Order](
+		ctx,
+		client,
+		groveshop.ServiceOrders,
+		groveshop.MethodCreateOrder,
+		groveshop.CreateOrderRequest{OrderID: "invalid-cross-node", SKU: "coffee-beans"},
+	)
+	var responseErr *grove.ResponseError
+	if !errors.As(err, &responseErr) || responseErr.Code != grove.ErrorHandler {
+		t.Errorf("cross-node handler error = %v; want handler ResponseError", err)
+	}
+
+	if err := inventoryNode.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := ordersNode.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readyEventFromLogs(t *testing.T, logs string) lifecycleEvent {
+	t.Helper()
+	decoder := json.NewDecoder(strings.NewReader(logs))
+	var ready lifecycleEvent
+	for {
+		var event lifecycleEvent
+		if err := decoder.Decode(&event); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			t.Fatal(err)
+		}
+		if event.Event == "ready" {
+			ready = event
+		}
+	}
+	if ready.Event == "ready" {
+		return ready
+	}
+	t.Fatalf("Grovlet logs do not contain a ready event: %q", logs)
+	return lifecycleEvent{}
+}
+
+func TestMain(m *testing.M) {
+	buildDir, err := os.MkdirTemp("", "grovlet-command-build-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	path, buildErr := grovetest.BuildGrovlet(ctx, buildDir, "./internal/testapp/cmd/testapp")
+	debugPath, debugBuildErr := grovetest.BuildDebugGrovlet(ctx, buildDir, "./internal/testapp/cmd/testapp")
+	delveCommand := exec.CommandContext(ctx, "go", "tool", "-n", "dlv")
+	delveOutput, delveErr := delveCommand.Output()
+	cancel()
+	if err := errors.Join(buildErr, debugBuildErr, delveErr); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		_ = os.RemoveAll(buildDir)
+		os.Exit(1)
+	}
+	grovletPath = path
+	debugGrovletPath = debugPath
+	delvePath = strings.TrimSpace(string(delveOutput))
+	inspection, inspectErr := artifact.InspectFile(path)
+	if inspectErr != nil {
+		fmt.Fprintln(os.Stderr, inspectErr)
+		_ = os.RemoveAll(buildDir)
+		os.Exit(1)
+	}
+	grovletArtifactDigest = inspection.ArtifactDigest
+
+	code := m.Run()
+	if err := os.RemoveAll(buildDir); err != nil && code == 0 {
+		fmt.Fprintln(os.Stderr, err)
+		code = 1
+	}
+	os.Exit(code)
+}
+
+type errorWriter struct {
+	err error
+}
+
+func (w errorWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}

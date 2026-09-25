@@ -15,10 +15,10 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
-	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/artifact"
 	"github.com/grove-project/grove/internal/systemnats"
+	groveshop "github.com/grove-project/grove/internal/testapp"
 )
 
 const (
@@ -101,11 +101,11 @@ func startDebugDemoNodes(
 	webAddress string,
 ) ([]*grovetest.Node, string, error) {
 	extras := [][]string{
-		{"--grove-shop-web", "--grove-shop-web-listen", webAddress},
-		{"--grove-shop-orders", "--grove-shop-distributed-orders"},
-		{"--grove-shop-inventory"},
-		{"--grove-shop-payment"},
-		{"--grove-shop-shipping"},
+		{"--component", "web", "--component-listen", "web=" + webAddress},
+		{"--component", "orders", "--component-option", "orders=distributed"},
+		{"--component", "inventory"},
+		{"--component", "payment"},
+		{"--component", "shipping"},
 	}
 	nodes := make([]*grovetest.Node, 0, len(extras))
 	for i := range extras {

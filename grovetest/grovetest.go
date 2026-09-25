@@ -59,21 +59,23 @@ func (e *ProcessError) Unwrap() error {
 	return e.Err
 }
 
-// BuildGrovlet builds the Grovlet command associated with this grovetest
-// package into outputDir and returns the executable path. The caller owns
-// outputDir and should call BuildGrovlet once and reuse the result within a
-// test-package invocation.
-func BuildGrovlet(ctx context.Context, outputDir string) (string, error) {
-	return buildGrovlet(ctx, outputDir, false)
+// BuildGrovlet builds applicationPackage into outputDir and returns the
+// executable path. The package is explicit so external applications and
+// Grove's own test fixtures use the same harness boundary.
+func BuildGrovlet(ctx context.Context, outputDir, applicationPackage string) (string, error) {
+	return buildGrovlet(ctx, outputDir, applicationPackage, false)
 }
 
 // BuildDebugGrovlet builds the Grovlet command with compiler optimizations and
 // inlining disabled so source breakpoints bind reliably.
-func BuildDebugGrovlet(ctx context.Context, outputDir string) (string, error) {
-	return buildGrovlet(ctx, outputDir, true)
+func BuildDebugGrovlet(ctx context.Context, outputDir, applicationPackage string) (string, error) {
+	return buildGrovlet(ctx, outputDir, applicationPackage, true)
 }
 
-func buildGrovlet(ctx context.Context, outputDir string, debug bool) (string, error) {
+func buildGrovlet(ctx context.Context, outputDir, applicationPackage string, debug bool) (string, error) {
+	if strings.TrimSpace(applicationPackage) == "" {
+		return "", &ProcessError{Operation: "build Grovlet", Err: errors.New("application package is required")}
+	}
 	if err := os.MkdirAll(outputDir, 0o700); err != nil {
 		return "", &ProcessError{Operation: "create build directory", Err: err}
 	}
@@ -89,7 +91,7 @@ func buildGrovlet(ctx context.Context, outputDir string, debug bool) (string, er
 		arguments = append(arguments, "-gcflags=all=-N -l")
 	}
 	binaryPath := filepath.Join(outputDir, binaryName)
-	arguments = append(arguments, "-o", binaryPath, "./cmd/grovlet")
+	arguments = append(arguments, "-o", binaryPath, applicationPackage)
 	cmd := exec.CommandContext(ctx, "go", arguments...)
 	cmd.Dir = moduleDir
 	var output bytes.Buffer

@@ -21,9 +21,9 @@ import (
 
 	"github.com/google/go-dap"
 	"github.com/grove-project/grove"
-	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/systemnats"
+	groveshop "github.com/grove-project/grove/internal/testapp"
 )
 
 const debugE2ETimeout = 2 * time.Minute
@@ -150,11 +150,11 @@ func startDebugCluster(t *testing.T, ctx context.Context) debugCluster {
 	webPort := reserveRoutePorts(t, 1)[0]
 	cluster := debugCluster{webAddress: "127.0.0.1:" + strconv.Itoa(webPort)}
 	extras := [][]string{
-		{"--grove-shop-web", "--grove-shop-web-listen", cluster.webAddress},
-		{"--grove-shop-orders", "--grove-shop-distributed-orders"},
-		{"--grove-shop-inventory"},
-		{"--grove-shop-payment"},
-		{"--grove-shop-shipping"},
+		{"--component", "web", "--component-listen", "web=" + cluster.webAddress},
+		{"--component", "orders", "--component-option", "orders=distributed"},
+		{"--component", "inventory"},
+		{"--component", "payment"},
+		{"--component", "shipping"},
 	}
 	for i := range extras {
 		seed := 0
@@ -378,7 +378,7 @@ func debugBreakpointLocations(t *testing.T) (string, int, int) {
 	if !ok {
 		t.Fatal("runtime caller information is unavailable")
 	}
-	sourcePath := filepath.Clean(filepath.Join(filepath.Dir(testFile), "../../demo/groveshop/groveshop.go"))
+	sourcePath := filepath.Clean(filepath.Join(filepath.Dir(testFile), "../../internal/testapp/groveshop.go"))
 	source, err := os.ReadFile(sourcePath)
 	if err != nil {
 		t.Fatal(err)
