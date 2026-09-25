@@ -56,7 +56,7 @@ func TestApplicationConsoleDispatchesStructuredActions(t *testing.T) {
 	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("console state after exit error = %v; want not exist", err)
 	}
-	if output := tuiOutput.String(); !strings.Contains(output, "GroveShop Grove Test App") || !strings.Contains(output, "Run integrity check") {
+	if output := tuiOutput.String(); !strings.Contains(output, "Grove Grove Test App") || !strings.Contains(output, "Run integrity check") {
 		t.Errorf("TUI output = %q", output)
 	}
 }
@@ -213,7 +213,7 @@ func TestGroveShopBinaryRunsConsoleActionsAndNodeRuntime(t *testing.T) {
 	if err := consoleCommand.Wait(); err != nil {
 		t.Fatalf("stop application console: %v; output=%q", err, consoleOutput.String())
 	}
-	if !strings.Contains(consoleOutput.String(), "Application") {
+	if !strings.Contains(consoleOutput.String(), "App\n") {
 		t.Errorf("application console output = %q", consoleOutput.String())
 	}
 
@@ -352,11 +352,18 @@ func runGroveShopLifecycleDemo(t *testing.T) {
 		t.Errorf("console state after lifecycle error = %v; want not exist", err)
 	}
 	for _, want := range []string{
-		"GroveShop Grove Test App", "Cluster  healthy", "Nodes    3 / 3 healthy", "Services 3 / 3 healthy",
-		"Services\n", "Nodes\n", "Deployments\n", "Configuration\n", "Logs\n", "Debug\n", "Application\n", "New rollout",
+		"Grove Grove Test App", "Cluster  healthy", "Nodes    3 / 3 healthy", "Services 3 / 3 healthy",
+		"App\n", "Cluster\n", "Services\n", "Debug\n", "Logs\n",
 	} {
 		if !strings.Contains(consoleOutput.String(), want) {
 			t.Errorf("application TUI output missing %q:\n%s", want, consoleOutput.String())
+		}
+	}
+	for _, notWant := range []string{
+		"New rollout", "Restart cluster", "Run resilience scenario", "Debug demo",
+	} {
+		if strings.Contains(consoleOutput.String(), notWant) {
+			t.Errorf("application TUI output must not contain legacy menu action %q:\n%s", notWant, consoleOutput.String())
 		}
 	}
 }

@@ -42,6 +42,10 @@ type Action struct {
 	Description string
 	// Handler performs the operation for both TUI and structured callers.
 	Handler Handler
+	// Hidden excludes the action from interactive TUI listings and keyboard
+	// navigation while it remains invokable by name through Registry.Invoke
+	// and structured automation.
+	Hidden bool
 }
 
 // ActionError identifies the action involved in a registration or invocation

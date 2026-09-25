@@ -30,33 +30,26 @@ $ ./bin/groveshop
 A Grove-aware application opens its interactive console when invoked in an interactive terminal:
 
 ```text
-GroveShop Grove Shop
+Grove Grove Shop
 Cluster  healthy
 Nodes    3 / 3 healthy
 Services 3 / 3 healthy
 Version  v0.1.0
 Config   acme-r42
 
+App
+  Run integrity check  [app.orders.verify]
+
 Cluster
   Status  [cluster.status]
-  Restart cluster  [cluster.restart]
 
 Services
 
-Nodes
-
-Deployments
-  New rollout  [rollout.start]
-
-Configuration
+Debug
+  Attach debugger  [debug.attach]
 
 Logs
-
-Debug
-
-Application
-  Run integrity check  [app.orders.verify]
-  Run resilience scenario  [resilience.run]
+  View logs  [logs.view]
 ```
 
 The same executable may also start the runtime directly when used as the deployed process. TUI activation must never make headless execution depend on a terminal.

@@ -109,7 +109,7 @@ func (t *TUI) render(ctx context.Context, selectedAction string) (string, error)
 		return t.renderStartup(model, selectedAction), nil
 	}
 	var output strings.Builder
-	fmt.Fprintf(&output, "GroveShop %s\n", model.Application)
+	fmt.Fprintf(&output, "Grove %s\n", model.Application)
 	fmt.Fprintf(&output, "Cluster  %s\n", displayValue(model.Health))
 	fmt.Fprintf(&output, "Nodes    %d / %d healthy\n", model.NodesHealthy, model.NodesTotal)
 	fmt.Fprintf(&output, "Services %d / %d healthy\n", model.ServicesHealthy, model.ServicesTotal)
@@ -136,7 +136,7 @@ func (t *TUI) render(ctx context.Context, selectedAction string) (string, error)
 		fmt.Fprintf(&output, "Last event\n  %s\n", model.LastEvent)
 	}
 
-	actions := t.registry.Actions()
+	actions := t.Actions()
 	sections := append([]string(nil), model.Sections...)
 	for _, action := range actions {
 		if !containsSection(sections, action.Section) {
@@ -160,7 +160,7 @@ func (t *TUI) render(ctx context.Context, selectedAction string) (string, error)
 
 func (t *TUI) renderStartup(model Model, selectedAction string) string {
 	var output strings.Builder
-	fmt.Fprintf(&output, "GroveShop %s\n", model.Application)
+	fmt.Fprintf(&output, "Grove %s\n", model.Application)
 	if model.StartupAction == "cluster.start" {
 		fmt.Fprintf(&output, "No %s cluster discovered\n\n", model.Application)
 		fmt.Fprintf(&output, "%sStart new cluster  [cluster.start]\n", startupMarker(selectedAction, "cluster.start"))
@@ -186,9 +186,17 @@ func startupMarker(selectedAction, action string) string {
 	return "  "
 }
 
-// Actions returns the ordered actions available for keyboard navigation.
+// Actions returns the ordered actions available for keyboard navigation,
+// excluding actions marked Hidden.
 func (t *TUI) Actions() []Action {
-	return t.registry.Actions()
+	all := t.registry.Actions()
+	visible := make([]Action, 0, len(all))
+	for _, action := range all {
+		if !action.Hidden {
+			visible = append(visible, action)
+		}
+	}
+	return visible
 }
 
 // ReadModel returns the latest application state for interactive frontends.
