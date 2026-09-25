@@ -271,7 +271,7 @@ func (v *applicationTUI) updateModel(model console.Model) {
 	third := "[::b]INGRESS[-:-:-] -"
 	if model.IngressURL != "" {
 		third = fmt.Sprintf(
-			"[::b]INGRESS[-:-:-] [\"%s\"][aqua::u]%s[-:-:-][\"\"]  [gray](click to open)[-:-:-]",
+			"[::b]INGRESS[-:-:-] [\"%s\"][aqua::u]%s[-:-:-][\"\"]  [gray::](click to open)[-:-:-]",
 			applicationTUIIngressRegion,
 			model.IngressURL,
 		)
@@ -279,7 +279,7 @@ func (v *applicationTUI) updateModel(model console.Model) {
 	lines := []string{first, second, third}
 	for _, session := range model.DebugSessions {
 		lines = append(lines, fmt.Sprintf(
-			"[purple::b]DLV[-:-:-] %s  [gray]%s/%s[-:-:-]  [aqua::b]DAP %s[-:-:-]",
+			"[purple::b]DLV[-:-:-] %s  [gray::]%s/%s[-:-:-]  [aqua::b]DAP %s[-:-:-]",
 			tview.Escape(displayTUIValue(session.ServiceName)),
 			tview.Escape(displayTUIValue(session.NodeID)),
 			tview.Escape(displayTUIValue(session.WorkerID)),
@@ -813,7 +813,7 @@ func renderApplicationLogs(logs applicationLogsView) string {
 	}
 	fmt.Fprintf(
 		&output,
-		"[::b]HEALTH[-:-:-] [%s::b]%s[-:-:-]    [gray]auto-refresh 500ms · ↑/↓ scroll · r refresh · q/esc back[-:-:-]\n\n",
+		"[::b]HEALTH[-:-:-] [%s::b]%s[-:-:-]    [gray::]auto-refresh 500ms · ↑/↓ scroll · r refresh · q/esc back[-:-:-]\n\n",
 		healthColor,
 		strings.ToUpper(displayTUIValue(logs.Health)),
 	)
@@ -847,7 +847,7 @@ func renderApplicationLogs(logs applicationLogsView) string {
 func writeApplicationLogSection(output *strings.Builder, title string, lines []string) {
 	fmt.Fprintf(output, "\n[aqua::b]%s[-:-:-]\n", title)
 	if len(lines) == 0 {
-		output.WriteString("  [gray]No entries captured.[-:-:-]\n")
+		output.WriteString("  [gray::]No entries captured.[-:-:-]\n")
 		return
 	}
 	for _, line := range lines {
@@ -1040,6 +1040,7 @@ func hotkeyLabel(action string) string {
 		's': "cluster.status",
 		'a': "debug.attach",
 		'l': "logs.view",
+		'o': "app.overview",
 	} {
 		if action == name {
 			return string(key)

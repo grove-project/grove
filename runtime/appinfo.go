@@ -252,14 +252,14 @@ func renderApplicationOverview(view applicationOverviewView, now time.Time) stri
 
 func renderApplicationConfig(view applicationConfigView) string {
 	var out strings.Builder
-	fmt.Fprintf(&out, "\n[aqua::b]ACTIVE CONFIG[-:-:-]  [gray](read-only)[-:-:-]\n")
+	fmt.Fprintf(&out, "\n[aqua::b]ACTIVE CONFIG[-:-:-]  [gray::](read-only)[-:-:-]\n")
 	fmt.Fprintf(&out, "  %-14s%s\n", "Revision", tview.Escape(displayTUIValue(view.Revision)))
 	fmt.Fprintf(&out, "  %-14s%s\n", "Source", tview.Escape(displayTUIValue(view.Source)))
 	fmt.Fprintf(&out, "  %-14s%s\n\n", "Status", tview.Escape(displayTUIValue(view.Status)))
 	for _, line := range strings.Split(strings.TrimRight(view.YAML, "\n"), "\n") {
 		fmt.Fprintf(&out, "  %s\n", tview.Escape(line))
 	}
-	out.WriteString("\n[gray]A changed configuration arrives with a new application binary via rollout.[-:-:-]\n")
+	out.WriteString("\n[gray::]A changed configuration arrives with a new application binary via rollout.[-:-:-]\n")
 	return out.String()
 }
 
@@ -267,13 +267,13 @@ func renderApplicationIngress(view applicationIngressView) string {
 	var out strings.Builder
 	out.WriteString("\n[aqua::b]LISTENING[-:-:-]\n")
 	if view.URL == "" {
-		out.WriteString("  [gray]not deployed[-:-:-]\n")
+		out.WriteString("  [gray::]not deployed[-:-:-]\n")
 	} else {
 		fmt.Fprintf(&out, "  %s\n", tview.Escape(view.URL))
 	}
 	fmt.Fprintf(&out, "\n[aqua::b]%-8s %-22s %s[-:-:-]\n", "METHOD", "PATH", "SERVICE")
 	if len(view.Routes) == 0 {
-		out.WriteString("  [gray]No ingress routes registered.[-:-:-]\n")
+		out.WriteString("  [gray::]No ingress routes registered.[-:-:-]\n")
 	}
 	for _, route := range view.Routes {
 		fmt.Fprintf(&out, "%-8s %-22s %s\n", tview.Escape(route.Method), tview.Escape(route.Path), tview.Escape(route.Service))
@@ -290,7 +290,7 @@ func renderApplicationVersion(view applicationVersionView) string {
 	}
 	fmt.Fprintf(&out, "\n[aqua::b]%-14s %-10s %s[-:-:-]\n", "VERSION", "BUILD", "NODES")
 	if len(view.Distribution) == 0 {
-		out.WriteString("  [gray]No nodes reported.[-:-:-]\n")
+		out.WriteString("  [gray::]No nodes reported.[-:-:-]\n")
 	}
 	for _, group := range view.Distribution {
 		fmt.Fprintf(&out, "%-14s %-10s %s\n",
