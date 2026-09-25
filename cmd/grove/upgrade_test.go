@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
-	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/artifact"
 	"github.com/grove-project/grove/internal/systemnats"
+	groveshop "github.com/grove-project/grove/internal/testapp"
 )
 
 // N remains authoritative while N+1 starts and proves healthy. The durable
@@ -96,11 +96,12 @@ func TestHealthyCandidateTakesOwnership(t *testing.T) {
 	candidateOrdersSubject := "_GROVE.system.upgrade." + suffix + ".orders"
 	candidateInventory := startUpgradeCandidate(t, ctx, candidatePath,
 		"node-2-candidate", systemNATSURL, candidateInventorySubject,
-		"--grove-shop-inventory",
+		"--component", "inventory",
 	)
 	candidateOrders := startUpgradeCandidate(t, ctx, candidatePath,
 		"node-1-candidate", systemNATSURL, candidateOrdersSubject,
-		"--grove-shop-orders-inventory-subject", candidateInventorySubject,
+		"--component", "orders",
+		"--route-subject", candidateInventorySubject,
 	)
 	defer stopCandidateNodes(t, candidateOrders, candidateInventory)
 

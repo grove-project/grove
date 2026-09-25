@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
-	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/artifact"
 	"github.com/grove-project/grove/internal/systemnats"
+	groveshop "github.com/grove-project/grove/internal/testapp"
 )
 
 const configTestManifest = `{"format_version":1,"application_id":"grove-shop","code_version":"v-test","components":[{"service_id":1,"name":"Orders","runtime":"process","entrypoint":["worker","--component","orders"]}],"ui_assets":["web/index.html"],"config_region":{"format_version":1,"capacity":4096}}`

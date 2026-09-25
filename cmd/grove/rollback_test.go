@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
-	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/artifact"
 	"github.com/grove-project/grove/internal/systemnats"
+	groveshop "github.com/grove-project/grove/internal/testapp"
 )
 
 // An integrity-valid candidate with semantically invalid Inventory
@@ -99,7 +99,7 @@ func TestBrokenInventoryCandidateRollsBack(t *testing.T) {
 		"--advertise-endpoint", "nats-subject://system/node-2-candidate",
 		"--system-nats-url", systemNATSURL,
 		"--system-nats-subject", "_GROVE.system.rollback.candidate.inventory",
-		"--grove-shop-inventory",
+		"--component", "inventory",
 	)
 	if err != nil {
 		t.Fatal(err)

@@ -19,9 +19,9 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
-	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/systemnats"
+	groveshop "github.com/grove-project/grove/internal/testapp"
 )
 
 var (
@@ -360,8 +360,8 @@ func startGrovletsFromArtifact(t *testing.T, ctx context.Context, artifactPath s
 	t.Helper()
 	nodeIDs := []string{"node-1", "node-2", "node-3"}
 	nodeArgs := [][]string{
-		{"--system-nats-subject", "_GROVE.system.cli.node-1", "--grove-shop-orders"},
-		{"--system-nats-subject", "_GROVE.system.cli.node-2", "--grove-shop-inventory"},
+		{"--system-nats-subject", "_GROVE.system.cli.node-1", "--component", "orders"},
+		{"--system-nats-subject", "_GROVE.system.cli.node-2", "--component", "inventory"},
 		{"--system-nats-subject", "_GROVE.system.cli.node-3"},
 	}
 	ports := reserveRoutePorts(t, len(nodeIDs))
@@ -476,8 +476,8 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	grovlet, grovletErr := grovetest.BuildGrovlet(ctx, buildDir)
-	debugGrovlet, debugGrovletErr := grovetest.BuildDebugGrovlet(ctx, buildDir)
+	grovlet, grovletErr := grovetest.BuildGrovlet(ctx, buildDir, "./internal/testapp/cmd/testapp")
+	debugGrovlet, debugGrovletErr := grovetest.BuildDebugGrovlet(ctx, buildDir, "./internal/testapp/cmd/testapp")
 	grove, groveErr := buildGrove(ctx, buildDir)
 	delveCommand := exec.CommandContext(ctx, "go", "tool", "-n", "dlv")
 	delveOutput, delveErr := delveCommand.Output()

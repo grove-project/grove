@@ -22,7 +22,8 @@ automation.
 ## Start the application console
 
 ```bash
-$ go build -o ./bin/groveshop ./cmd/grovlet
+$ git clone https://github.com/grove-project/groveshop && cd groveshop
+$ go build -o ./bin/groveshop ./cmd/groveshop
 $ ./bin/groveshop
 ```
 

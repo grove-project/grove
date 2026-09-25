@@ -22,7 +22,8 @@ Build debugging code with compiler optimizations/inlining disabled where require
 
 ```bash
 mkdir -p bin
-go build -gcflags="all=-N -l" -o ./bin/groveshop ./cmd/grovlet
+git clone https://github.com/grove-project/groveshop && cd groveshop
+go build -gcflags="all=-N -l" -o ./bin/groveshop ./cmd/groveshop
 ```
 
 The resulting binary contains the application, Grove runtime, TUI, embedded configuration, embedded source/debug metadata, and the code necessary to expose Delve/DAP sessions.

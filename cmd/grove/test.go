@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
-	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/artifact"
 	"github.com/grove-project/grove/internal/systemnats"
+	groveshop "github.com/grove-project/grove/internal/testapp"
 )
 
 const (
@@ -31,7 +31,7 @@ func executeTest(ctx context.Context, parsed invocation, output io.Writer) error
 	if err != nil {
 		return fmt.Errorf("inspect test artifact: %w", err)
 	}
-	if inspection.Manifest.ApplicationID != "grove-shop" {
+	if inspection.Manifest.ApplicationID != groveshop.ApplicationID {
 		return fmt.Errorf("test artifact application %q: %w", inspection.Manifest.ApplicationID, errTestApplication)
 	}
 	nodes, systemNATSURL, err := startCommandTestCluster(ctx, parsed.binaryPath, parsed.resilience)
@@ -285,8 +285,8 @@ func startCommandTestCluster(ctx context.Context, binaryPath string, resilience 
 		return nil, "", fmt.Errorf("reserve test cluster ports: %w", err)
 	}
 	nodeArgs := [][]string{
-		{"--system-nats-subject", "_GROVE.system.test.node-1", "--grove-shop-orders"},
-		{"--system-nats-subject", "_GROVE.system.test.node-2", "--grove-shop-inventory"},
+		{"--system-nats-subject", "_GROVE.system.test.node-1", "--component", "orders"},
+		{"--system-nats-subject", "_GROVE.system.test.node-2", "--component", "inventory"},
 		{"--system-nats-subject", "_GROVE.system.test.node-3"},
 	}
 	nodes := make([]*grovetest.Node, 0, len(nodeArgs))

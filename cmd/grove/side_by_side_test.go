@@ -7,11 +7,11 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
-	"github.com/grove-project/grove/demo/groveshop"
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/artifact"
 	"github.com/grove-project/grove/internal/bootstrap"
 	"github.com/grove-project/grove/internal/systemnats"
+	groveshop "github.com/grove-project/grove/internal/testapp"
 )
 
 // Current placement remains authoritative while separately addressed
@@ -71,7 +71,7 @@ func TestCurrentAndCandidateRunSideBySide(t *testing.T) {
 		"--advertise-endpoint", "nats-subject://system/node-2-candidate",
 		"--system-nats-url", systemNATSURL,
 		"--system-nats-subject", candidateInventorySubject,
-		"--grove-shop-inventory",
+		"--component", "inventory",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -86,7 +86,8 @@ func TestCurrentAndCandidateRunSideBySide(t *testing.T) {
 		"--advertise-endpoint", "nats-subject://system/node-1-candidate",
 		"--system-nats-url", systemNATSURL,
 		"--system-nats-subject", candidateOrdersSubject,
-		"--grove-shop-orders-inventory-subject", candidateInventorySubject,
+		"--component", "orders",
+		"--route-subject", candidateInventorySubject,
 	)
 	if err != nil {
 		t.Fatal(err)
