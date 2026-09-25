@@ -35,7 +35,7 @@ func RegisterActions(registry *console.Registry) error {
 	return registry.Register(console.Action{
 		Name:        ActionVerifyOrders,
 		Label:       "Run integrity check",
-		Section:     "Application",
+		Section:     "App",
 		Description: "Verify the Grove Shop order workflow contract.",
 		Handler: func(ctx context.Context, args []string) (any, error) {
 			if err := ctx.Err(); err != nil {

@@ -216,7 +216,8 @@ func (v *applicationTUI) updateModel(model console.Model) {
 	if model.StartupAction != "" {
 		if model.StartupAction == "cluster.start" {
 			v.header.SetText(fmt.Sprintf(
-				"[::b]No GroveShop cluster discovered[-:-:-]\n\n[::b]Application[-:-:-] %s   [::b]Build[-:-:-] %s",
+				"[::b]No %s cluster discovered[-:-:-]\n\n[::b]Application[-:-:-] %s   [::b]Build[-:-:-] %s",
+				tview.Escape(model.Application),
 				tview.Escape(model.Application),
 				tview.Escape(model.StartupBuild),
 			))
@@ -882,14 +883,9 @@ func centeredPrimitive(primitive tview.Primitive, width, height int) tview.Primi
 
 func hotkeyLabel(action string) string {
 	for key, name := range map[rune]string{
-		'd': "rollout.start",
 		's': "cluster.status",
-		'R': "cluster.restart",
-		'x': "resilience.run",
-		'D': "debug.demo.start",
 		'a': "debug.attach",
 		'l': "logs.view",
-		'v': "app.orders.verify",
 	} {
 		if action == name {
 			return string(key)
@@ -900,21 +896,15 @@ func hotkeyLabel(action string) string {
 
 func actionForHotkey(key rune) (string, bool) {
 	action, ok := map[rune]string{
-		'd': "rollout.start",
 		's': "cluster.status",
-		'R': "cluster.restart",
-		'x': "resilience.run",
-		'D': "debug.demo.start",
 		'a': "debug.attach",
 		'l': "logs.view",
-		'v': "app.orders.verify",
 	}[key]
 	return action, ok
 }
 
 func k9sHintLine() string {
-	return "[aqua::b]<enter>[-:-:-] Run  [aqua::b]<d>[-:-:-] Deploy  [aqua::b]<s>[-:-:-] Status  " +
-		"[aqua::b]<x>[-:-:-] Resilience  [aqua::b]<R>[-:-:-] Restart  [aqua::b]<l>[-:-:-] Logs\n" +
+	return "[aqua::b]<enter>[-:-:-] Run  [aqua::b]<s>[-:-:-] Status  [aqua::b]<l>[-:-:-] Logs\n" +
 		"[aqua::b]<:>[-:-:-] Command  [aqua::b]</>[-:-:-] Filter  [aqua::b]<?>[-:-:-] Help  " +
 		"[aqua::b]<esc>[-:-:-] Back  [aqua::b]<q>[-:-:-] Quit"
 }

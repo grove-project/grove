@@ -98,22 +98,22 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 			},
 		},
 		{
-			Name: "rollout.start", Label: "New rollout", Section: "Deployments",
+			Name: "rollout.start", Label: "New rollout", Section: "Cluster", Hidden: true,
 			Description: "Build and roll out an immutable configured application artifact.",
 			Handler:     controller.startRollout,
 		},
 		{
-			Name: "debug.demo.start", Label: "Debug demo > Start", Section: "Deployments",
+			Name: "debug.demo.start", Label: "Debug demo > Start", Section: "Debug", Hidden: true,
 			Description: "Start the application's deterministic debugging topology.",
 			Handler:     controller.startDebugDemo,
 		},
 		{
-			Name: "cluster.restart", Label: "Restart cluster", Section: "Cluster",
+			Name: "cluster.restart", Label: "Restart cluster", Section: "Cluster", Hidden: true,
 			Description: "Restart every Grovlet from its durable runtime state.",
 			Handler:     controller.restartCluster,
 		},
 		{
-			Name: "resilience.run", Label: "Run resilience scenario", Section: "Application",
+			Name: "resilience.run", Label: "Run resilience scenario", Section: "App", Hidden: true,
 			Description: "Recover the application-selected service after its Grovlet fails, then rerun the application probe.",
 			Handler:     controller.runResilience,
 		},
@@ -959,7 +959,7 @@ func (c *applicationController) readModel(ctx context.Context) (console.Model, e
 	status, err := c.status(ctx)
 	model := console.Model{
 		Application:   activeApplication.Name,
-		Sections:      []string{"Cluster", "Services", "Nodes", "Deployments", "Configuration", "Logs", "Debug", "Application"},
+		Sections:      []string{"App", "Cluster", "Services", "Debug", "Logs"},
 		Health:        status.Health,
 		NodesTotal:    len(status.Nodes),
 		ServicesTotal: len(status.Placements),

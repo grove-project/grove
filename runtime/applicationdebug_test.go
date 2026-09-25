@@ -225,8 +225,8 @@ func runGroveShopDebuggingDemo(t *testing.T) {
 		t.Fatalf("stop debug demo console: %v; output=%s", err, consoleOutput.String())
 	}
 	stopped = true
-	if output := consoleOutput.String(); !strings.Contains(output, "Debug demo > Start") {
-		t.Errorf("debug demo TUI action missing: %s", output)
+	if output := consoleOutput.String(); strings.Contains(output, "Debug demo") {
+		t.Errorf("debug demo TUI output must not list the legacy Debug demo menu action: %s", output)
 	}
 }
 
