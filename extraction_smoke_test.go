@@ -10,17 +10,21 @@ import (
 	"testing"
 )
 
-// TestGroveShopExtractsAsExternalModule proves the GroveShop application
-// shape can be built as a genuinely external Go module that consumes Grove
-// only through its public packages. It assembles a temporary module from
-// copies of demo/groveshop, demo/groveshopapp, and the groveshop command,
-// rewriting only the import paths that would change when those directories
-// move to their own repository. The build fails if extraction would require
-// importing Grove-internal packages or anything GroveShop does not own,
-// because Go's internal-package visibility is keyed on import path, not on
-// module identity, and a foreign module path cannot see into
-// github.com/grove-project/grove/internal/....
-func TestGroveShopExtractsAsExternalModule(t *testing.T) {
+// groveShopCommit pins the grove-project/groveshop commit this test proves
+// still builds against this checkout of Grove's public packages. Update it
+// whenever GroveShop intentionally adopts a new Grove capability.
+const groveShopCommit = "728623b0e64aaf22e1e6ca75a887fb3e7921ceed"
+
+// TestGroveShopExternalModuleBuilds proves the real, external
+// grove-project/groveshop application builds against this checkout of Grove
+// using only Grove's public packages. It fetches the pinned GroveShop commit
+// as an ordinary Go module dependency and replaces only Grove's own module
+// path with this checkout, so GroveShop is built exactly as any other
+// external consumer would build it — no source is copied or rewritten here.
+// Go's internal-package visibility is keyed on import path, not module
+// identity, so this build would fail if GroveShop ever required a
+// Grove-internal package or anything else it does not itself own.
+func TestGroveShopExternalModuleBuilds(t *testing.T) {
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Skip("go toolchain not available")
 	}
@@ -29,76 +33,22 @@ func TestGroveShopExtractsAsExternalModule(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const modulePath = "example.com/groveshop-extraction-smoke"
 	moduleDir := t.TempDir()
-
-	copyPackageSource(t, filepath.Join(repoRoot, "demo", "groveshop"), filepath.Join(moduleDir, "groveshop"), nil)
-	if err := os.CopyFS(
-		filepath.Join(moduleDir, "groveshop", "web"),
-		os.DirFS(filepath.Join(repoRoot, "demo", "groveshop", "web")),
-	); err != nil {
-		t.Fatalf("copy embedded web assets: %v", err)
-	}
-	copyPackageSource(t, filepath.Join(repoRoot, "demo", "groveshopapp"), filepath.Join(moduleDir, "groveshopapp"), map[string]string{
-		"github.com/grove-project/grove/demo/groveshop": modulePath + "/groveshop",
-	})
-	copyPackageSource(t, filepath.Join(repoRoot, "demo", "groveshop", "cmd", "groveshop"), filepath.Join(moduleDir, "cmd", "groveshop"), map[string]string{
-		"github.com/grove-project/grove/demo/groveshopapp": modulePath + "/groveshopapp",
-	})
-
-	goMod := fmt.Sprintf(`module %s
+	goMod := fmt.Sprintf(`module example.com/groveshop-boundary-smoke
 
 go 1.26.0
 
-require (
-	github.com/grove-project/grove v0.0.0-00010101000000-000000000000
-	go.yaml.in/yaml/v3 v3.0.5
-)
+require github.com/grove-project/grove v0.0.0-00010101000000-000000000000
 
 replace github.com/grove-project/grove => %s
-`, modulePath, repoRoot)
+`, repoRoot)
 	if err := os.WriteFile(filepath.Join(moduleDir, "go.mod"), []byte(goMod), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
+	runGo(t, moduleDir, "get", "github.com/grove-project/groveshop@"+groveShopCommit)
 	runGo(t, moduleDir, "mod", "tidy")
-	// A successful build is the proof: Go's internal-package visibility is
-	// keyed on import path, so the copied groveshop/groveshopapp/cmd code
-	// would fail to compile here if it ever imported an internal Grove
-	// package or anything else GroveShop does not itself own, regardless of
-	// the local replace directive pointing at this checkout.
-	runGo(t, moduleDir, "build", "./...")
-}
-
-// copyPackageSource copies the non-test .go files of one package directory
-// (non-recursively) into dst, rewriting any quoted import path found as a key
-// in rewrites to its corresponding value.
-func copyPackageSource(t *testing.T, src, dst string, rewrites map[string]string) {
-	t.Helper()
-	entries, err := os.ReadDir(src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(dst, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		content, err := os.ReadFile(filepath.Join(src, name))
-		if err != nil {
-			t.Fatal(err)
-		}
-		rewritten := string(content)
-		for from, to := range rewrites {
-			rewritten = strings.ReplaceAll(rewritten, `"`+from+`"`, `"`+to+`"`)
-		}
-		if err := os.WriteFile(filepath.Join(dst, name), []byte(rewritten), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
+	runGo(t, moduleDir, "build", "github.com/grove-project/groveshop/...")
 }
 
 func runGo(t *testing.T, dir string, args ...string) string {
