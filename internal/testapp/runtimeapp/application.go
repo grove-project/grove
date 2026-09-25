@@ -40,7 +40,11 @@ func RuntimeDefinition() groveruntime.Definition {
 			{ServiceID: testapp.ServiceInventory, Name: "Inventory", Kind: "inventory", Register: registerRuntimeInventory},
 			{ServiceID: testapp.ServicePayment, Name: "Payment", Kind: "payment", Register: registerRuntimePayment},
 			{ServiceID: testapp.ServiceShipping, Name: "Shipping", Kind: "shipping", Register: registerRuntimeShipping},
-			{ServiceID: testapp.ServiceWeb, Name: "Web", Kind: "web", HTTPHandler: runtimeWebHandler},
+			{ServiceID: testapp.ServiceWeb, Name: "Web", Kind: "web", HTTPHandler: runtimeWebHandler, Routes: []groveruntime.Route{
+				{Method: "GET", Path: "/"},
+				{Method: "GET", Path: "/api/orders"},
+				{Method: "POST", Path: "/api/orders"},
+			}},
 		},
 		RegisterActions: testapp.RegisterActions,
 		IntegrityAction: testapp.ActionVerifyOrders,

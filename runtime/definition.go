@@ -63,6 +63,15 @@ type Component struct {
 	Kind        string
 	Register    func(ComponentContext) error
 	HTTPHandler func(ComponentContext) (http.Handler, error)
+	// Routes declares the ingress routes served by HTTPHandler so Grove can
+	// show them without inspecting application handlers.
+	Routes []Route
+}
+
+// Route is one ingress method and path pattern served by a component.
+type Route struct {
+	Method string
+	Path   string
 }
 
 // ComponentContext is supplied when Grove starts one application component.
@@ -130,6 +139,11 @@ func validateDefinition(definition Definition) error {
 	for _, component := range definition.Components {
 		if component.ServiceID == 0 || component.Name == "" || component.Kind == "" {
 			return fmt.Errorf("%w: component identity is incomplete", ErrApplicationDefinitionInvalid)
+		}
+		for _, route := range component.Routes {
+			if component.HTTPHandler == nil || route.Method == "" || route.Path == "" {
+				return fmt.Errorf("%w: component %q has an invalid ingress route", ErrApplicationDefinitionInvalid, component.Name)
+			}
 		}
 		if component.Register == nil && component.HTTPHandler == nil {
 			return fmt.Errorf("%w: component %q has no runtime hook", ErrApplicationDefinitionInvalid, component.Name)

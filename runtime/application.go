@@ -48,6 +48,7 @@ type applicationController struct {
 	localNodeID    string
 	lastEvent      string
 	debugSessions  map[string]console.DebugSession
+	startedAt      time.Time
 }
 
 type applicationCluster struct {
@@ -82,11 +83,32 @@ func newApplicationController(binaryPath, runtimeDir string) *applicationControl
 	return &applicationController{
 		binaryPath: binaryPath, runtimeDir: runtimeDir,
 		debugSessions: make(map[string]console.DebugSession),
+		startedAt:     time.Now(),
 	}
 }
 
 func registerApplicationConsoleActions(registry *console.Registry, controller *applicationController) error {
 	actions := []console.Action{
+		{
+			Name: "app.overview", Label: "Overview", Section: "App",
+			Description: "Show application identity, runtime, and deployment.",
+			Handler:     controller.appOverview,
+		},
+		{
+			Name: "app.config", Label: "Configuration", Section: "App",
+			Description: "Inspect the active embedded configuration (read-only).",
+			Handler:     controller.appConfig,
+		},
+		{
+			Name: "app.ingress", Label: "Ingress", Section: "App",
+			Description: "Inspect registered ingress routes.",
+			Handler:     controller.appIngress,
+		},
+		{
+			Name: "app.version", Label: "Version / Build", Section: "App",
+			Description: "Show build identity and version distribution across nodes.",
+			Handler:     controller.appVersion,
+		},
 		{
 			Name: "cluster.status", Label: "Status", Section: "Cluster",
 			Description: "Read current application cluster and rollout state.",

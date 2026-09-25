@@ -19,6 +19,7 @@ const (
 	applicationTUIDialogPage       = "dialog"
 	applicationTUILogsPage         = "logs"
 	applicationTUIIngressRegion    = "ingress"
+	applicationTUIAppPage          = "app"
 )
 
 type applicationTUI struct {
@@ -51,6 +52,10 @@ type applicationTUI struct {
 	logsView       *tview.TextView
 	logsOpen       bool
 	logsCancel     context.CancelFunc
+	appView        *tview.TextView
+	appOpen        bool
+	appMode        string
+	appCancel      context.CancelFunc
 }
 
 func runInteractiveApplicationTUI(ctx context.Context, tui *console.TUI) error {
@@ -427,7 +432,7 @@ func (v *applicationTUI) selectedAction() (console.Action, bool) {
 }
 
 func (v *applicationTUI) keyboard(event *tcell.EventKey) *tcell.EventKey {
-	if v.logsOpen || v.dialogOpen || v.app.GetFocus() == v.prompt {
+	if v.logsOpen || v.appOpen || v.dialogOpen || v.app.GetFocus() == v.prompt {
 		return event
 	}
 	if event.Key() == tcell.KeyCtrlC {
@@ -534,6 +539,10 @@ func (v *applicationTUI) activateAction(action console.Action, args []string) {
 	}
 	if action.Name == "logs.view" {
 		v.showLogs()
+		return
+	}
+	if mode, ok := appModes[action.Name]; ok {
+		v.showApp(mode)
 		return
 	}
 	if len(args) == 0 {
@@ -846,6 +855,151 @@ func writeApplicationLogSection(output *strings.Builder, title string, lines []s
 	}
 }
 
+// appModes maps generic App actions to the screen each one opens.
+var appModes = map[string]string{
+	"app.overview": "overview",
+	"app.config":   "config",
+	"app.ingress":  "ingress",
+	"app.version":  "version",
+}
+
+func (v *applicationTUI) showApp(mode string) {
+	v.appMode = mode
+	if !v.appOpen {
+		appCtx, cancel := context.WithCancel(v.ctx)
+		view := tview.NewTextView()
+		view.SetDynamicColors(true)
+		view.SetScrollable(true)
+		view.SetWrap(false)
+		view.SetBorder(true)
+		view.SetBorderColor(tcell.ColorDarkCyan)
+		view.SetBorderFocusColor(tcell.ColorAqua)
+		view.SetInputCapture(v.appKeyboard)
+		v.appView = view
+		v.appOpen = true
+		v.appCancel = cancel
+		v.pages.AddPage(applicationTUIAppPage, view, true, true)
+		v.app.SetFocus(view)
+		go v.watchApp(appCtx)
+	}
+	v.appView.SetTitle(" [::b]App · " + tview.Escape(appTitle(mode)) + "[-:-:-] ")
+	v.appView.SetText("[aqua::b]Loading…[-:-:-]")
+	go v.refreshApp(v.ctx, mode)
+}
+
+func appTitle(mode string) string {
+	switch mode {
+	case "config":
+		return "Configuration"
+	case "ingress":
+		return "Ingress"
+	case "version":
+		return "Version / Build"
+	}
+	return activeApplication.Name
+}
+
+func appFooter(mode string) string {
+	keys := "[aqua::b]<c>[-:-:-] Configuration  [aqua::b]<i>[-:-:-] Ingress  [aqua::b]<v>[-:-:-] Version  "
+	if mode != "overview" {
+		keys = "[aqua::b]<o>[-:-:-] Overview  " + keys
+	}
+	return "\n" + keys + "[aqua::b]<esc>[-:-:-] Back"
+}
+
+func (v *applicationTUI) appKeyboard(event *tcell.EventKey) *tcell.EventKey {
+	if event.Key() == tcell.KeyEscape {
+		if v.appMode != "overview" {
+			v.showApp("overview")
+		} else {
+			v.closeApp()
+		}
+		return nil
+	}
+	if event.Key() != tcell.KeyRune {
+		return event
+	}
+	switch event.Rune() {
+	case 'q':
+		v.closeApp()
+	case 'o':
+		v.showApp("overview")
+	case 'c':
+		v.showApp("config")
+	case 'i':
+		v.showApp("ingress")
+	case 'v':
+		v.showApp("version")
+	default:
+		return event
+	}
+	return nil
+}
+
+func (v *applicationTUI) watchApp(ctx context.Context) {
+	ticker := time.NewTicker(applicationLogsRefreshInterval * 2)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			v.queueUpdate(func() {
+				if v.appOpen {
+					go v.refreshApp(ctx, v.appMode)
+				}
+			})
+		}
+	}
+}
+
+func (v *applicationTUI) refreshApp(ctx context.Context, mode string) {
+	attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	name := "app." + mode
+	result, err := v.tui.Select(attemptCtx, name, nil)
+	text := ""
+	if err != nil {
+		text = "[orangered::b]Unable to read app information[-:-:-]\n" + tview.Escape(err.Error())
+	} else {
+		text = renderApplicationView(result, time.Now())
+	}
+	v.queueUpdate(func() {
+		if !v.appOpen || v.appMode != mode {
+			return
+		}
+		row, column := v.appView.GetScrollOffset()
+		v.appView.SetText(text + appFooter(mode))
+		v.appView.ScrollTo(row, column)
+	})
+}
+
+func renderApplicationView(result any, now time.Time) string {
+	switch view := result.(type) {
+	case applicationOverviewView:
+		return renderApplicationOverview(view, now)
+	case applicationConfigView:
+		return renderApplicationConfig(view)
+	case applicationIngressView:
+		return renderApplicationIngress(view)
+	case applicationVersionView:
+		return renderApplicationVersion(view)
+	}
+	return "[orangered::b]App action returned an unexpected result[-:-:-]"
+}
+
+func (v *applicationTUI) closeApp() {
+	if v.appCancel != nil {
+		v.appCancel()
+	}
+	v.pages.RemovePage(applicationTUIAppPage)
+	v.appView = nil
+	v.appOpen = false
+	v.appMode = ""
+	v.appCancel = nil
+	v.app.SetFocus(v.table)
+}
+
 func (v *applicationTUI) closeDialog() {
 	v.pages.RemovePage(applicationTUIDialogPage)
 	v.dialogOpen = false
@@ -899,12 +1053,13 @@ func actionForHotkey(key rune) (string, bool) {
 		's': "cluster.status",
 		'a': "debug.attach",
 		'l': "logs.view",
+		'o': "app.overview",
 	}[key]
 	return action, ok
 }
 
 func k9sHintLine() string {
-	return "[aqua::b]<enter>[-:-:-] Run  [aqua::b]<s>[-:-:-] Status  [aqua::b]<l>[-:-:-] Logs\n" +
+	return "[aqua::b]<enter>[-:-:-] Run  [aqua::b]<s>[-:-:-] Status  [aqua::b]<l>[-:-:-] Logs  [aqua::b]<o>[-:-:-] App\n" +
 		"[aqua::b]<:>[-:-:-] Command  [aqua::b]</>[-:-:-] Filter  [aqua::b]<?>[-:-:-] Help  " +
 		"[aqua::b]<esc>[-:-:-] Back  [aqua::b]<q>[-:-:-] Quit"
 }
