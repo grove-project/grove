@@ -279,7 +279,6 @@ func (h *HandlerPlacements) Run(ctx context.Context, transport *Transport) error
 			return ctx.Err()
 		}
 		h.mu.Lock()
-		h.view.Ready = false
 		h.view.Error = err.Error()
 		h.mu.Unlock()
 		select {
