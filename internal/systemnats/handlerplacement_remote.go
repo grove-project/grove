@@ -123,17 +123,7 @@ func (r *observedHandlerRouter) Route(ctx context.Context, request grove.Request
 		if p.Service != request.ServiceID || p.Method != request.MethodID {
 			continue
 		}
-		target, _ := r.selector.Pick(p.id(), p.nodeIDs())
-		for _, n := range p.Nodes {
-			if n.NodeID != target {
-				continue
-			}
-			response, err := r.transport.Request(ctx, n.InvocationSubject, request)
-			if err != nil {
-				return grove.ResponseEnvelope{}, fmt.Errorf("request: %w: %w", grove.ErrTransportFailure, err)
-			}
-			return response, nil
-		}
+		return requestPlaced(ctx, r.transport, &r.selector, p, request)
 	}
 	return grove.ResponseEnvelope{}, &Error{Operation: "resolve Grove handler placement", Err: ErrHandlerNotPlaced}
 }

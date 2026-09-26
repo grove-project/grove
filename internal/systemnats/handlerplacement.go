@@ -14,6 +14,7 @@ import (
 
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/internal/placement"
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
@@ -958,17 +959,41 @@ func (r handlerRouter) Route(ctx context.Context, request grove.RequestEnvelope)
 	if err != nil {
 		return grove.ResponseEnvelope{}, err
 	}
-	id := placement.Handler{Service: request.ServiceID, Method: request.MethodID}
-	target, _ := r.placements.selector.Pick(id, found.nodeIDs())
-	for _, n := range found.Nodes {
-		if n.NodeID != target {
-			continue
+	return requestPlaced(ctx, r.transport, &r.placements.selector, found, request)
+}
+
+// requestPlaced sends request to one of p's nodes, chosen round-robin. A node
+// with no responders (for example a killed process whose health has not yet
+// expired) never received the request, so retrying the remaining placements is
+// safe even for non-idempotent handlers. Any other failure is returned as is.
+func requestPlaced(
+	ctx context.Context,
+	transport *Transport,
+	selector *placement.Selector,
+	p HandlerPlacement,
+	request grove.RequestEnvelope,
+) (grove.ResponseEnvelope, error) {
+	remaining := append([]HandlerNode(nil), p.Nodes...)
+	for len(remaining) > 0 {
+		ids := make([]string, len(remaining))
+		for i, n := range remaining {
+			ids[i] = n.NodeID
 		}
-		response, err := r.transport.Request(ctx, n.InvocationSubject, request)
-		if err != nil {
+		target, _ := selector.Pick(p.id(), ids)
+		for i, n := range remaining {
+			if n.NodeID != target {
+				continue
+			}
+			response, err := transport.Request(ctx, n.InvocationSubject, request)
+			if err == nil {
+				return response, nil
+			}
+			if errors.Is(err, nats.ErrNoResponders) && len(remaining) > 1 {
+				remaining = append(remaining[:i], remaining[i+1:]...)
+				break
+			}
 			return grove.ResponseEnvelope{}, fmt.Errorf("request: %w: %w", grove.ErrTransportFailure, err)
 		}
-		return response, nil
 	}
 	return grove.ResponseEnvelope{}, &Error{Operation: "resolve Grove handler placement", Err: ErrHandlerNotPlaced}
 }
