@@ -30,6 +30,14 @@ const (
 
 	defaultHandlerLeaseTTL       = 3 * time.Second
 	defaultHandlerReconcileEvery = 100 * time.Millisecond
+
+	// defaultRequestAttemptTimeout bounds how long a single requestPlaced
+	// attempt waits for a response. When a NATS route to a dead node has not
+	// been cleaned up yet, the request is routed into a closed TCP connection
+	// and no response arrives; this timeout prevents the caller from hanging
+	// indefinitely. The value is generous for normal calls (sub-millisecond)
+	// while bounding dead-node stalls to a few seconds.
+	defaultRequestAttemptTimeout = 5 * time.Second
 )
 
 var (
@@ -962,10 +970,11 @@ func (r handlerRouter) Route(ctx context.Context, request grove.RequestEnvelope)
 	return requestPlaced(ctx, r.transport, &r.placements.selector, found, request)
 }
 
-// requestPlaced sends request to one of p's nodes, chosen round-robin. A node
-// with no responders (for example a killed process whose health has not yet
-// expired) never received the request, so retrying the remaining placements is
-// safe even for non-idempotent handlers. Any other failure is returned as is.
+// requestPlaced sends request to one of p's nodes, chosen round-robin. When a
+// node fails with no-responders (dead process, subscription gone) or a
+// per-attempt timeout (dead NATS route, request routed into a closed TCP
+// connection), the request was never delivered, so retrying the remaining
+// placements is safe even for non-idempotent handlers.
 func requestPlaced(
 	ctx context.Context,
 	transport *Transport,
@@ -984,16 +993,41 @@ func requestPlaced(
 			if n.NodeID != target {
 				continue
 			}
-			response, err := transport.Request(ctx, n.InvocationSubject, request)
+			attemptCtx, cancel := requestAttemptContext(ctx, len(remaining))
+			response, err := transport.Request(attemptCtx, n.InvocationSubject, request)
+			cancel()
 			if err == nil {
 				return response, nil
 			}
-			if errors.Is(err, nats.ErrNoResponders) && len(remaining) > 1 {
+			retriable := errors.Is(err, nats.ErrNoResponders) ||
+				(attemptCtx.Err() != nil && ctx.Err() == nil)
+			if retriable && len(remaining) > 1 {
 				remaining = append(remaining[:i], remaining[i+1:]...)
 				break
+			}
+			if ctx.Err() != nil {
+				return grove.ResponseEnvelope{}, fmt.Errorf("request: %w: %w", grove.ErrTransportFailure, ctx.Err())
 			}
 			return grove.ResponseEnvelope{}, fmt.Errorf("request: %w: %w", grove.ErrTransportFailure, err)
 		}
 	}
 	return grove.ResponseEnvelope{}, &Error{Operation: "resolve Grove handler placement", Err: ErrHandlerNotPlaced}
+}
+
+// requestAttemptContext derives a per-attempt context that bounds how long a
+// single NATS request waits for a response. When the caller's context has no
+// deadline, the default attempt timeout applies. When the caller has a shorter
+// remaining budget, it is divided evenly across the remaining placement nodes
+// so every node gets a fair share.
+func requestAttemptContext(parent context.Context, nodes int) (context.Context, context.CancelFunc) {
+	timeout := defaultRequestAttemptTimeout
+	if deadline, ok := parent.Deadline(); ok {
+		if budget := time.Until(deadline) / time.Duration(nodes); budget < timeout {
+			timeout = budget
+		}
+	}
+	if timeout <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, timeout)
 }

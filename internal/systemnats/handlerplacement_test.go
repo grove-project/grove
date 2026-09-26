@@ -322,3 +322,54 @@ func TestHandlerCallsRetryPlacementsWithNoResponders(t *testing.T) {
 		}
 	}
 }
+
+// A node whose NATS endpoint absorbs messages without responding (simulating a
+// stale route to a killed process) must not stall the caller indefinitely: the
+// per-attempt timeout fires and the call is retried on another placement.
+func TestHandlerCallsRetryPlacementsOnTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	servers, transports := startPlacementCluster(t, ctx)
+	live := &liveNodes{}
+
+	n1 := startHandlerNode(t, ctx, "node-1", transports[0], live)
+	n2 := startHandlerNode(t, ctx, "node-2", transports[1], live)
+	n3 := startHandlerNode(t, ctx, "node-3", transports[2], live)
+	for _, n := range []*handlerNode{n1, n2, n3} {
+		eventually(t, n.id+" sees 3 Charge placements", func() bool { return len(placedOn(n, chargeService, chargeMethod)) == 3 })
+	}
+
+	// Replace node-3's responding handler with a black-hole subscriber: it
+	// receives messages but never responds, exactly like a NATS route to a
+	// dead process whose TCP connection has not been cleaned up yet.
+	transports[2].Close()
+	eventually(t, "node-3 endpoint gone", func() bool {
+		probe, stop := context.WithTimeout(ctx, 2*time.Second)
+		defer stop()
+		_, err := transports[0].Request(probe, "_GROVE.system.invoke.node-3", grove.RequestEnvelope{ServiceID: chargeService, MethodID: chargeMethod})
+		return errors.Is(err, nats.ErrNoResponders)
+	})
+	blackHole, err := nats.Connect(servers[0].URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blackHole.Close()
+	if _, err := blackHole.Subscribe("_GROVE.system.invoke.node-3", func(*nats.Msg) {}); err != nil {
+		t.Fatal(err)
+	}
+	if err := blackHole.Flush(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := placedOn(n1, chargeService, chargeMethod); len(got) != 3 {
+		t.Fatalf("placement = %v, want node-3 still placed", got)
+	}
+	for range 6 {
+		callCtx, callCancel := context.WithTimeout(ctx, 15*time.Second)
+		id, err := callID(callCtx, n1, chargeService, chargeMethod)
+		callCancel()
+		if err != nil || id == "node-3" {
+			t.Fatalf("Charge served by %q err=%v, want retry on a live placement after timeout", id, err)
+		}
+	}
+}
