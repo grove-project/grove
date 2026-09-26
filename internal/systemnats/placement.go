@@ -454,6 +454,12 @@ func (t *Transport) ObservedPlacementClient(nodeID string) (*grove.Client, error
 	return grove.NewRoutedClient(observedPlacementRouter{transport: t, nodeID: nodeID})
 }
 
+// ObservedPlacementRouter is the router behind ObservedPlacementClient, for
+// composing with handler-level routing.
+func (t *Transport) ObservedPlacementRouter(nodeID string) grove.Router {
+	return observedPlacementRouter{transport: t, nodeID: nodeID}
+}
+
 type placementRouter struct {
 	transport *Transport
 	placement *Placement

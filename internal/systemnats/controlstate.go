@@ -54,6 +54,22 @@ func deploymentKeyValueConfig(replicas int) jetstream.KeyValueConfig {
 	}
 }
 
+// controlStateBuckets are the replicated control-state buckets. The handler
+// bucket exists only once an application declares handler-level placement.
+var controlStateBuckets = []string{
+	MembershipBucket,
+	PlacementBucket,
+	DesiredBucket,
+	DeploymentBucket,
+	HandlerBucket,
+}
+
+// optionalControlStream reports whether a missing stream for bucket is
+// expected rather than a failure.
+func optionalControlStream(bucket string, err error) bool {
+	return bucket == HandlerBucket && errors.Is(err, jetstream.ErrStreamNotFound)
+}
+
 func openOrCreateKeyValue(
 	ctx context.Context,
 	js jetstream.JetStream,
@@ -100,12 +116,7 @@ func reconcileControlStateReplicas(
 	allowShrink bool,
 ) error {
 	replicas := controlStateReplicaCount(records)
-	for _, bucket := range []string{
-		MembershipBucket,
-		PlacementBucket,
-		DesiredBucket,
-		DeploymentBucket,
-	} {
+	for _, bucket := range controlStateBuckets {
 		operationCtx, cancel := context.WithTimeout(ctx, controlStateOperationTimeout)
 		kv, err := js.KeyValue(operationCtx, bucket)
 		if errors.Is(err, jetstream.ErrBucketNotFound) {
@@ -177,14 +188,13 @@ func waitForControlStateReplicas(
 }
 
 func controlStateStreamsCurrent(ctx context.Context, js jetstream.JetStream) error {
-	for _, bucket := range []string{
-		MembershipBucket,
-		PlacementBucket,
-		DesiredBucket,
-		DeploymentBucket,
-	} {
+	for _, bucket := range controlStateBuckets {
 		operationCtx, cancel := context.WithTimeout(ctx, controlStateOperationTimeout)
 		stream, err := js.Stream(operationCtx, "KV_"+bucket)
+		if optionalControlStream(bucket, err) {
+			cancel()
+			continue
+		}
 		if err == nil {
 			var info *jetstream.StreamInfo
 			info, err = stream.Info(operationCtx)

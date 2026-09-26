@@ -66,6 +66,22 @@ type Component struct {
 	// Routes declares the ingress routes served by HTTPHandler so Grove can
 	// show them without inspecting application handlers.
 	Routes []Route
+	// Handlers lists the methods Grove places at handler level. Ordinary
+	// methods scale automatically across every node hosting the component;
+	// Exclusive ones get a single owner. A component that lists none keeps
+	// whole-service placement.
+	Handlers []HandlerSpec
+}
+
+// HandlerSpec declares one handler. Without Exclusive it scales automatically;
+// an Exclusive handler has exactly one active owner of Capability, which its
+// workload claims with grove.Exclusive.
+type HandlerSpec struct {
+	Method grove.MethodID
+	// Name labels the handler in Grove's views; it defaults to the method ID.
+	Name       string
+	Exclusive  bool
+	Capability string
 }
 
 // Route is one ingress method and path pattern served by a component.
@@ -144,6 +160,14 @@ func validateDefinition(definition Definition) error {
 			if component.HTTPHandler == nil || route.Method == "" || route.Path == "" {
 				return fmt.Errorf("%w: component %q has an invalid ingress route", ErrApplicationDefinitionInvalid, component.Name)
 			}
+		}
+		methods := make(map[grove.MethodID]struct{}, len(component.Handlers))
+		for _, handler := range component.Handlers {
+			_, duplicate := methods[handler.Method]
+			if duplicate || (handler.Exclusive && handler.Capability == "") || (!handler.Exclusive && handler.Capability != "") {
+				return fmt.Errorf("%w: component %q has an invalid handler declaration", ErrApplicationDefinitionInvalid, component.Name)
+			}
+			methods[handler.Method] = struct{}{}
 		}
 		if component.Register == nil && component.HTTPHandler == nil {
 			return fmt.Errorf("%w: component %q has no runtime hook", ErrApplicationDefinitionInvalid, component.Name)

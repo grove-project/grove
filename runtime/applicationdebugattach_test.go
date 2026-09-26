@@ -19,24 +19,24 @@ type recordedDebugAttachTransport struct {
 func (t *recordedDebugAttachTransport) Close() { t.closed = true }
 
 func TestParseDebugAttachArguments(t *testing.T) {
-	service, listen, err := parseDebugAttachArguments([]string{"orders", "--listen", "127.0.0.1:40000"})
+	service, listen, node, err := parseDebugAttachArguments([]string{"orders", "--listen", "127.0.0.1:40000"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if service != "orders" || listen != "127.0.0.1:40000" {
-		t.Errorf("debug attach = (%q, %q); want orders and 127.0.0.1:40000", service, listen)
+	if service != "orders" || listen != "127.0.0.1:40000" || node != "" {
+		t.Errorf("debug attach = (%q, %q, %q); want orders, 127.0.0.1:40000 and no node", service, listen, node)
 	}
-	service, listen, err = parseDebugAttachArguments([]string{"payment"})
+	service, listen, node, err = parseDebugAttachArguments([]string{"payment", "--node", "node-2"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if service != "payment" || listen != "127.0.0.1:0" {
-		t.Errorf("default debug attach = (%q, %q); want payment and ephemeral loopback", service, listen)
+	if service != "payment" || listen != "127.0.0.1:0" || node != "node-2" {
+		t.Errorf("default debug attach = (%q, %q, %q); want payment, ephemeral loopback and node-2", service, listen, node)
 	}
-	if _, _, err := parseDebugAttachArguments(nil); !errors.Is(err, errDebugServiceRequired) {
+	if _, _, _, err := parseDebugAttachArguments(nil); !errors.Is(err, errDebugServiceRequired) {
 		t.Errorf("missing service error = %v; want %v", err, errDebugServiceRequired)
 	}
-	if _, _, err := parseDebugAttachArguments([]string{"orders", "unexpected"}); !errors.Is(err, errConsoleArguments) {
+	if _, _, _, err := parseDebugAttachArguments([]string{"orders", "unexpected"}); !errors.Is(err, errConsoleArguments) {
 		t.Errorf("unexpected argument error = %v; want %v", err, errConsoleArguments)
 	}
 }

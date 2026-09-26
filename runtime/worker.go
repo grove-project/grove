@@ -201,6 +201,10 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	defer transport.Close()
 	registry := &grove.Registry{}
 	client, err := transport.ObservedPlacementClient(cfg.placementNodeID)
+	if applicationDeclaresHandlers() {
+		client, err = grove.NewRoutedClient(transport.ObservedHandlerRouter(
+			cfg.placementNodeID, applicationManagesHandler, transport.ObservedPlacementRouter(cfg.placementNodeID)))
+	}
 	if err != nil {
 		return err
 	}
@@ -215,8 +219,16 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		ConfigRevision: applicationConfig.Revision,
 		ConfigDigest:   inspection.Config.Digest,
 	}
+	// Background workloads started by Register claim exclusive capabilities
+	// through the same provider as request handlers.
+	var provider *systemnats.RemoteExclusiveProvider
+	registerCtx := workerCtx
+	if applicationDeclaresHandlers() {
+		provider = transport.NewRemoteExclusiveProvider(workerCtx, cfg.placementNodeID, 0)
+		registerCtx = grove.WithExclusiveProvider(workerCtx, provider)
+	}
 	componentContext := ComponentContext{
-		Context:       workerCtx,
+		Context:       registerCtx,
 		Registry:      registry,
 		Client:        client,
 		Configuration: applicationConfig.Value,
@@ -257,7 +269,13 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if err != nil {
 		return err
 	}
-	if err := transport.Serve(workerCtx, cfg.subject, dispatcher.Dispatch); err != nil {
+	serve := systemnats.Handler(dispatcher.Dispatch)
+	if provider != nil {
+		serve = func(ctx context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
+			return dispatcher.Dispatch(grove.WithExclusiveProvider(ctx, provider), request)
+		}
+	}
+	if err := transport.Serve(workerCtx, cfg.subject, serve); err != nil {
 		return err
 	}
 	encoder := json.NewEncoder(stdout)

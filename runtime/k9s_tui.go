@@ -56,6 +56,13 @@ type applicationTUI struct {
 	appOpen        bool
 	appMode        string
 	appCancel      context.CancelFunc
+
+	servicesTable    *tview.Table
+	servicesHint     *tview.TextView
+	servicesOpen     bool
+	servicesCancel   context.CancelFunc
+	servicesData     applicationServicesView
+	servicesLocation servicesLocation
 }
 
 func runInteractiveApplicationTUI(ctx context.Context, tui *console.TUI) error {
@@ -432,7 +439,7 @@ func (v *applicationTUI) selectedAction() (console.Action, bool) {
 }
 
 func (v *applicationTUI) keyboard(event *tcell.EventKey) *tcell.EventKey {
-	if v.logsOpen || v.appOpen || v.dialogOpen || v.app.GetFocus() == v.prompt {
+	if v.logsOpen || v.appOpen || v.servicesOpen || v.dialogOpen || v.app.GetFocus() == v.prompt {
 		return event
 	}
 	if event.Key() == tcell.KeyCtrlC {
@@ -539,6 +546,14 @@ func (v *applicationTUI) activateAction(action console.Action, args []string) {
 	}
 	if action.Name == "logs.view" {
 		v.showLogs()
+		return
+	}
+	switch action.Name {
+	case "services.view":
+		v.showServices(false)
+		return
+	case "cluster.nodes":
+		v.showServices(true)
 		return
 	}
 	if mode, ok := appModes[action.Name]; ok {
@@ -1041,6 +1056,8 @@ func hotkeyLabel(action string) string {
 		'a': "debug.attach",
 		'l': "logs.view",
 		'o': "app.overview",
+		'p': "services.view",
+		'n': "cluster.nodes",
 	} {
 		if action == name {
 			return string(key)
@@ -1055,12 +1072,15 @@ func actionForHotkey(key rune) (string, bool) {
 		'a': "debug.attach",
 		'l': "logs.view",
 		'o': "app.overview",
+		'p': "services.view",
+		'n': "cluster.nodes",
 	}[key]
 	return action, ok
 }
 
 func k9sHintLine() string {
-	return "[aqua::b]<enter>[-:-:-] Run  [aqua::b]<s>[-:-:-] Status  [aqua::b]<l>[-:-:-] Logs  [aqua::b]<o>[-:-:-] App\n" +
+	return "[aqua::b]<enter>[-:-:-] Run  [aqua::b]<s>[-:-:-] Status  [aqua::b]<l>[-:-:-] Logs  [aqua::b]<o>[-:-:-] App  " +
+		"[aqua::b]<p>[-:-:-] Services  [aqua::b]<n>[-:-:-] Nodes\n" +
 		"[aqua::b]<:>[-:-:-] Command  [aqua::b]</>[-:-:-] Filter  [aqua::b]<?>[-:-:-] Help  " +
 		"[aqua::b]<esc>[-:-:-] Back  [aqua::b]<q>[-:-:-] Quit"
 }
