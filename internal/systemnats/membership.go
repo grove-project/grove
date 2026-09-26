@@ -439,7 +439,6 @@ func (m *Membership) setReady(records map[string]MembershipRecord) {
 
 func (m *Membership) setUnavailable(err error) {
 	m.mu.Lock()
-	m.view.Ready = false
 	m.view.Error = err.Error()
 	m.mu.Unlock()
 }
