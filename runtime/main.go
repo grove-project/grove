@@ -380,6 +380,9 @@ type systemNATSRuntime struct {
 	reconcileDone     chan struct{}
 	membership        *systemnats.Membership
 	placement         *systemnats.Placement
+	handlers          *systemnats.HandlerPlacements
+	handlersCancel    context.CancelFunc
+	handlersDone      chan struct{}
 }
 
 func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error) {
@@ -522,6 +525,12 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 		if err := transport.ServeDebug(ctx, cfg.nodeID, newDebugController(cfg.nodeID, cfg.runtimeDir, cfg.delvePath, runtime.components)); err != nil {
 			runtime.stop()
 			return nil, err
+		}
+		if applicationDeclaresHandlers() {
+			if err := runtime.startHandlerPlacement(ctx, cfg, health); err != nil {
+				runtime.stop()
+				return nil, err
+			}
 		}
 		if err := runtime.components.start(ctx, initialServiceIDs); err != nil {
 			runtime.stop()
@@ -778,6 +787,7 @@ func (r *systemNATSRuntime) stop() {
 		_ = r.components.stopAll(stopCtx)
 		cancel()
 	}
+	r.stopHandlerPlacement()
 	if r.healthCancel != nil {
 		r.healthCancel()
 		<-r.healthDone

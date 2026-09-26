@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/internal/placement"
 )
 
 var (
@@ -28,12 +29,7 @@ const (
 )
 
 // HandlerID names one placeable handler: an explicit service and method pair.
-type HandlerID struct {
-	Service grove.ServiceID
-	Method  grove.MethodID
-}
-
-func (h HandlerID) String() string { return fmt.Sprintf("%d.%d", h.Service, h.Method) }
+type HandlerID = placement.Handler
 
 // NodeState is the lifecycle state of one logical node.
 type NodeState string
@@ -53,6 +49,9 @@ const (
 type HandlerInfo struct {
 	// Exclusive requests at most one owner cluster-wide.
 	Exclusive bool
+	// Capability names the exclusive capability the handler owns. It defaults
+	// to the handler ID.
+	Capability string
 }
 
 // NodeInfo is a policy-visible view of one live node.
@@ -82,40 +81,25 @@ type PlacementPolicyFunc func(Topology) map[HandlerID][]string
 // Place implements PlacementPolicy.
 func (f PlacementPolicyFunc) Place(t Topology) map[HandlerID][]string { return f(t) }
 
-// EverywherePolicy places every handler on every live node that registered it
-// and every exclusive handler on exactly one of them, sticking with the
-// current owner while it remains eligible. It is the default until the
-// production placer is wired in via WithPlacementPolicy.
+// EverywherePolicy is Grove's production placer: automatic handlers run on
+// every live node that registered them and each exclusive handler on exactly
+// one, sticking with its current owner while eligible. It is the default.
 type EverywherePolicy struct{}
 
 // Place implements PlacementPolicy.
 func (EverywherePolicy) Place(t Topology) map[HandlerID][]string {
-	eligible := make(map[HandlerID][]string)
-	exclusive := make(map[HandlerID]bool)
-	for _, node := range t.Nodes {
-		for id, info := range node.Handlers {
-			eligible[id] = append(eligible[id], node.ID)
-			exclusive[id] = exclusive[id] || info.Exclusive
-		}
-	}
-	placements := make(map[HandlerID][]string, len(eligible))
-	for id, ids := range eligible {
-		sort.Strings(ids)
-		if !exclusive[id] {
-			placements[id] = ids
-			continue
-		}
-		owner := ids[0]
-		for _, current := range t.Current[id] {
-			for _, candidate := range ids {
-				if candidate == current {
-					owner = current
-				}
+	nodes := make([]placement.Node, len(t.Nodes))
+	for i, n := range t.Nodes {
+		nodes[i] = placement.Node{ID: n.ID, Handlers: make(map[HandlerID]placement.Scaling, len(n.Handlers))}
+		for id, info := range n.Handlers {
+			if info.Exclusive {
+				nodes[i].Handlers[id] = placement.Exclusive
+			} else {
+				nodes[i].Handlers[id] = placement.Automatic
 			}
 		}
-		placements[id] = []string{owner}
 	}
-	return placements
+	return placement.Place(placement.Topology{Nodes: nodes, Current: t.Current})
 }
 
 // Clock is the cluster's controllable time source.
@@ -158,6 +142,12 @@ type HandlerOption func(*HandlerInfo)
 // Exclusive marks a handler as single-owner.
 func Exclusive() HandlerOption { return func(i *HandlerInfo) { i.Exclusive = true } }
 
+// ExclusiveCapability marks a handler as single-owner and names the capability
+// its workload claims with grove.Exclusive.
+func ExclusiveCapability(name string) HandlerOption {
+	return func(i *HandlerInfo) { i.Exclusive, i.Capability = true, name }
+}
+
 type registration struct {
 	id      HandlerID
 	handler grove.Handler
@@ -174,10 +164,12 @@ type TestCluster struct {
 	clock       *Clock
 	policy      PlacementPolicy
 	detectAfter time.Duration
+	leaseTTL    time.Duration
 
 	mu         sync.Mutex
 	nodes      []*TestNode
 	store      map[HandlerID][]string // authoritative placements
+	epochs     map[HandlerID]uint64   // fencing epoch per exclusive handler
 	partitions map[[2]string]bool
 	calls      map[HandlerID]map[string]int
 	events     []string
@@ -194,11 +186,15 @@ func NewTestCluster(tb testing.TB, opts ...ClusterOption) *TestCluster {
 		policy:      EverywherePolicy{},
 		detectAfter: defaultFailureDetection,
 		store:       make(map[HandlerID][]string),
+		epochs:      make(map[HandlerID]uint64),
 		partitions:  make(map[[2]string]bool),
 		calls:       make(map[HandlerID]map[string]int),
 	}
 	for _, opt := range opts {
 		opt(c)
+	}
+	if c.leaseTTL == 0 {
+		c.leaseTTL = c.detectAfter
 	}
 	tb.Cleanup(c.shutdown)
 	return c
@@ -281,6 +277,30 @@ func (c *TestCluster) RestartNode(n *TestNode) {
 	c.logf("%s restarted (generation %d)", n.id, n.generation)
 }
 
+// Isolate cuts n off from the cluster while its process keeps running, as in a
+// network partition around one node. Peers treat it as failed after failure
+// detection; it can no longer renew exclusive leases, so it must stop acting
+// as an exclusive owner once its lease expires.
+func (c *TestCluster) Isolate(n *TestNode) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n.isolated = true
+	n.crashedAt = c.clock.Now()
+	n.detected = false
+	c.logf("%s isolated", n.id)
+}
+
+// Reconnect restores an isolated node's connectivity. Its old leases stay
+// fenced: it resumes with whatever ownership the cluster now grants.
+func (c *TestCluster) Reconnect(n *TestNode) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n.isolated = false
+	n.detected = false
+	n.renewedAt = c.clock.Now()
+	c.logf("%s reconnected", n.id)
+}
+
 // Partition blocks in-memory communication between a and b in both directions.
 func (c *TestCluster) Partition(a, b *TestNode) {
 	c.mu.Lock()
@@ -322,7 +342,7 @@ func (c *TestCluster) Converge() {
 
 func (c *TestCluster) detectFailures() {
 	for _, n := range c.nodes {
-		if n.state != NodeCrashed || n.detected {
+		if !(n.state == NodeCrashed || n.isolated) || n.detected {
 			continue
 		}
 		if wait := n.crashedAt.Add(c.detectAfter).Sub(c.clock.Now()); wait > 0 {
@@ -338,9 +358,10 @@ func (c *TestCluster) detectFailures() {
 func (c *TestCluster) reconcileLocked() bool {
 	topology := Topology{Current: clonePlacements(c.store)}
 	for _, n := range c.nodes {
-		if n.state != NodeRunning {
+		if n.state != NodeRunning || n.isolated {
 			continue
 		}
+		n.renewedAt = c.clock.Now()
 		info := NodeInfo{ID: n.id, Handlers: make(map[HandlerID]HandlerInfo, len(n.regs))}
 		for _, r := range n.regs {
 			info.Handlers[r.id] = r.info
@@ -350,11 +371,16 @@ func (c *TestCluster) reconcileLocked() bool {
 	desired := c.policy.Place(topology)
 	changed := !equalPlacements(c.store, desired)
 	if changed {
+		for id, owners := range desired {
+			if c.exclusiveLocked(id) {
+				c.epochs[id] = placement.NextEpoch(c.store[id], owners, c.epochs[id])
+			}
+		}
 		c.store = clonePlacements(desired)
 		c.logf("placements published: %s", formatPlacements(c.store))
 	}
 	for _, n := range c.nodes {
-		if n.state == NodeRunning && !equalPlacements(n.observed, c.store) {
+		if n.state == NodeRunning && !n.isolated && !equalPlacements(n.observed, c.store) {
 			n.observed = clonePlacements(c.store)
 			changed = true
 		}
@@ -435,7 +461,7 @@ func (c *TestCluster) AssertSingleOwner(h HandlerID) {
 		c.tb.Fatalf("handler %s has %d owners %v, want 1\n%s", h, len(owners), owners, c.diagnosticsLocked())
 	}
 	for _, n := range c.nodes {
-		if n.state == NodeRunning && !equalStrings(n.observed[h], owners) {
+		if n.state == NodeRunning && !n.isolated && !equalStrings(n.observed[h], owners) {
 			c.tb.Fatalf("%s observes owners %v for %s, authoritative %v\n%s", n.id, n.observed[h], h, owners, c.diagnosticsLocked())
 		}
 	}
@@ -482,10 +508,11 @@ func (c *TestCluster) diagnosticsLocked() string {
 
 func (c *TestCluster) deliver(ctx context.Context, from, to *TestNode, request grove.RequestEnvelope) (grove.ResponseEnvelope, error) {
 	c.mu.Lock()
-	reachable := to.state == NodeRunning && from.state == NodeRunning && !c.partitions[edge(from.id, to.id)]
+	reachable := to.state == NodeRunning && from.state == NodeRunning && !to.isolated && !from.isolated &&
+		!c.partitions[edge(from.id, to.id)]
 	dispatcher := to.dispatcher
 	if reachable {
-		id := HandlerID{request.ServiceID, request.MethodID}
+		id := HandlerID{Service: request.ServiceID, Method: request.MethodID}
 		if c.calls[id] == nil {
 			c.calls[id] = make(map[string]int)
 		}
@@ -495,7 +522,77 @@ func (c *TestCluster) deliver(ctx context.Context, from, to *TestNode, request g
 	if !reachable {
 		return grove.ResponseEnvelope{}, fmt.Errorf("%s -> %s: %w", from.id, to.id, ErrNodeUnreachable)
 	}
-	return dispatcher.Dispatch(ctx, request), nil
+	return dispatcher.Dispatch(grove.WithExclusiveProvider(ctx, to), request), nil
+}
+
+func (c *TestCluster) exclusiveLocked(id HandlerID) bool {
+	for _, n := range c.nodes {
+		for _, r := range n.regs {
+			if r.id == id && r.info.Exclusive {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Epoch returns the fencing epoch of an exclusive handler; it increases every
+// time ownership moves.
+func (c *TestCluster) Epoch(h HandlerID) uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.epochs[h]
+}
+
+// AcquireExclusive implements grove.ExclusiveProvider for handlers running on
+// n. The lease is granted only to the placed owner, is fenced by epoch and
+// node generation, and expires if n cannot renew it.
+func (n *TestNode) AcquireExclusive(_ context.Context, capability string) (grove.Lease, error) {
+	c := n.cluster
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range n.regs {
+		if !r.info.Exclusive || capabilityName(r) != capability {
+			continue
+		}
+		if owners := c.store[r.id]; len(owners) == 1 && owners[0] == n.id {
+			return &testLease{node: n, handler: r.id, epoch: c.epochs[r.id], generation: n.generation}, nil
+		}
+	}
+	return nil, fmt.Errorf("%s: capability %q: not the owner", n.id, capability)
+}
+
+func capabilityName(r registration) string {
+	if r.info.Capability != "" {
+		return r.info.Capability
+	}
+	return r.id.String()
+}
+
+type testLease struct {
+	node       *TestNode
+	handler    HandlerID
+	epoch      uint64
+	generation int
+	released   bool
+}
+
+// Held reports whether this exact owner, at this epoch and node generation,
+// is still the cluster's owner and its lease has not expired.
+func (l *testLease) Held() bool {
+	n, c := l.node, l.node.cluster
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	owners := c.store[l.handler]
+	return !l.released && n.state == NodeRunning && !n.isolated && n.generation == l.generation &&
+		c.epochs[l.handler] == l.epoch && len(owners) == 1 && owners[0] == n.id &&
+		c.clock.Now().Before(n.renewedAt.Add(c.leaseTTL))
+}
+
+func (l *testLease) Release() {
+	l.node.cluster.mu.Lock()
+	l.released = true
+	l.node.cluster.mu.Unlock()
 }
 
 // TestNode is one logical Grove node.
@@ -507,12 +604,14 @@ type TestNode struct {
 	generation int
 	crashedAt  time.Time
 	detected   bool
+	isolated   bool
+	renewedAt  time.Time
 	regs       []registration
 	registry   *grove.Registry
 	dispatcher *grove.Dispatcher
 	client     *grove.Client
 	observed   map[HandlerID][]string
-	next       map[HandlerID]int
+	selector   placement.Selector
 }
 
 // ID returns the node's stable logical identity.
@@ -557,7 +656,9 @@ func (n *TestNode) start() {
 	n.state = NodeRunning
 	n.detected = false
 	n.observed = nil
-	n.next = make(map[HandlerID]int)
+	n.selector = placement.Selector{}
+	n.isolated = false
+	n.renewedAt = n.cluster.clock.Now()
 	n.registry = &grove.Registry{}
 	for _, r := range n.regs {
 		if err := n.registry.Register(r.id.Service, r.id.Method, r.handler); err != nil {
@@ -578,7 +679,7 @@ type nodeRouter struct{ node *TestNode }
 
 func (r nodeRouter) Route(ctx context.Context, request grove.RequestEnvelope) (grove.ResponseEnvelope, error) {
 	n, c := r.node, r.node.cluster
-	id := HandlerID{request.ServiceID, request.MethodID}
+	id := HandlerID{Service: request.ServiceID, Method: request.MethodID}
 	c.mu.Lock()
 	if n.state != NodeRunning {
 		c.mu.Unlock()
@@ -589,8 +690,7 @@ func (r nodeRouter) Route(ctx context.Context, request grove.RequestEnvelope) (g
 		c.mu.Unlock()
 		return grove.ResponseEnvelope{}, fmt.Errorf("%s: handler %s: %w", n.id, id, ErrHandlerNotPlaced)
 	}
-	targetID := targets[n.next[id]%len(targets)]
-	n.next[id]++
+	targetID, _ := n.selector.Pick(id, targets)
 	var target *TestNode
 	for _, candidate := range c.nodes {
 		if candidate.id == targetID {
@@ -650,3 +750,6 @@ func formatPlacements(p map[HandlerID][]string) string {
 	}
 	return "{" + strings.Join(parts, " ") + "}"
 }
+
+// LeaseTTL returns how long an exclusive lease outlives its last renewal.
+func (c *TestCluster) LeaseTTL() time.Duration { return c.leaseTTL }

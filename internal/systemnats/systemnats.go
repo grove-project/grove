@@ -577,9 +577,13 @@ func evacuateControlStreamPeer(ctx context.Context, serverURL, peer string) erro
 	if err != nil {
 		return err
 	}
-	for _, bucket := range []string{MembershipBucket, PlacementBucket, DesiredBucket, DeploymentBucket} {
+	for _, bucket := range controlStateBuckets {
 		operationCtx, cancel := context.WithTimeout(ctx, controlStateOperationTimeout)
 		stream, err := js.Stream(operationCtx, "KV_"+bucket)
+		if optionalControlStream(bucket, err) {
+			cancel()
+			continue
+		}
 		if err == nil {
 			var info *jetstream.StreamInfo
 			info, err = stream.Info(operationCtx)
@@ -774,9 +778,13 @@ func waitForMetadataPeerEvacuation(ctx context.Context, serverURL, peer string) 
 	var lastErr error
 	for {
 		ready := true
-		for _, bucket := range []string{MembershipBucket, PlacementBucket, DesiredBucket, DeploymentBucket} {
+		for _, bucket := range controlStateBuckets {
 			attemptCtx, cancel := context.WithTimeout(ctx, controlStateOperationTimeout)
 			stream, err := js.Stream(attemptCtx, "KV_"+bucket)
+			if optionalControlStream(bucket, err) {
+				cancel()
+				continue
+			}
 			if err == nil {
 				var info *jetstream.StreamInfo
 				info, err = stream.Info(attemptCtx)
