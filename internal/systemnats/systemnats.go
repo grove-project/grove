@@ -902,7 +902,9 @@ func Connect(ctx context.Context, url string) (*Transport, error) {
 }
 
 // Serve registers handler on one System NATS subject and waits until the
-// subscription is active.
+// subscription is active. Each incoming request runs in its own goroutine so
+// that one slow handler (for example waiting on a downstream call to a dead
+// node) does not block delivery of subsequent requests.
 func (t *Transport) Serve(ctx context.Context, subject string, handler Handler) error {
 	if subject == "" {
 		return &Error{Operation: "serve System NATS endpoint", Err: ErrSubjectRequired}
@@ -911,16 +913,18 @@ func (t *Transport) Serve(ctx context.Context, subject string, handler Handler) 
 		return &Error{Operation: "serve System NATS endpoint", Err: ErrHandlerRequired}
 	}
 	if _, err := t.connection.Subscribe(subject, func(message *nats.Msg) {
-		var request grove.RequestEnvelope
-		if err := grove.Decode(message.Data, &request); err != nil {
-			respond(message, grove.ResponseEnvelope{
-				Error: &grove.ResponseError{Code: grove.ErrorSerialization, Message: err.Error()},
-			})
-			return
-		}
-		response := handler(ctx, request)
-		response.RequestID = request.RequestID
-		respond(message, response)
+		go func() {
+			var request grove.RequestEnvelope
+			if err := grove.Decode(message.Data, &request); err != nil {
+				respond(message, grove.ResponseEnvelope{
+					Error: &grove.ResponseError{Code: grove.ErrorSerialization, Message: err.Error()},
+				})
+				return
+			}
+			response := handler(ctx, request)
+			response.RequestID = request.RequestID
+			respond(message, response)
+		}()
 	}); err != nil {
 		return &Error{Operation: "subscribe System NATS endpoint", Err: err}
 	}
