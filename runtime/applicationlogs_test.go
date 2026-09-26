@@ -43,7 +43,7 @@ func TestBuildApplicationLogsViewExplainsUnhealthyCluster(t *testing.T) {
 	}}
 	view := buildApplicationLogsView(status, nil, nodes, "nats://127.0.0.1:4222", []console.DebugSession{
 		{ServiceName: "Orders", NodeID: "node-2", WorkerID: "orders-1", DAPEndpoint: "127.0.0.1:40000"},
-	})
+	}, "")
 
 	for _, want := range []string{
 		"node-2 is unavailable: component request timeout",
@@ -82,6 +82,7 @@ func TestBuildApplicationLogsViewSurvivesStatusFailure(t *testing.T) {
 		[]applicationNodeLogs{{NodeID: "node-1", Output: "System NATS route failed"}},
 		"nats://127.0.0.1:4222",
 		nil,
+		"",
 	)
 	if view.Health != "unknown" || !containsApplicationLogLine(view.Causes, "cluster status unavailable") {
 		t.Fatalf("logs view = %#v; want status failure diagnosis", view)
@@ -104,6 +105,7 @@ func TestBuildApplicationLogsViewUsesLifecycleNodeIdentity(t *testing.T) {
 		}},
 		"nats://127.0.0.1:4222",
 		nil,
+		"",
 	)
 	if !containsApplicationLogLine(view.Cluster, "node=node-4 event=ready") ||
 		!containsApplicationLogLine(view.SystemNATS, "node=node-4 client=") ||
@@ -138,7 +140,7 @@ func TestBuildApplicationLogsViewIgnoresStoppedUnplacedComponents(t *testing.T) 
 			{ServiceID: grove.ServiceID(3), Name: "Payment", NodeID: "node-3", Health: "healthy"},
 		},
 	}
-	view := buildApplicationLogsView(status, nil, nil, "nats://127.0.0.1:4222", nil)
+	view := buildApplicationLogsView(status, nil, nil, "nats://127.0.0.1:4222", nil, "")
 	if view.Health != "healthy" || len(view.Causes) != 0 {
 		t.Fatalf("logs view = %#v; stopped components without authoritative placement must not degrade health", view)
 	}
@@ -146,6 +148,54 @@ func TestBuildApplicationLogsViewIgnoresStoppedUnplacedComponents(t *testing.T) 
 		if !containsApplicationLogLine(view.Application, "service="+component+" worker= state=stopped") {
 			t.Errorf("application diagnostics = %#v; want stopped %s visible", view.Application, component)
 		}
+	}
+}
+
+func TestBuildApplicationLogsViewNodeFilterPreservesScopeAcrossSections(t *testing.T) {
+	status := ClusterStatus{
+		Health: "degraded",
+		Ready:  true,
+		Nodes: []NodeStatus{
+			{NodeID: "node-1", Health: "healthy", Components: []ComponentStatus{
+				{ServiceID: grove.ServiceID(1), Name: "Orders", WorkerID: "orders-1", State: "healthy"},
+			}},
+			{NodeID: "node-2", Health: "unavailable", Error: "component request timeout", Components: []ComponentStatus{
+				{ServiceID: grove.ServiceID(2), Name: "Inventory", WorkerID: "inventory-1", State: "failed"},
+			}},
+		},
+		Placements: []PlacementStatus{
+			{ServiceID: grove.ServiceID(1), Name: "Orders", NodeID: "node-1", Health: "healthy", InvocationSubject: "_GROVE.orders"},
+			{ServiceID: grove.ServiceID(2), Name: "Inventory", NodeID: "node-2", Health: "unavailable", InvocationSubject: "_GROVE.inventory"},
+		},
+	}
+	nodes := []applicationNodeLogs{
+		{NodeID: "node-1", Output: "grovlet: node-1 steady state"},
+		{NodeID: "node-2", Output: "grovlet: node-2 steady state"},
+	}
+	view := buildApplicationLogsView(status, nil, nodes, "nats://127.0.0.1:4222", nil, "node-1")
+
+	if view.NodeFilter != "node-1" {
+		t.Fatalf("NodeFilter = %q; want node-1", view.NodeFilter)
+	}
+	for _, lines := range [][]string{view.Cluster, view.Application, view.SystemNATS} {
+		if containsApplicationLogLine(lines, "node-2") || containsApplicationLogLine(lines, "node=node-2") {
+			t.Fatalf("scoped logs = %#v; must not include node-2 lines", lines)
+		}
+	}
+	if !containsApplicationLogLine(view.Cluster, "node=node-1") || !containsApplicationLogLine(view.Application, "node=node-1") ||
+		!containsApplicationLogLine(view.SystemNATS, "node=node-1") || !containsApplicationLogLine(view.Application, "node-1 grovlet: node-1 steady state") {
+		t.Fatalf("scoped logs = cluster:%#v application:%#v systemNATS:%#v; want node-1 lines in every section",
+			view.Cluster, view.Application, view.SystemNATS)
+	}
+	// Causes reason globally so a scoped view still explains a health banner
+	// it shares with the unscoped view, even when the cause is another node.
+	if !containsApplicationLogLine(view.Causes, "node-2 is unavailable") {
+		t.Fatalf("causes = %#v; want the global node-2 failure even while scoped to node-1", view.Causes)
+	}
+
+	rendered := renderApplicationLogs(view)
+	if !strings.Contains(rendered, "SCOPE") || !strings.Contains(rendered, "node-1") {
+		t.Errorf("rendered logs = %q; want a node-1 scope banner", rendered)
 	}
 }
 

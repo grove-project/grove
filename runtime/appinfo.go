@@ -191,6 +191,13 @@ func (c *applicationController) appVersion(ctx context.Context, args []string) (
 	return view, nil
 }
 
+// formatApplicationDuration renders elapsed as HH:MM:SS, matching the
+// wall-clock uptime format shown across App and Cluster screens.
+func formatApplicationDuration(elapsed time.Duration) string {
+	elapsed = elapsed.Round(time.Second)
+	return fmt.Sprintf("%02d:%02d:%02d", int(elapsed.Hours()), int(elapsed.Minutes())%60, int(elapsed.Seconds())%60)
+}
+
 func buildTime() string {
 	info, ok := debug.ReadBuildInfo()
 	if !ok {
@@ -243,8 +250,7 @@ func renderApplicationOverview(view applicationOverviewView, now time.Time) stri
 	field("Nodes", fmt.Sprint(view.Nodes))
 	started := "-"
 	if !view.StartedAt.IsZero() {
-		elapsed := now.Sub(view.StartedAt).Round(time.Second)
-		started = fmt.Sprintf("%02d:%02d:%02d ago", int(elapsed.Hours()), int(elapsed.Minutes())%60, int(elapsed.Seconds())%60)
+		started = formatApplicationDuration(now.Sub(view.StartedAt)) + " ago"
 	}
 	field("Started", started)
 	return out.String()
