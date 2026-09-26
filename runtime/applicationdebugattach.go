@@ -54,7 +54,7 @@ func (a *debugAttachAction) Wait(ctx context.Context) error {
 }
 
 func (c *applicationController) attachDebugger(ctx context.Context, args []string) (any, error) {
-	serviceName, listenAddress, err := parseDebugAttachArguments(args)
+	serviceName, listenAddress, nodeID, err := parseDebugAttachArguments(args)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +71,12 @@ func (c *applicationController) attachDebugger(ctx context.Context, args []strin
 	if err != nil {
 		return nil, fmt.Errorf("connect to debug demo cluster: %w", err)
 	}
-	session, err := debuggateway.Open(ctx, transport, "node-1", serviceName, listenAddress)
+	var session *debuggateway.Session
+	if nodeID != "" {
+		session, err = debuggateway.OpenOnNode(ctx, transport, nodeID, serviceName, listenAddress)
+	} else {
+		session, err = debuggateway.Open(ctx, transport, "node-1", serviceName, listenAddress)
+	}
 	if err != nil {
 		transport.Close()
 		return nil, err
@@ -131,20 +136,22 @@ func copyDebugSessions(sessions map[string]console.DebugSession) []console.Debug
 	return result
 }
 
-func parseDebugAttachArguments(args []string) (string, string, error) {
+func parseDebugAttachArguments(args []string) (string, string, string, error) {
 	if len(args) == 0 || args[0] == "" {
-		return "", "", errDebugServiceRequired
+		return "", "", "", errDebugServiceRequired
 	}
 	serviceName := args[0]
 	flags := flag.NewFlagSet("debug.attach", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	listenAddress := "127.0.0.1:0"
+	var nodeID string
 	flags.StringVar(&listenAddress, "listen", listenAddress, "local DAP listen address")
+	flags.StringVar(&nodeID, "node", "", "debug the placement hosted on this node")
 	if err := flags.Parse(args[1:]); err != nil {
-		return "", "", fmt.Errorf("parse debug.attach arguments: %w", err)
+		return "", "", "", fmt.Errorf("parse debug.attach arguments: %w", err)
 	}
 	if flags.NArg() != 0 {
-		return "", "", fmt.Errorf("parse debug.attach arguments: %w: %q", errConsoleArguments, flags.Args())
+		return "", "", "", fmt.Errorf("parse debug.attach arguments: %w: %q", errConsoleArguments, flags.Args())
 	}
-	return serviceName, listenAddress, nil
+	return serviceName, listenAddress, nodeID, nil
 }

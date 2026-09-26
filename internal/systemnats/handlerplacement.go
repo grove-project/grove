@@ -117,7 +117,18 @@ type HandlerPlacementView struct {
 	Nodes      []NodeHandlers     `json:"nodes"`
 	Placements []HandlerPlacement `json:"placements"`
 	Leases     []LeaseView        `json:"leases"`
-	Error      string             `json:"error,omitempty"`
+	// Lost lists placements whose node is no longer live. Resolved views drop
+	// them from Placements and report them here so recovery stays visible.
+	Lost  []LostPlacement `json:"lost,omitempty"`
+	Error string          `json:"error,omitempty"`
+}
+
+// LostPlacement is a placement removed from routing because its node is not
+// live; it stays visible until reconciliation replaces it.
+type LostPlacement struct {
+	Service grove.ServiceID `json:"service"`
+	Method  grove.MethodID  `json:"method"`
+	NodeID  string          `json:"node_id"`
 }
 
 // HandlerPlacementConfig configures HandlerPlacements. Zero timing fields use
@@ -324,6 +335,8 @@ func (h *HandlerPlacements) run(ctx context.Context, transport *Transport) error
 	defer tick.Stop()
 	replicaCheck := time.NewTicker(time.Second)
 	defer replicaCheck.Stop()
+	refresh := time.NewTicker(placementRefreshInterval)
+	defer refresh.Stop()
 	for {
 		select {
 		case entry, ok := <-watcher.Updates():
@@ -340,6 +353,19 @@ func (h *HandlerPlacements) run(ctx context.Context, transport *Transport) error
 			}
 		case <-replicaCheck.C:
 			h.reconcileReplicas(ctx, js)
+		case <-refresh.C:
+			if !initialized {
+				continue
+			}
+			// An ordered KV watch can stay open across a stream-leader change
+			// without delivering later writes; point reads are the authority.
+			refreshCtx, cancel := operationContext(ctx)
+			err := h.resync(refreshCtx, kv, nodes, placements)
+			cancel()
+			if err != nil {
+				continue
+			}
+			h.publish(nodes, placements)
 		case <-tick.C:
 			if !initialized {
 				continue
@@ -393,6 +419,68 @@ func (h *HandlerPlacements) publishRegistrations(ctx context.Context, kv jetstre
 		h.dirty = true
 		h.mu.Unlock()
 		return fmt.Errorf("publish handler registrations: %w", err)
+	}
+	return nil
+}
+
+// deletedEntry lets a missing key flow through apply as a deletion.
+type deletedEntry struct {
+	jetstream.KeyValueEntry
+	key string
+}
+
+func (e deletedEntry) Key() string                     { return e.key }
+func (e deletedEntry) Value() []byte                   { return nil }
+func (e deletedEntry) Revision() uint64                { return 0 }
+func (e deletedEntry) Operation() jetstream.KeyValueOp { return jetstream.KeyValueDelete }
+
+// resync rebuilds the local view from point reads of every key in the bucket
+// plus every key already known, so both missed writes and missed deletions
+// converge. It leaves the view unchanged if any read fails.
+func (h *HandlerPlacements) resync(
+	ctx context.Context,
+	kv jetstream.KeyValue,
+	nodes map[string]NodeHandlers,
+	placements map[placement.Handler]HandlerPlacement,
+) error {
+	keys, err := kv.Keys(ctx)
+	if err != nil && !errors.Is(err, jetstream.ErrNoKeysFound) {
+		return err
+	}
+	// A key listing can be incomplete while a stream moves leaders, so union it
+	// with what is already known.
+	candidates := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		candidates[key] = struct{}{}
+	}
+	for id := range nodes {
+		candidates[handlerNodeKeyPrefix+id] = struct{}{}
+	}
+	for id := range placements {
+		candidates[HandlerPlacementKey(id.Service, id.Method)] = struct{}{}
+	}
+	h.mu.RLock()
+	for capability := range h.leases {
+		candidates[handlerLeaseKeyPrefix+capability] = struct{}{}
+	}
+	h.mu.RUnlock()
+
+	entries := make([]jetstream.KeyValueEntry, 0, len(candidates))
+	for key := range candidates {
+		entry, err := kv.Get(ctx, key)
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			entries = append(entries, deletedEntry{key: key})
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		entries = append(entries, entry)
+	}
+	for _, entry := range entries {
+		if err := h.apply(entry, nodes, placements); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -518,7 +606,15 @@ func (h *HandlerPlacements) reconcile(
 			Exclusive: meta[id].Exclusive, Capability: meta[id].Capability, Epoch: current.Epoch,
 		}
 		if next.Exclusive {
-			next.Epoch = placement.NextEpoch(current.nodeIDs(), target, current.Epoch)
+			// Epochs only grow, even if the placement key was deleted and
+			// recreated: the lease remembers the highest epoch ever claimed.
+			floor := current.Epoch
+			h.mu.RLock()
+			if lease, ok := h.leases[next.Capability]; ok && lease.record.Epoch > floor {
+				floor = lease.record.Epoch
+			}
+			h.mu.RUnlock()
+			next.Epoch = placement.NextEpoch(current.nodeIDs(), target, floor)
 		}
 		for _, nodeID := range target {
 			next.Nodes = append(next.Nodes, HandlerNode{NodeID: nodeID, InvocationSubject: subjects[nodeID][id]})
@@ -774,10 +870,6 @@ func (h *HandlerPlacements) tryClaim(ctx context.Context, capability string) (gr
 	observed, seen := h.leases[capability]
 	now := h.cfg.Now()
 	switch {
-	case seen && observed.record.Holder != h.cfg.NodeID && observed.record.Epoch >= owned.Epoch:
-		// Our placement view is behind the cluster's; wait for it to catch up.
-		h.mu.Unlock()
-		return nil, false, nil
 	case seen && observed.record.Holder != h.cfg.NodeID && !observed.record.Released &&
 		now.Sub(observed.firstSeen) < h.cfg.LeaseTTL:
 		// The previous owner may still be acting until its own TTL runs out.

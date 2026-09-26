@@ -194,6 +194,26 @@ func TestHandlerPlacementOnRealCluster(t *testing.T) {
 	}
 	eventually(t, "stale owner fenced", func() bool { return !stale.Enabled() })
 
+	// Views (TUI, status) and routing read the same resolved placements: what
+	// Lookup would route to is exactly what Resolved reports as placed.
+	for _, service := range []struct {
+		method grove.MethodID
+		want   int
+	}{{chargeMethod, 2}, {reconcileMethod, 1}} {
+		eventually(t, "resolved view and routing agree", func() bool {
+			found, err := n2.placements.Lookup(chargeService, service.method)
+			if err != nil {
+				return service.method == reconcileMethod // owner not yet reassigned
+			}
+			for _, p := range n2.placements.Resolved().Placements {
+				if p.Service == chargeService && p.Method == service.method {
+					return len(p.Nodes) == service.want && equalNodes(nodeIDs(p), nodeIDs(found))
+				}
+			}
+			return false
+		})
+	}
+
 	// The successor acts only after the old lease has run out, and there is
 	// never a moment with two enabled owners.
 	var next *grove.Ownership
@@ -256,4 +276,16 @@ func TestHandlerOwnerFencesItselfWhenRenewalStops(t *testing.T) {
 	n1.stop()
 	<-n1.stopped
 	eventually(t, "lease expiry without renewal", func() bool { return !owned.Enabled() })
+}
+
+func equalNodes(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

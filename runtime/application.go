@@ -110,6 +110,16 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 			Handler:     controller.appVersion,
 		},
 		{
+			Name: "services.view", Label: "Services", Section: "Services",
+			Description: "Drill from services to handlers to concrete placements.",
+			Handler:     controller.appServices,
+		},
+		{
+			Name: "cluster.nodes", Label: "Nodes", Section: "Cluster",
+			Description: "Show which handler placements each node hosts.",
+			Handler:     controller.appServices,
+		},
+		{
 			Name: "cluster.status", Label: "Status", Section: "Cluster",
 			Description: "Read current application cluster and rollout state.",
 			Handler: func(ctx context.Context, args []string) (any, error) {

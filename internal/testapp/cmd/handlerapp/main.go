@@ -52,9 +52,9 @@ func main() {
 			return registerProbes(ctx)
 		}
 		component.Handlers = []groveruntime.HandlerSpec{
-			{Method: testapp.MethodCharge},
-			{Method: MethodWhoAmI},
-			{Method: MethodLoadGen, Exclusive: true, Capability: LoadGenCapability},
+			{Method: testapp.MethodCharge, Name: "Charge"},
+			{Method: MethodWhoAmI, Name: "WhoAmI"},
+			{Method: MethodLoadGen, Name: "LoadGen", Exclusive: true, Capability: LoadGenCapability},
 		}
 	}
 	groveruntime.Main(definition)

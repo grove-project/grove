@@ -47,6 +47,32 @@ func Open(ctx context.Context, transport *systemnats.Transport, observerNodeID, 
 	if err != nil {
 		return nil, err
 	}
+	return open(ctx, transport, target, listenAddress)
+}
+
+// OpenOnNode is Open for a service hosted on several nodes: the caller names
+// the exact node whose placement to debug instead of resolving a single one.
+func OpenOnNode(ctx context.Context, transport *systemnats.Transport, nodeID, serviceName, listenAddress string) (*Session, error) {
+	components, err := transport.RequestComponents(ctx, nodeID)
+	if err != nil {
+		return nil, fmt.Errorf("read components on %s: %w", nodeID, err)
+	}
+	for _, component := range components.Components {
+		if !strings.EqualFold(component.Name, serviceName) {
+			continue
+		}
+		if component.State != systemnats.ComponentHealthy {
+			return nil, fmt.Errorf("service %s on %s is %s: %w", component.Name, nodeID, component.State, ErrServiceNotRunning)
+		}
+		return open(ctx, transport, systemnats.DebugTarget{
+			ServiceID: component.ServiceID, ServiceName: component.Name, NodeID: nodeID,
+			WorkerID: component.WorkerID, ArtifactDigest: component.ArtifactDigest, CodeVersion: component.CodeVersion,
+		}, listenAddress)
+	}
+	return nil, fmt.Errorf("service %q on %s: %w", serviceName, nodeID, ErrServiceNotRunning)
+}
+
+func open(ctx context.Context, transport *systemnats.Transport, target systemnats.DebugTarget, listenAddress string) (*Session, error) {
 	listener, err := net.Listen("tcp", listenAddress)
 	if err != nil {
 		return nil, fmt.Errorf("listen for local DAP client: %w", err)

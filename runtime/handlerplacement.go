@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
@@ -15,6 +16,21 @@ const handlerRegistrationSyncInterval = 50 * time.Millisecond
 func applicationDeclaresHandlers() bool {
 	for _, component := range activeApplication.Components {
 		if len(component.Handlers) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// applicationManagesHandler reports whether a component declares the method
+// for handler-level placement.
+func applicationManagesHandler(service grove.ServiceID, method grove.MethodID) bool {
+	component, ok := activeApplication.componentByID(service)
+	if !ok {
+		return false
+	}
+	for _, handler := range component.Handlers {
+		if handler.Method == method {
 			return true
 		}
 	}

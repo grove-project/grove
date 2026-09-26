@@ -39,6 +39,8 @@ func (h *HandlerPlacements) Resolved() HandlerPlacementView {
 		for _, n := range p.Nodes {
 			if liveSet[n.NodeID] {
 				nodes = append(nodes, n)
+			} else {
+				view.Lost = append(view.Lost, LostPlacement{Service: p.Service, Method: p.Method, NodeID: n.NodeID})
 			}
 		}
 		if len(nodes) != 0 {
@@ -84,31 +86,44 @@ func (t *Transport) RequestHandlerPlacement(ctx context.Context, nodeID string) 
 	return view, nil
 }
 
-// ObservedHandlerRouter routes each call through nodeID's resolved handler
-// view, balancing across the handler's placements. Handlers with no placement
-// go to fallback, which keeps whole-service placement working unchanged.
-func (t *Transport) ObservedHandlerRouter(nodeID string, fallback grove.Router) grove.Router {
-	return &observedHandlerRouter{transport: t, nodeID: nodeID, fallback: fallback}
+// ObservedHandlerRouter routes each call to a handler that managed reports as
+// handler-level through nodeID's resolved view, balancing across its
+// placements. A managed handler never falls back to whole-service placement,
+// not even while its view is unavailable: that could run an exclusive handler
+// on a node that does not own it. Every other handler goes to fallback, which
+// keeps whole-service placement working unchanged.
+func (t *Transport) ObservedHandlerRouter(
+	nodeID string,
+	managed func(grove.ServiceID, grove.MethodID) bool,
+	fallback grove.Router,
+) grove.Router {
+	return &observedHandlerRouter{transport: t, nodeID: nodeID, managed: managed, fallback: fallback}
 }
 
 type observedHandlerRouter struct {
 	transport *Transport
 	nodeID    string
+	managed   func(grove.ServiceID, grove.MethodID) bool
 	fallback  grove.Router
 	selector  placement.Selector
 }
 
 func (r *observedHandlerRouter) Route(ctx context.Context, request grove.RequestEnvelope) (grove.ResponseEnvelope, error) {
-	view, err := r.transport.RequestHandlerPlacement(ctx, r.nodeID)
-	if err != nil || !view.Ready {
+	if !r.managed(request.ServiceID, request.MethodID) {
 		return r.fallback.Route(ctx, request)
+	}
+	view, err := r.transport.RequestHandlerPlacement(ctx, r.nodeID)
+	if err != nil {
+		return grove.ResponseEnvelope{}, fmt.Errorf("%w: %w", grove.ErrTransportFailure, err)
+	}
+	if !view.Ready {
+		return grove.ResponseEnvelope{}, &Error{Operation: "resolve Grove handler placement", Err: ErrHandlerPlacementUnavailable}
 	}
 	for _, p := range view.Placements {
 		if p.Service != request.ServiceID || p.Method != request.MethodID {
 			continue
 		}
-		ids := p.nodeIDs()
-		target, _ := r.selector.Pick(p.id(), ids)
+		target, _ := r.selector.Pick(p.id(), p.nodeIDs())
 		for _, n := range p.Nodes {
 			if n.NodeID != target {
 				continue
@@ -120,7 +135,7 @@ func (r *observedHandlerRouter) Route(ctx context.Context, request grove.Request
 			return response, nil
 		}
 	}
-	return r.fallback.Route(ctx, request)
+	return grove.ResponseEnvelope{}, &Error{Operation: "resolve Grove handler placement", Err: ErrHandlerNotPlaced}
 }
 
 // leaseRequest and leaseReply are the worker <-> Grovlet lease proxy protocol.

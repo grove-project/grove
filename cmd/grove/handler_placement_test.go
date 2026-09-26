@@ -39,11 +39,15 @@ func TestHandlerLevelPlacementAcrossGrovlets(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Three nodes host Payment. A fourth hosts only the ingress and is never
+	// killed, so which payment node owns the workload does not matter.
 	nodeIDs := []string{"node-1", "node-2", "node-3"}
-	ports := reserveRoutePorts(t, len(nodeIDs)+1)
-	ingressAddress := "127.0.0.1:" + strconv.Itoa(ports[len(nodeIDs)])
-	nodes := make([]*grovetest.Node, len(nodeIDs))
-	for i, nodeID := range nodeIDs {
+	const ingressNode = "node-4"
+	clusterIDs := append(append([]string(nil), nodeIDs...), ingressNode)
+	ports := reserveRoutePorts(t, len(clusterIDs)+1)
+	ingressAddress := "127.0.0.1:" + strconv.Itoa(ports[len(clusterIDs)])
+	nodes := make([]*grovetest.Node, len(clusterIDs))
+	for i, nodeID := range clusterIDs {
 		seed := 0
 		if i == 0 {
 			seed = 1
@@ -56,12 +60,11 @@ func TestHandlerLevelPlacementAcrossGrovlets(t *testing.T) {
 			"--system-nats-seed", "nats-route://127.0.0.1:" + strconv.Itoa(ports[seed]),
 			"--system-nats-membership",
 			"--system-nats-subject", handlerNodeSubj + nodeID,
-			"--component", "payment",
-			"--component-option", "payment=" + nodeID,
 		}
-		if nodeID == "node-3" {
-			// The ingress runs on a node that survives the failover below.
+		if nodeID == ingressNode {
 			args = append(args, "--component", "web", "--component-listen", "web="+ingressAddress)
+		} else {
+			args = append(args, "--component", "payment", "--component-option", "payment="+nodeID)
 		}
 		node, err := grovetest.StartNode(binary, args...)
 		if err != nil {
@@ -75,14 +78,14 @@ func TestHandlerLevelPlacementAcrossGrovlets(t *testing.T) {
 			t.Fatalf("wait for Grovlets: %v\n%s", err, grovletLogs(nodes))
 		}
 	}
-	// Connect through the last node: the first owner is the lowest node ID and
-	// is the one this test kills, along with its embedded NATS server.
-	transport, err := systemnats.Connect(ctx, readySystemNATSURL(t, nodes[2].Logs()))
+	transport, err := systemnats.Connect(ctx, readySystemNATSURL(t, nodes[len(nodes)-1].Logs()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer transport.Close()
-	client, err := grove.NewRoutedClient(transport.ObservedHandlerRouter("node-1", transport.ObservedPlacementRouter("node-1")))
+	client, err := grove.NewRoutedClient(transport.ObservedHandlerRouter(ingressNode, func(service grove.ServiceID, method grove.MethodID) bool {
+		return service == groveshop.ServicePayment && (method == groveshop.MethodCharge || method == whoAmIMethod || method == loadGenMethod)
+	}, transport.ObservedPlacementRouter(ingressNode)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,12 +187,6 @@ func TestHandlerLevelPlacementAcrossGrovlets(t *testing.T) {
 			survivors = append(survivors, id)
 		}
 	}
-	// Route the observer through a surviving node.
-	observer := survivors[0]
-	client, err = grove.NewRoutedClient(transport.ObservedHandlerRouter(observer, transport.ObservedPlacementRouter(observer)))
-	if err != nil {
-		t.Fatal(err)
-	}
 	var successor string
 	eventually("ownership moves to a survivor", func() bool {
 		active := activeNodes(survivors...)
@@ -212,20 +209,32 @@ func TestHandlerLevelPlacementAcrossGrovlets(t *testing.T) {
 		}
 		return len(served) == 2
 	})
-	eventually("ingress stops routing to the dead node", func() bool {
+	var lastIngress string
+	eventually("ingress stops routing to the dead node ("+"see last: "+lastIngress+")", func() bool {
 		served := map[string]bool{}
 		for range 6 {
 			node, err := ingress("/probe/whoami")
 			if err != nil || node == owner {
+				lastIngress = fmt.Sprintf("node=%q err=%v", node, err)
+				t.Log(lastIngress)
 				return false
 			}
 			served[node] = true
 		}
 		return len(served) == 2
 	})
-	if node, err := ingress("/probe/loadgen"); err != nil || node != successor {
-		t.Fatalf("ingress exclusive call after failover served by %q err=%v, want %s", node, err, successor)
-	}
+	// Until the observing node has caught up with the new owner, ingress refuses
+	// the exclusive call; it must never run it on anyone but the owner.
+	eventually("ingress exclusive call reaches the new owner", func() bool {
+		node, err := ingress("/probe/loadgen")
+		if err != nil {
+			return false
+		}
+		if node != successor {
+			t.Fatalf("ingress served the exclusive handler on %q; owner is %s", node, successor)
+		}
+		return true
+	})
 	if s, err := grove.Call[struct{}, loadGenStatus](ctx, client, groveshop.ServicePayment, loadGenMethod, struct{}{}); err != nil || s.Node != successor {
 		t.Fatalf("exclusive call after failover served by %q err=%v, want %s", s.Node, err, successor)
 	}

@@ -77,7 +77,9 @@ type Component struct {
 // an Exclusive handler has exactly one active owner of Capability, which its
 // workload claims with grove.Exclusive.
 type HandlerSpec struct {
-	Method     grove.MethodID
+	Method grove.MethodID
+	// Name labels the handler in Grove's views; it defaults to the method ID.
+	Name       string
 	Exclusive  bool
 	Capability string
 }

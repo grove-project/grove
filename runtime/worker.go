@@ -203,7 +203,7 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	client, err := transport.ObservedPlacementClient(cfg.placementNodeID)
 	if applicationDeclaresHandlers() {
 		client, err = grove.NewRoutedClient(transport.ObservedHandlerRouter(
-			cfg.placementNodeID, transport.ObservedPlacementRouter(cfg.placementNodeID)))
+			cfg.placementNodeID, applicationManagesHandler, transport.ObservedPlacementRouter(cfg.placementNodeID)))
 	}
 	if err != nil {
 		return err
