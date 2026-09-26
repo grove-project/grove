@@ -15,7 +15,8 @@ import (
 
 // Killing a node under load must not make handler placement unavailable on
 // the survivors: control-plane (JetStream) elections must not stop routing.
-// Calls to the dead node may fail until heartbeats mark it unavailable.
+// A dead node never receives a request, so calls that reach it (no responders)
+// are retried on another placement: survivors keep serving without failures.
 func TestHandlerPlacementSurvivesNodeKill(t *testing.T) {
 	const victim = 1
 	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Second)
@@ -95,7 +96,7 @@ func TestHandlerPlacementSurvivesNodeKill(t *testing.T) {
 	errs := map[string]int{}
 	served := map[string]int{}
 	var lastOK time.Time
-	for time.Since(killedAt) < 12*time.Second {
+	for time.Since(killedAt) < 30*time.Second {
 		id, err := call()
 		if err != nil {
 			errs[err.Error()]++
@@ -114,5 +115,16 @@ func TestHandlerPlacementSurvivesNodeKill(t *testing.T) {
 	}
 	if time.Since(lastOK) > 2*time.Second {
 		t.Fatalf("no recovery\n%s", grovletLogs(nodes))
+	}
+	for i, nodeID := range nodeIDs {
+		if i != victim && served[nodeID] == 0 {
+			t.Fatalf("survivor %s served nothing after the kill: %v\n%s", nodeID, served, grovletLogs(nodes))
+		}
+	}
+	if served[nodeIDs[victim]] != 0 {
+		t.Fatalf("killed node served calls after the kill: %v", served)
+	}
+	if failed := len(errs); failed != 0 {
+		t.Fatalf("calls failed after a non-owner kill: %v", errs)
 	}
 }
