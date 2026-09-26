@@ -312,7 +312,7 @@ func (v *applicationTUI) renderClusterNode(node applicationClusterNodeRow) {
 func renderClusterNodeDetail(node applicationClusterNodeRow, cluster applicationClusterView, now time.Time) string {
 	var out strings.Builder
 	field := func(label, value string) {
-		fmt.Fprintf(&out, "  %-14s%s\n", label, tview.Escape(displayTUIValue(value)))
+		fmt.Fprintf(&out, "  %-16s%s\n", label, tview.Escape(displayTUIValue(value)))
 	}
 	section := func(title string) { fmt.Fprintf(&out, "\n[aqua::b]%s[-:-:-]\n", title) }
 
