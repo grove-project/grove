@@ -276,6 +276,7 @@ type ClusterStatus struct {
 type NodeStatus struct {
 	NodeID     string            `json:"node_id"`
 	Health     string            `json:"health"`
+	LastSeen   string            `json:"last_seen,omitempty"`
 	Components []ComponentStatus `json:"components"`
 	Error      string            `json:"error,omitempty"`
 }

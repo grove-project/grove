@@ -116,8 +116,8 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 		},
 		{
 			Name: "cluster.nodes", Label: "Nodes", Section: "Cluster",
-			Description: "Show which handler placements each node hosts.",
-			Handler:     controller.appServices,
+			Description: "Show cluster health and drill from a node into its runtime state and hosted services.",
+			Handler:     controller.appCluster,
 		},
 		{
 			Name: "cluster.status", Label: "Status", Section: "Cluster",

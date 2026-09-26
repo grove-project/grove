@@ -16,6 +16,7 @@ const applicationLogLineLimit = 250
 
 type applicationLogsView struct {
 	Health        string                 `json:"health"`
+	NodeFilter    string                 `json:"node_filter,omitempty"`
 	Causes        []string               `json:"causes"`
 	Application   []string               `json:"application"`
 	Cluster       []string               `json:"cluster"`
@@ -28,9 +29,16 @@ type applicationNodeLogs struct {
 	Output string
 }
 
+// logs reads application/cluster/System NATS diagnostics. An optional single
+// node-ID argument preserves node scope when navigating from the Cluster
+// flow's node detail, without redesigning the unified logs experience.
 func (c *applicationController) logs(ctx context.Context, args []string) (any, error) {
-	if len(args) != 0 {
+	if len(args) > 1 {
 		return nil, errConsoleArguments
+	}
+	var nodeFilter string
+	if len(args) == 1 {
+		nodeFilter = args[0]
 	}
 	status, statusErr := c.status(ctx)
 	c.mu.RLock()
@@ -50,7 +58,7 @@ func (c *applicationController) logs(ctx context.Context, args []string) (any, e
 	}
 	debugSessions = copyDebugSessions(c.debugSessions)
 	c.mu.RUnlock()
-	return buildApplicationLogsView(status, statusErr, nodes, systemNATSURL, debugSessions), nil
+	return buildApplicationLogsView(status, statusErr, nodes, systemNATSURL, debugSessions, nodeFilter), nil
 }
 
 func buildApplicationLogsView(
@@ -59,9 +67,11 @@ func buildApplicationLogsView(
 	nodes []applicationNodeLogs,
 	systemNATSURL string,
 	debugSessions []console.DebugSession,
+	nodeFilter string,
 ) applicationLogsView {
 	view := applicationLogsView{
 		Health:        status.Health,
+		NodeFilter:    nodeFilter,
 		Causes:        []string{},
 		Application:   []string{},
 		Cluster:       []string{},
@@ -100,12 +110,18 @@ func buildApplicationLogsView(
 	for _, placement := range status.Placements {
 		placedComponents[placementComponentKey(placement.NodeID, placement.ServiceID)] = struct{}{}
 	}
+	// Causes always reason over the whole cluster, even when the displayed
+	// log lines are scoped to one node, so a scoped view still explains why
+	// the overall health banner it shares with the unscoped view is degraded.
+	inScope := func(nodeID string) bool { return nodeFilter == "" || nodeID == nodeFilter }
 	for _, node := range status.Nodes {
 		line := fmt.Sprintf("node=%s health=%s components=%d", node.NodeID, node.Health, len(node.Components))
 		if node.Error != "" {
 			line += " error=" + node.Error
 		}
-		view.Cluster = append(view.Cluster, line)
+		if inScope(node.NodeID) {
+			view.Cluster = append(view.Cluster, line)
+		}
 		if node.Health != string(systemnats.HealthHealthy) {
 			cause := fmt.Sprintf("%s is %s", node.NodeID, node.Health)
 			if node.Error != "" {
@@ -124,7 +140,9 @@ func buildApplicationLogsView(
 			if component.Error != "" {
 				componentLine += " error=" + component.Error
 			}
-			view.Application = append(view.Application, componentLine)
+			if inScope(node.NodeID) {
+				view.Application = append(view.Application, componentLine)
+			}
 			_, placed := placedComponents[placementComponentKey(node.NodeID, component.ServiceID)]
 			if placed && component.State != string(systemnats.ComponentHealthy) && component.State != string(systemnats.ComponentDebugging) {
 				cause := fmt.Sprintf("%s on %s is %s", component.Name, node.NodeID, component.State)
@@ -139,13 +157,15 @@ func buildApplicationLogsView(
 		view.SystemNATS = append(view.SystemNATS, "client-endpoint="+systemNATSURL)
 	}
 	for _, placement := range status.Placements {
-		view.SystemNATS = append(view.SystemNATS, fmt.Sprintf(
-			"placement service=%s node=%s health=%s subject=%s",
-			placement.Name,
-			placement.NodeID,
-			placement.Health,
-			placement.InvocationSubject,
-		))
+		if inScope(placement.NodeID) {
+			view.SystemNATS = append(view.SystemNATS, fmt.Sprintf(
+				"placement service=%s node=%s health=%s subject=%s",
+				placement.Name,
+				placement.NodeID,
+				placement.Health,
+				placement.InvocationSubject,
+			))
+		}
 		if placement.Health != string(systemnats.ComponentHealthy) && placement.Health != string(systemnats.ComponentDebugging) {
 			addCause(fmt.Sprintf(
 				"%s placement on %s is %s",
@@ -176,6 +196,9 @@ func buildApplicationLogsView(
 		}
 	}
 	for _, node := range nodes {
+		if !inScope(node.NodeID) {
+			continue
+		}
 		classifyApplicationNodeLogs(node, &view)
 	}
 	view.Application = tailApplicationLogLines(view.Application, applicationLogLineLimit)

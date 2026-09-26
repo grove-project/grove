@@ -20,6 +20,7 @@ const (
 	applicationTUILogsPage         = "logs"
 	applicationTUIIngressRegion    = "ingress"
 	applicationTUIAppPage          = "app"
+	applicationTUIClusterPage      = "cluster"
 )
 
 type applicationTUI struct {
@@ -63,6 +64,16 @@ type applicationTUI struct {
 	servicesCancel   context.CancelFunc
 	servicesData     applicationServicesView
 	servicesLocation servicesLocation
+
+	clusterPages  *tview.Pages
+	clusterHeader *tview.TextView
+	clusterTable  *tview.Table
+	clusterNode   *tview.TextView
+	clusterHint   *tview.TextView
+	clusterOpen   bool
+	clusterCancel context.CancelFunc
+	clusterData   applicationClusterView
+	clusterNodeID string // "" selects the node list; otherwise the drilled-in node
 }
 
 func runInteractiveApplicationTUI(ctx context.Context, tui *console.TUI) error {
@@ -439,7 +450,7 @@ func (v *applicationTUI) selectedAction() (console.Action, bool) {
 }
 
 func (v *applicationTUI) keyboard(event *tcell.EventKey) *tcell.EventKey {
-	if v.logsOpen || v.appOpen || v.servicesOpen || v.dialogOpen || v.app.GetFocus() == v.prompt {
+	if v.logsOpen || v.appOpen || v.servicesOpen || v.clusterOpen || v.dialogOpen || v.app.GetFocus() == v.prompt {
 		return event
 	}
 	if event.Key() == tcell.KeyCtrlC {
@@ -545,7 +556,7 @@ func (v *applicationTUI) activateAction(action console.Action, args []string) {
 		return
 	}
 	if action.Name == "logs.view" {
-		v.showLogs()
+		v.showLogs("")
 		return
 	}
 	switch action.Name {
@@ -553,7 +564,7 @@ func (v *applicationTUI) activateAction(action console.Action, args []string) {
 		v.showServices(false)
 		return
 	case "cluster.nodes":
-		v.showServices(true)
+		v.showCluster()
 		return
 	}
 	if mode, ok := appModes[action.Name]; ok {
@@ -741,11 +752,18 @@ func (v *applicationTUI) showHelp() {
 	v.app.SetFocus(modal)
 }
 
-func (v *applicationTUI) showLogs() {
+// showLogs opens the Logs screen. A non-empty nodeFilter preserves the node
+// scope the caller navigated from (e.g. the Cluster flow's node detail)
+// instead of always falling back to the unified cluster-wide view.
+func (v *applicationTUI) showLogs(nodeFilter string) {
 	if v.logsOpen {
 		return
 	}
 	logsCtx, cancel := context.WithCancel(v.ctx)
+	title := " [::b]Logs and health diagnostics[-:-:-] "
+	if nodeFilter != "" {
+		title = " [::b]Logs · " + tview.Escape(nodeFilter) + "[-:-:-] "
+	}
 	view := tview.NewTextView()
 	view.SetDynamicColors(true)
 	view.SetScrollable(true)
@@ -753,7 +771,7 @@ func (v *applicationTUI) showLogs() {
 	view.SetBorder(true)
 	view.SetBorderColor(tcell.ColorDarkCyan)
 	view.SetBorderFocusColor(tcell.ColorAqua)
-	view.SetTitle(" [::b]Logs and health diagnostics[-:-:-] ")
+	view.SetTitle(title)
 	view.SetText("[aqua::b]Loading application, cluster, and System NATS diagnostics…[-:-:-]")
 	view.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		if event.Key() == tcell.KeyEscape || (event.Key() == tcell.KeyRune && event.Rune() == 'q') {
@@ -761,7 +779,7 @@ func (v *applicationTUI) showLogs() {
 			return nil
 		}
 		if event.Key() == tcell.KeyRune && event.Rune() == 'r' {
-			go v.refreshLogs(logsCtx)
+			go v.refreshLogs(logsCtx, nodeFilter)
 			return nil
 		}
 		return event
@@ -771,14 +789,14 @@ func (v *applicationTUI) showLogs() {
 	v.logsCancel = cancel
 	v.pages.AddPage(applicationTUILogsPage, view, true, true)
 	v.app.SetFocus(view)
-	go v.watchLogs(logsCtx)
+	go v.watchLogs(logsCtx, nodeFilter)
 }
 
-func (v *applicationTUI) watchLogs(ctx context.Context) {
+func (v *applicationTUI) watchLogs(ctx context.Context, nodeFilter string) {
 	ticker := time.NewTicker(applicationLogsRefreshInterval)
 	defer ticker.Stop()
 	for {
-		v.refreshLogs(ctx)
+		v.refreshLogs(ctx, nodeFilter)
 		select {
 		case <-ctx.Done():
 			return
@@ -787,9 +805,13 @@ func (v *applicationTUI) watchLogs(ctx context.Context) {
 	}
 }
 
-func (v *applicationTUI) refreshLogs(ctx context.Context) {
+func (v *applicationTUI) refreshLogs(ctx context.Context, nodeFilter string) {
+	var args []string
+	if nodeFilter != "" {
+		args = []string{nodeFilter}
+	}
 	attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	result, err := v.tui.Select(attemptCtx, "logs.view", nil)
+	result, err := v.tui.Select(attemptCtx, "logs.view", args)
 	cancel()
 	text := ""
 	if err != nil {
@@ -828,10 +850,14 @@ func renderApplicationLogs(logs applicationLogsView) string {
 	}
 	fmt.Fprintf(
 		&output,
-		"[::b]HEALTH[-:-:-] [%s::b]%s[-:-:-]    [gray::]auto-refresh 500ms · ↑/↓ scroll · r refresh · q/esc back[-:-:-]\n\n",
+		"[::b]HEALTH[-:-:-] [%s::b]%s[-:-:-]    [gray::]auto-refresh 500ms · ↑/↓ scroll · r refresh · q/esc back[-:-:-]\n",
 		healthColor,
 		strings.ToUpper(displayTUIValue(logs.Health)),
 	)
+	if logs.NodeFilter != "" {
+		fmt.Fprintf(&output, "[aqua::b]SCOPE[-:-:-] %s\n", tview.Escape(logs.NodeFilter))
+	}
+	output.WriteString("\n")
 	if len(logs.Causes) == 0 {
 		output.WriteString("[green::b]WHY HEALTHY[-:-:-]\n  No active health failures.\n")
 	} else if logs.Health == "healthy" {

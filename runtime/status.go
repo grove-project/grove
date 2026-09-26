@@ -71,6 +71,7 @@ func buildStatus(
 		nodeStatus := NodeStatus{
 			NodeID:     node.NodeID,
 			Health:     string(node.Health),
+			LastSeen:   node.LastSeen,
 			Components: []ComponentStatus{},
 			Error:      componentErrors[node.NodeID],
 		}
