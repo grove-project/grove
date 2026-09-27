@@ -109,12 +109,17 @@ func controlStateReplicaCount(records map[string]MembershipRecord) int {
 	return active
 }
 
+// reconcileControlStateReplicas resizes every control-state bucket to the
+// replica count records calls for. It reports changed=true when some bucket's
+// configured replica count was not already at that target (whether this call
+// performed the resize itself or observed that a concurrent Grovlet already
+// had), so callers can tell a genuine resize apart from a no-op reconcile.
 func reconcileControlStateReplicas(
 	ctx context.Context,
 	js jetstream.JetStream,
 	records map[string]MembershipRecord,
 	allowShrink bool,
-) error {
+) (changed bool, err error) {
 	replicas := controlStateReplicaCount(records)
 	for _, bucket := range controlStateBuckets {
 		operationCtx, cancel := context.WithTimeout(ctx, controlStateOperationTimeout)
@@ -125,12 +130,12 @@ func reconcileControlStateReplicas(
 		}
 		if err != nil {
 			cancel()
-			return fmt.Errorf("open %s bucket for replica reconciliation: %w", bucket, err)
+			return changed, fmt.Errorf("open %s bucket for replica reconciliation: %w", bucket, err)
 		}
 		status, err := kv.Status(operationCtx)
 		if err != nil {
 			cancel()
-			return fmt.Errorf("read %s bucket replica configuration: %w", bucket, err)
+			return changed, fmt.Errorf("read %s bucket replica configuration: %w", bucket, err)
 		}
 		cfg := status.Config()
 		if cfg.Replicas == replicas {
@@ -141,6 +146,7 @@ func reconcileControlStateReplicas(
 			cancel()
 			continue
 		}
+		changed = true
 		cfg.Replicas = replicas
 		if _, err := js.UpdateKeyValue(operationCtx, cfg); err != nil {
 			// Another Grovlet may have completed the same idempotent resize.
@@ -155,11 +161,11 @@ func reconcileControlStateReplicas(
 				}
 			}
 			verifyCancel()
-			return fmt.Errorf("resize %s bucket to %d replicas: %w", bucket, replicas, err)
+			return changed, fmt.Errorf("resize %s bucket to %d replicas: %w", bucket, replicas, err)
 		}
 		cancel()
 	}
-	return nil
+	return changed, nil
 }
 
 func waitForControlStateReplicas(
@@ -172,7 +178,7 @@ func waitForControlStateReplicas(
 	defer ticker.Stop()
 	var lastErr error
 	for {
-		lastErr = reconcileControlStateReplicas(ctx, js, records, allowShrink)
+		_, lastErr = reconcileControlStateReplicas(ctx, js, records, allowShrink)
 		if lastErr == nil {
 			lastErr = controlStateStreamsCurrent(ctx, js)
 		}

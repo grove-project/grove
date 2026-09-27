@@ -318,9 +318,6 @@ func (m *Membership) reconcileControlState(
 	js jetstream.JetStream,
 	records map[string]MembershipRecord,
 ) error {
-	if err := reconcileControlStateReplicas(ctx, js, records, false); err != nil {
-		return err
-	}
 	replicas := controlStateReplicaCount(records)
 	m.mu.RLock()
 	reconciled := m.reconciledReplicas
@@ -328,8 +325,23 @@ func (m *Membership) reconcileControlState(
 	if reconciled == replicas {
 		return nil
 	}
-	if err := waitForControlStateReplicas(ctx, js, records, false); err != nil {
+	changed, err := reconcileControlStateReplicas(ctx, js, records, false)
+	if err != nil {
 		return err
+	}
+	// changed reports whether this round actually resized a bucket (or found
+	// a concurrent Grovlet doing so): only then is there anything to wait to
+	// catch up. Without it, a node that has never reconciled before (a
+	// brand-new join) would always wait here even when the target replica
+	// count already matched every bucket's configuration. An already-offline
+	// peer that was never evicted (an abruptly failed node's membership
+	// record is never marked Leaving; see MembershipRecord.Leaving) would
+	// then never report Current, wedging that node's own bootstrap forever
+	// even though the control state itself needed no reconciliation.
+	if changed {
+		if err := waitForControlStateReplicas(ctx, js, records, false); err != nil {
+			return err
+		}
 	}
 	m.mu.Lock()
 	m.reconciledReplicas = replicas
