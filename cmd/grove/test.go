@@ -418,8 +418,25 @@ func waitForCommandTestReady(ctx context.Context, transport *systemnats.Transpor
 				}
 			}
 		}
+		// Every node gates its own views on its own control-plane state, so the
+		// cluster serves only once each node reports ready, not just node-3.
+		allNodesServing := nodesHealthy && placementsReady
+		for i := 1; allNodesServing && i <= commandTestNodeCount; i++ {
+			nodeID := fmt.Sprintf("node-%d", i)
+			nodeCluster, err := transport.RequestClusterView(attemptCtx, nodeID)
+			if err != nil || !nodeCluster.Ready {
+				attemptErr = errors.Join(attemptErr, err)
+				allNodesServing = false
+				break
+			}
+			nodePlacement, err := transport.RequestPlacement(attemptCtx, nodeID)
+			if err != nil || !nodePlacement.Ready {
+				attemptErr = errors.Join(attemptErr, err)
+				allNodesServing = false
+			}
+		}
 		cancel()
-		if nodesHealthy && componentsHealthy && componentCount == 2 && placementsReady {
+		if allNodesServing && componentsHealthy && componentCount == 2 && placementsReady {
 			return nil
 		}
 		lastErr = errors.Join(attemptErr, clusterErr, placementErr)

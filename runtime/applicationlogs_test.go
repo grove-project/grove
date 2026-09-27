@@ -157,3 +157,44 @@ func containsApplicationLogLine(lines []string, fragment string) bool {
 	}
 	return false
 }
+
+func TestApplicationLogsShowLeaderElection(t *testing.T) {
+	output := strings.Join([]string{
+		`{"event":"cluster_forming","node_id":"node-2","detail":"1 of 3 nodes joined; not serving"}`,
+		`{"event":"cluster_formed","node_id":"node-2","detail":"3 of 3 nodes joined"}`,
+		`{"event":"metadata_voters","node_id":"node-2","voters":3,"detail":"changed from 4"}`,
+		`{"event":"metadata_leader_lost","node_id":"node-2","leader":"node-1","voters":3}`,
+		`{"event":"metadata_leader_elected","node_id":"node-2","leader":"node-3","voters":3,"detail":"re-elected after leader loss"}`,
+	}, "\n")
+	view := buildApplicationLogsView(ClusterStatus{Health: "healthy"}, nil, []applicationNodeLogs{{NodeID: "node-2", Output: output}}, "", nil)
+	joined := strings.Join(view.Cluster, "\n")
+	for _, want := range []string{
+		"node=node-2 event=cluster_forming detail=1 of 3 nodes joined; not serving",
+		"node=node-2 event=cluster_formed detail=3 of 3 nodes joined",
+		"node=node-2 event=metadata_voters voters=3 detail=changed from 4",
+		"node=node-2 event=metadata_leader_lost leader=node-1 voters=3",
+		"node=node-2 event=metadata_leader_elected leader=node-3 voters=3 detail=re-elected after leader loss",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("cluster log lacks %q:\n%s", want, joined)
+		}
+	}
+	// The latest leader event is an election, so no "leader lost" cause remains.
+	for _, cause := range view.Causes {
+		if strings.Contains(cause, "metadata leader lost") {
+			t.Errorf("unexpected cause after re-election: %q", cause)
+		}
+	}
+
+	lost := buildApplicationLogsView(ClusterStatus{Health: "degraded"}, nil, []applicationNodeLogs{{
+		NodeID: "node-2",
+		Output: `{"event":"metadata_leader_lost","node_id":"node-2","leader":"node-1"}`,
+	}}, "", nil)
+	found := false
+	for _, cause := range lost.Causes {
+		found = found || strings.Contains(cause, "metadata leader lost")
+	}
+	if !found {
+		t.Errorf("causes = %v; want a metadata leader lost cause", lost.Causes)
+	}
+}

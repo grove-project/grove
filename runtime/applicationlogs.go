@@ -188,8 +188,37 @@ func placementComponentKey(nodeID string, serviceID grove.ServiceID) string {
 	return nodeID + ":" + strconv.FormatUint(uint64(serviceID), 10)
 }
 
+// controlPlaneEventLine renders a lifecycle event, including leader election
+// and cluster formation details, for the cluster log view.
+func controlPlaneEventLine(nodeID string, event lifecycleEvent) string {
+	line := fmt.Sprintf("node=%s event=%s", nodeID, event.Event)
+	if event.Leader != "" {
+		line += " leader=" + event.Leader
+	}
+	if event.Voters != 0 {
+		line += " voters=" + strconv.Itoa(event.Voters)
+	}
+	if event.Detail != "" {
+		line += " detail=" + event.Detail
+	}
+	return line
+}
+
 func classifyApplicationNodeLogs(node applicationNodeLogs, view *applicationLogsView) {
 	nodeID := node.NodeID
+	leaderLost := false
+	defer func() {
+		if !leaderLost {
+			return
+		}
+		cause := "metadata leader lost (observed by " + nodeID + "); placement and cluster operations fail fast until one is elected"
+		for _, existing := range view.Causes {
+			if existing == cause {
+				return
+			}
+		}
+		view.Causes = append(view.Causes, cause)
+	}()
 	for _, rawLine := range strings.Split(node.Output, "\n") {
 		line := strings.TrimSpace(rawLine)
 		if line == "" {
@@ -200,7 +229,10 @@ func classifyApplicationNodeLogs(node applicationNodeLogs, view *applicationLogs
 			if event.NodeID != "" {
 				nodeID = event.NodeID
 			}
-			view.Cluster = append(view.Cluster, fmt.Sprintf("node=%s event=%s", nodeID, event.Event))
+			view.Cluster = append(view.Cluster, controlPlaneEventLine(nodeID, event))
+			if strings.HasPrefix(event.Event, "metadata_leader_") {
+				leaderLost = event.Event == "metadata_leader_lost"
+			}
 			if event.SystemNATSURL != "" {
 				view.SystemNATS = append(view.SystemNATS, fmt.Sprintf(
 					"node=%s client=%s route=%s",

@@ -100,17 +100,40 @@ type ComponentContext struct {
 	Artifact      ArtifactStatus
 	ReadStatus    StatusReader
 	ListenAddress string
-	Options       []string
+	// NodeID is the logical Grovlet node hosting this component, supplied by
+	// the runtime so components never need per-node options.
+	NodeID string
+	// Options are deprecated per-node component options that only the
+	// deprecated Scenario placement lists supply; use NodeID instead.
+	Options []string
 }
 
 // Scenario contains optional application-owned probes used by the bundled
 // lifecycle demonstration. The runtime stays unaware of request/response
 // types and business success semantics.
+//
+// The runtime, not the application, decides which components a node hosts:
+// every node that starts or joins, whatever its ID, hosts every registered
+// component, and an HTTP ingress component is hosted by a node when nothing
+// else serves its address. Declaring Components is the only placement input.
+//
+// Migration: delete StartupComponents, InitialPlacements, DebugPlacements,
+// NodeCount, DebugNodeCount and ScenarioPlacement.Options from the
+// Definition, and read the node identity from ComponentContext.NodeID instead
+// of a per-node option. A Definition without them is valid; Start and Join
+// ignore them if set.
 type Scenario struct {
-	NodeCount         int
-	DebugNodeCount    int
+	// Deprecated: the runtime chooses the node count. Start, Join and
+	// readiness ignore it; only the fixed-topology scripted demos read it.
+	NodeCount int
+	// Deprecated: see NodeCount.
+	DebugNodeCount int
+	// Deprecated: the runtime places components. See Scenario.
 	InitialPlacements []ScenarioPlacement
+	// Deprecated: ignored by Start and Join, which host every component on
+	// every node regardless of ID.
 	StartupComponents []ScenarioPlacement
+	// Deprecated: see InitialPlacements.
 	DebugPlacements   []ScenarioPlacement
 	RecoveryServiceID grove.ServiceID
 	Probe             func(context.Context, string, string) (any, error)
@@ -120,11 +143,14 @@ type Scenario struct {
 }
 
 // ScenarioPlacement gives a deterministic demo node to an application-owned
-// service. It is demonstration composition, not a general scheduler policy.
+// service.
+//
+// Deprecated: applications do not declare placement; the runtime decides.
 type ScenarioPlacement struct {
 	ServiceID grove.ServiceID
 	NodeID    string
-	Options   []string
+	// Deprecated: read ComponentContext.NodeID instead.
+	Options []string
 }
 
 var activeApplication Definition
@@ -187,19 +213,8 @@ func validateDefinition(definition Definition) error {
 		}
 	}
 	if definition.Scenario != nil {
-		if definition.Scenario.NodeCount < 1 || definition.Scenario.DebugNodeCount < 1 {
-			return fmt.Errorf("%w: scenario node counts must be positive", ErrApplicationDefinitionInvalid)
-		}
-		if len(definition.Scenario.InitialPlacements) == 0 || len(definition.Scenario.StartupComponents) == 0 || len(definition.Scenario.DebugPlacements) == 0 {
-			return fmt.Errorf("%w: scenario placements are required", ErrApplicationDefinitionInvalid)
-		}
-		if definition.Scenario.RecoveryServiceID == 0 || definition.Scenario.Probe == nil || definition.Scenario.ProbeHealthy == nil || definition.Scenario.InvalidConfig == nil {
+		if definition.Scenario.Probe == nil || definition.Scenario.ProbeHealthy == nil || definition.Scenario.InvalidConfig == nil {
 			return fmt.Errorf("%w: scenario hooks are required", ErrApplicationDefinitionInvalid)
-		}
-		for _, placement := range definition.Scenario.StartupComponents {
-			if _, ok := serviceIDs[placement.ServiceID]; !ok || placement.NodeID == "" {
-				return fmt.Errorf("%w: startup component is invalid", ErrApplicationDefinitionInvalid)
-			}
 		}
 	}
 	return nil
