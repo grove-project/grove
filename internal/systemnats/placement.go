@@ -23,10 +23,13 @@ const (
 	// authoritative Grove service placement.
 	PlacementReplicas = 3
 
-	placementKeyPrefix       = "services."
-	placementSubjectRoot     = "_GROVE.system.placement."
-	placementRetryDelay      = 50 * time.Millisecond
-	placementRefreshInterval = 250 * time.Millisecond
+	placementKeyPrefix   = "services."
+	placementSubjectRoot = "_GROVE.system.placement."
+	placementRetryDelay  = 50 * time.Millisecond
+	// placementRefreshFailuresUntilUnavailable consecutive failed refreshes
+	// (about one second) mean the control plane has lost its leader.
+	placementRefreshFailuresUntilUnavailable = 4
+	placementRefreshInterval                 = 250 * time.Millisecond
 )
 
 var (
@@ -77,6 +80,15 @@ type Placement struct {
 	records []PlacementRecord
 	mu      sync.RWMutex
 	view    PlacementView
+	gate    func() error
+}
+
+// SetGate makes the view report not-ready with the gate's error while the
+// gate fails, for example while the cluster has too few nodes to serve.
+func (p *Placement) SetGate(gate func() error) {
+	p.mu.Lock()
+	p.gate = gate
+	p.mu.Unlock()
 }
 
 // NewPlacement creates a placement observer and any explicit assignments it
@@ -168,6 +180,7 @@ func (p *Placement) watch(ctx context.Context, transport *Transport) error {
 
 	records := make(map[grove.ServiceID]PlacementRecord)
 	initialized := false
+	refreshFailures := 0
 	for {
 		select {
 		case entry, ok := <-watcher.Updates():
@@ -203,9 +216,17 @@ func (p *Placement) watch(ctx context.Context, transport *Transport) error {
 			refreshed, err := refreshPlacementRecords(refreshCtx, kv, records)
 			cancel()
 			if err != nil {
-				p.setRefreshError(records, err)
+				refreshFailures++
+				if refreshFailures >= placementRefreshFailuresUntilUnavailable {
+					// The control plane has had no leader for about a second:
+					// stop serving a view nobody can confirm or repair.
+					p.setUnavailable(fmt.Errorf("%w: %w", ErrControlPlaneUnavailable, err))
+				} else {
+					p.setRefreshError(records, err)
+				}
 				continue
 			}
+			refreshFailures = 0
 			records = refreshed
 			p.setReady(records)
 		case <-ctx.Done():
@@ -275,11 +296,18 @@ func (p *Placement) Snapshot() PlacementView {
 	defer p.mu.RUnlock()
 	placements := make([]PlacementRecord, len(p.view.Placements))
 	copy(placements, p.view.Placements)
-	return PlacementView{
+	view := PlacementView{
 		Ready:      p.view.Ready,
 		Placements: placements,
 		Error:      p.view.Error,
 	}
+	if p.gate != nil {
+		if err := p.gate(); err != nil {
+			view.Ready = false
+			view.Error = err.Error()
+		}
+	}
+	return view
 }
 
 // Lookup returns the authoritative destination for serviceID from the current

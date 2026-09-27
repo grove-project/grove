@@ -567,6 +567,16 @@ func (v *applicationTUI) activateAction(action console.Action, args []string) {
 				return []string{"--config", strings.TrimSpace(value)}
 			})
 			return
+		case "cluster.start":
+			address, err := defaultIngressAddress()
+			if err != nil {
+				v.setFlash(tcell.ColorOrangeRed, err.Error())
+				return
+			}
+			v.showArgumentDialog(action, "Start new cluster", "Ingress address", address, func(value string) []string {
+				return []string{"--ingress", value}
+			})
+			return
 		case "debug.attach":
 			v.showArgumentDialog(action, "Attach debugger", "Arguments", "orders --listen 127.0.0.1:40000", strings.Fields)
 			return

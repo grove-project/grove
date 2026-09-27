@@ -47,6 +47,12 @@ const (
 // HealthConfig controls ephemeral heartbeat publication and failure
 // observation.
 type HealthConfig struct {
+	// MinNodes is the number of registered logical nodes a cluster needs
+	// before it serves. Below it the view reports ErrClusterForming.
+	MinNodes int
+	// Settled, when set, is asked with the registered node count whether the
+	// control plane is ready to serve; an error keeps the view not-ready.
+	Settled func(nodes int) error
 	// HeartbeatInterval is the period between local heartbeat messages.
 	HeartbeatInterval time.Duration
 	// UnavailableAfter is the maximum receiver-side age considered healthy.
@@ -223,7 +229,17 @@ func (h *Health) Snapshot() ClusterView {
 	defer h.mu.RUnlock()
 	nodes := make([]ClusterNode, len(h.view.Nodes))
 	copy(nodes, h.view.Nodes)
-	return ClusterView{Ready: h.view.Ready, Nodes: nodes, Error: h.view.Error}
+	view := ClusterView{Ready: h.view.Ready, Nodes: nodes, Error: h.view.Error}
+	if view.Ready && len(nodes) < h.config.MinNodes {
+		view.Ready = false
+		view.Error = ClusterFormingError(len(nodes), h.config.MinNodes).Error()
+	} else if view.Ready && h.config.Settled != nil {
+		if err := h.config.Settled(len(nodes)); err != nil {
+			view.Ready = false
+			view.Error = err.Error()
+		}
+	}
+	return view
 }
 
 // ClusterSubject returns the System NATS query subject for nodeID's local

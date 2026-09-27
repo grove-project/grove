@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"strconv"
@@ -74,8 +75,9 @@ func (c *applicationController) applicationStartAvailable() bool {
 }
 
 func (c *applicationController) startDiscoveredApplicationCluster(ctx context.Context, args []string) (any, error) {
-	if len(args) != 0 {
-		return nil, errConsoleArguments
+	webAddress, err := parseStartArguments(args)
+	if err != nil {
+		return nil, err
 	}
 	c.operationMu.Lock()
 	defer c.operationMu.Unlock()
@@ -92,11 +94,11 @@ func (c *applicationController) startDiscoveredApplicationCluster(ctx context.Co
 	} else if exists {
 		return nil, errors.New("a compatible application cluster was discovered; start is no longer available")
 	}
-	webPorts, err := reserveApplicationPorts(1)
-	if err != nil {
-		return nil, fmt.Errorf("reserve bootstrap Web port: %w", err)
+	if webAddress == "" {
+		if webAddress, err = defaultIngressAddress(); err != nil {
+			return nil, err
+		}
 	}
-	webAddress := "127.0.0.1:" + strconv.Itoa(webPorts[0])
 	node, ready, err := c.startDiscoveredApplicationNode(ctx, "node-1", "", webAddress)
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap one-node application cluster: %w", err)
@@ -128,6 +130,29 @@ func (c *applicationController) startDiscoveredApplicationCluster(ctx context.Co
 	c.lastEvent = "bootstrapped " + activeApplication.Name + " cluster with node-1"
 	c.mu.Unlock()
 	return applicationJoinResult{State: "started", NodeID: "node-1"}, nil
+}
+
+// defaultIngressAddress is the ingress address offered when the operator does
+// not choose one: a free loopback port.
+func defaultIngressAddress() (string, error) {
+	ports, err := reserveApplicationPorts(1)
+	if err != nil {
+		return "", fmt.Errorf("reserve ingress port: %w", err)
+	}
+	return "127.0.0.1:" + strconv.Itoa(ports[0]), nil
+}
+
+// parseStartArguments reads the optional ingress address chosen for the new
+// cluster; without one the runtime picks a default.
+func parseStartArguments(args []string) (string, error) {
+	flags := flag.NewFlagSet("cluster.start", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	address := ""
+	flags.StringVar(&address, "ingress", "", "cluster ingress address")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return "", errConsoleArguments
+	}
+	return address, nil
 }
 
 func (c *applicationController) applicationJoinAvailable() bool {
@@ -231,21 +256,10 @@ func (c *applicationController) startDiscoveredApplicationNode(
 	if seedRoute != "" {
 		args = append(args, "--system-nats-seed", seedRoute)
 	}
-	for _, placement := range activeApplication.scenarioStartupComponents() {
-		if placement.NodeID != nodeID {
-			continue
-		}
-		component, ok := activeApplication.componentByID(placement.ServiceID)
-		if !ok {
-			return nil, lifecycleEvent{}, fmt.Errorf("startup component %d is not defined", placement.ServiceID)
-		}
-		args = append(args, "--component", component.Kind)
-		for _, option := range placement.Options {
-			args = append(args, "--component-option", component.Kind+"="+option)
-		}
-		if component.HTTPHandler != nil {
-			args = append(args, "--component-listen", component.Kind+"="+webAddress)
-		}
+	// The node hosts whatever the runtime decides; only the founding node is
+	// told the ingress address, which it records for the rest of the cluster.
+	if seedRoute == "" {
+		args = append(args, "--ingress-address", webAddress)
 	}
 	node, err := grovetest.StartNode(c.binaryPath, args...)
 	if err != nil {

@@ -51,3 +51,33 @@ func TestSelectRecoveryWaitsForPriorHealth(t *testing.T) {
 		t.Error("selection after observed failure = false; want true")
 	}
 }
+
+// Recovery must be able to start components after a node loss even while the
+// control plane has no leader: selection uses the last-known placement records.
+func TestSelectRecoveriesUsesLastKnownPlacementWithoutLeader(t *testing.T) {
+	cluster := systemnats.ClusterView{
+		Ready: true,
+		Nodes: []systemnats.ClusterNode{
+			{NodeID: "node-a", Health: systemnats.HealthUnavailable, LastSeen: "before"},
+			{NodeID: "node-b", Health: systemnats.HealthHealthy, LastSeen: "now"},
+			{NodeID: "node-c", Health: systemnats.HealthHealthy, LastSeen: "now"},
+		},
+	}
+	lost1 := systemnats.PlacementRecord{ServiceID: 1, NodeID: "node-a", InvocationSubject: "orders.node-a", ArtifactDigest: recoveryArtifactDigest}
+	lost2 := systemnats.PlacementRecord{ServiceID: 5, NodeID: "node-a", InvocationSubject: "web.node-a", ArtifactDigest: recoveryArtifactDigest}
+	kept := systemnats.PlacementRecord{ServiceID: 2, NodeID: "node-c", InvocationSubject: "inventory.node-c", ArtifactDigest: recoveryArtifactDigest}
+	// The placement view lost its leader: not ready, records are last-known.
+	placement := systemnats.PlacementView{Ready: false, Placements: []systemnats.PlacementRecord{lost1, kept, lost2}}
+
+	got := selectRecoveries("node-b", cluster, placement)
+	if len(got) != 2 || got[0] != lost1 || got[1] != lost2 {
+		t.Fatalf("selectRecoveries(node-b) = %#v; want both records of lost node-a", got)
+	}
+	if got := selectRecoveries("node-c", cluster, placement); len(got) != 0 {
+		t.Errorf("non-coordinator selection = %#v; want none", got)
+	}
+	cluster.Ready = false
+	if got := selectRecoveries("node-b", cluster, placement); len(got) != 0 {
+		t.Errorf("selection before membership is ready = %#v; want none", got)
+	}
+}

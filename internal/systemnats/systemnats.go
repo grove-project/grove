@@ -66,6 +66,33 @@ func (e *Error) Unwrap() error {
 	return e.Err
 }
 
+// MinClusterNodes is the number of logical nodes a Grove cluster needs before
+// it serves. With one control-plane voter per node, three nodes keep a quorum
+// (and so a metadata leader) through the loss of any single node.
+const MinClusterNodes = 3
+
+// ErrClusterForming is returned while the cluster has fewer than
+// MinClusterNodes registered nodes.
+var ErrClusterForming = errors.New("grove cluster is forming")
+
+// ClusterFormingError describes a cluster that has joined nodes of needed.
+func ClusterFormingError(joined, needed int) error {
+	return fmt.Errorf("%w: %d of %d nodes joined", ErrClusterForming, joined, needed)
+}
+
+// ErrControlPlaneUnavailable is returned when the replicated control state has
+// no leader, so placement and cluster operations cannot be confirmed.
+var ErrControlPlaneUnavailable = errors.New("grove control plane has no leader")
+
+// ErrClusterSettling is returned while the bootstrap metadata witness has not
+// been released yet, so the control plane still has more voters than nodes.
+var ErrClusterSettling = errors.New("grove cluster is settling")
+
+// ClusterSettlingError describes a control plane with more voters than nodes.
+func ClusterSettlingError(voters, nodes int) error {
+	return fmt.Errorf("%w: %d control-plane voters for %d nodes (bootstrap witness not yet released)", ErrClusterSettling, voters, nodes)
+}
+
 // Server is an embedded System NATS server.
 type Server struct {
 	server       *server.Server
@@ -540,6 +567,58 @@ func (s *Server) PrepareRetire(ctx context.Context) error {
 	shutdownServer(s.peer)
 	s.peerPrepared = true
 	return nil
+}
+
+// MetadataState reports the JetStream metadata group as this server sees it:
+// the leader's server name (empty while there is none) and the known voters.
+func (s *Server) MetadataState() (leader string, voters int) {
+	info, err := s.server.Jsz(&server.JSzOptions{})
+	if err != nil || info == nil || info.Meta == nil {
+		return "", 0
+	}
+	return info.Meta.Leader, info.Meta.Size
+}
+
+// ControlStateSettled reports whether every replicated control bucket has its
+// full replica set (one copy per logical node up to MembershipReplicas), a
+// leader, and current replicas. The witness must not be released before this,
+// or the release races the resize that places replicas on the other nodes.
+func (s *Server) ControlStateSettled(ctx context.Context) bool {
+	connection, err := nats.Connect(s.URL(), nats.Timeout(operationTimeout(ctx)))
+	if err != nil {
+		return false
+	}
+	defer connection.Close()
+	js, err := jetstream.New(connection)
+	if err != nil {
+		return false
+	}
+	for _, bucket := range controlStateBuckets {
+		operationCtx, cancel := context.WithTimeout(ctx, controlStateOperationTimeout)
+		stream, err := js.Stream(operationCtx, "KV_"+bucket)
+		if optionalControlStream(bucket, err) {
+			cancel()
+			continue
+		}
+		if err != nil {
+			cancel()
+			return false
+		}
+		info, err := stream.Info(operationCtx)
+		cancel()
+		if err != nil || info.Config.Replicas != MembershipReplicas || !controlStreamCurrent(info.Cluster) ||
+			len(info.Cluster.Replicas) != MembershipReplicas-1 {
+			return false
+		}
+	}
+	return true
+}
+
+// ReleaseWitness retires the bootstrap metadata witness once the cluster has
+// enough logical nodes that every node is itself one voter. Until then the
+// witness only exists so the first node can form a metadata group.
+func (s *Server) ReleaseWitness(ctx context.Context) error {
+	return s.PrepareRetire(ctx)
 }
 
 // Retire removes this logical node's primary from the JetStream metadata group

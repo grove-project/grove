@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"slices"
 	"sort"
 	"strings"
@@ -24,6 +25,7 @@ const (
 	// authoritative deployment state.
 	DeploymentReplicas = 3
 
+	deploymentIngressKey          = "ingress"
 	deploymentArtifactKeyPrefix   = "artifacts."
 	deploymentRolloutKeyPrefix    = "rollouts."
 	deploymentSubjectRoot         = "_GROVE.system.deployments."
@@ -43,6 +45,11 @@ var (
 	// ErrRolloutInvalid is returned for incomplete or inconsistent rollout
 	// state.
 	ErrRolloutInvalid = errors.New("grove rollout is invalid")
+	// ErrIngressInvalid is returned for an ingress address that is not host:port.
+	ErrIngressInvalid = errors.New("grove ingress address is invalid")
+	// ErrIngressChanged is returned when the cluster already has a different
+	// ingress address; the first claim wins for the life of the cluster.
+	ErrIngressChanged = errors.New("grove ingress address changed")
 	// ErrRolloutGeneration is returned when a write does not create the next
 	// rollout generation.
 	ErrRolloutGeneration = errors.New("grove rollout generation is not next")
@@ -134,7 +141,10 @@ type DeploymentView struct {
 	Ready     bool                 `json:"ready"`
 	Artifacts []DeploymentArtifact `json:"artifacts"`
 	Rollouts  []Rollout            `json:"rollouts"`
-	Error     string               `json:"error,omitempty"`
+	// Ingress is the cluster-wide address of HTTP ingress components, chosen
+	// when the first node starts; empty until then.
+	Ingress string `json:"ingress,omitempty"`
+	Error   string `json:"error,omitempty"`
 }
 
 // Deployments maintains one watcher-derived view of authoritative deployment
@@ -209,6 +219,7 @@ func (d *Deployments) watch(ctx context.Context, transport *Transport) error {
 	defer watcher.Stop()
 	artifacts := make(map[string]DeploymentArtifact)
 	rollouts := make(map[string]Rollout)
+	ingress := ""
 	initialized := false
 	for {
 		select {
@@ -218,14 +229,24 @@ func (d *Deployments) watch(ctx context.Context, transport *Transport) error {
 			}
 			if entry == nil {
 				initialized = true
-				d.setReady(artifacts, rollouts)
+				d.setReady(artifacts, rollouts, ingress)
+				continue
+			}
+			if entry.Key() == deploymentIngressKey {
+				ingress = ""
+				if entry.Operation() == jetstream.KeyValuePut {
+					ingress = string(entry.Value())
+				}
+				if initialized {
+					d.setReady(artifacts, rollouts, ingress)
+				}
 				continue
 			}
 			if err := applyDeploymentEntry(entry, artifacts, rollouts); err != nil {
 				return err
 			}
 			if initialized {
-				d.setReady(artifacts, rollouts)
+				d.setReady(artifacts, rollouts, ingress)
 			}
 		case <-ctx.Done():
 			return ctx.Err()
@@ -302,6 +323,31 @@ func (d *Deployments) PutArtifact(ctx context.Context, transport *Transport, art
 	}
 	if observed != artifact {
 		return &Error{Operation: "compare deployment artifact", Err: ErrDeploymentArtifactChanged}
+	}
+	return nil
+}
+
+// PutIngress records the cluster-wide ingress address, or accepts an identical
+// retry. The first address wins; a different one is ErrIngressChanged.
+func (d *Deployments) PutIngress(ctx context.Context, transport *Transport, address string) error {
+	if host, port, err := net.SplitHostPort(address); err != nil || host == "" || port == "" {
+		return &Error{Operation: "validate ingress address", Err: ErrIngressInvalid}
+	}
+	kv, err := deploymentKV(ctx, transport)
+	if err != nil {
+		return &Error{Operation: "write ingress address", Err: err}
+	}
+	if _, err := kv.Create(ctx, deploymentIngressKey, []byte(address)); err == nil {
+		return nil
+	} else if !errors.Is(err, jetstream.ErrKeyExists) {
+		return &Error{Operation: "write ingress address", Err: err}
+	}
+	entry, err := kv.Get(ctx, deploymentIngressKey)
+	if err != nil {
+		return &Error{Operation: "read ingress address", Err: err}
+	}
+	if string(entry.Value()) != address {
+		return &Error{Operation: "compare ingress address", Err: ErrIngressChanged}
 	}
 	return nil
 }
@@ -574,12 +620,13 @@ func (d *Deployments) Snapshot() DeploymentView {
 		rollouts[i].Nodes = append([]RolloutNodeProgress(nil), rollout.Nodes...)
 		rollouts[i].Failure = cloneRolloutFailure(rollout.Failure)
 	}
-	return DeploymentView{Ready: d.view.Ready, Artifacts: artifacts, Rollouts: rollouts, Error: d.view.Error}
+	return DeploymentView{Ready: d.view.Ready, Artifacts: artifacts, Rollouts: rollouts, Ingress: d.view.Ingress, Error: d.view.Error}
 }
 
-func (d *Deployments) setReady(artifacts map[string]DeploymentArtifact, rollouts map[string]Rollout) {
+func (d *Deployments) setReady(artifacts map[string]DeploymentArtifact, rollouts map[string]Rollout, ingress string) {
 	view := DeploymentView{
 		Ready:     true,
+		Ingress:   ingress,
 		Artifacts: make([]DeploymentArtifact, 0, len(artifacts)),
 		Rollouts:  make([]Rollout, 0, len(rollouts)),
 	}

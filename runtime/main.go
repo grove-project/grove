@@ -17,6 +17,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -42,21 +44,31 @@ var (
 	errNodeIdentityPair              = errors.New("node ID and advertised endpoint must be configured together")
 	errNodeIDInvalid                 = errors.New("node ID is invalid")
 	errAdvertiseInvalid              = errors.New("advertised endpoint is invalid")
+	errClusterTooSmallToLeave        = errors.New("node cannot leave")
 )
 
 type config struct {
-	runtimeDir                string
-	systemNATSListen          string
-	systemNATSRouteListen     string
-	systemNATSSeed            string
-	systemNATSMembership      bool
-	systemNATSRecovery        bool
-	systemNATSRetireOnStop    bool
-	systemNATSURL             string
-	systemNATSSubject         string
-	componentKinds            stringValues
-	componentListeners        stringValues
-	componentOptions          stringValues
+	runtimeDir             string
+	systemNATSListen       string
+	systemNATSRouteListen  string
+	systemNATSSeed         string
+	systemNATSMembership   bool
+	systemNATSRecovery     bool
+	systemNATSRetireOnStop bool
+	systemNATSURL          string
+	systemNATSSubject      string
+	componentKinds         stringValues
+	componentListeners     stringValues
+	componentOptions       stringValues
+	// ingressAddress is set only on the node that founds a cluster. It is the
+	// cluster's ingress address, recorded in control state for later nodes.
+	ingressAddress string
+	// hostAll is set on the founding node, which hosts every component.
+	hostAll bool
+	// adoptCluster is set on a clustered node that names no component: if the
+	// cluster was founded with an ingress address, the node hosts every
+	// component the application defines; otherwise it hosts none.
+	adoptCluster              bool
 	routeSubject              string
 	applicationConfiguration  Configuration
 	applicationConfigDigest   string
@@ -65,6 +77,19 @@ type config struct {
 	delvePath                 string
 	nodeID                    string
 	advertisedEndpoint        string
+	// emit writes a lifecycle event to the process's event stream.
+	emit func(lifecycleEvent)
+}
+
+// newEventEmitter serializes lifecycle events written from several goroutines.
+func newEventEmitter(stdout io.Writer) (func(lifecycleEvent), *json.Encoder, *sync.Mutex) {
+	var mu sync.Mutex
+	encoder := json.NewEncoder(stdout)
+	return func(event lifecycleEvent) {
+		mu.Lock()
+		defer mu.Unlock()
+		_ = encoder.Encode(event)
+	}, encoder, &mu
 }
 
 type lifecycleEvent struct {
@@ -78,6 +103,11 @@ type lifecycleEvent struct {
 	ArtifactDigest     string `json:"artifact_digest,omitempty"`
 	ClusterName        string `json:"cluster_name,omitempty"`
 	NodeZone           string `json:"node_zone,omitempty"`
+	// Leader, Voters and Detail describe control-plane events such as
+	// metadata leader elections and cluster formation.
+	Leader string `json:"leader,omitempty"`
+	Voters int    `json:"voters,omitempty"`
+	Detail string `json:"detail,omitempty"`
 }
 
 type runtimeDirError struct {
@@ -168,12 +198,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if err := prepareRuntimeDir(cfg.runtimeDir); err != nil {
 		return err
 	}
+	emit, encoder, encoderMu := newEventEmitter(stdout)
+	cfg.emit = emit
 	systemRuntime, err := startSystemNATS(ctx, cfg)
 	if err != nil {
 		return err
 	}
 
-	encoder := json.NewEncoder(stdout)
 	ready := lifecycleEvent{
 		Event:              "ready",
 		NodeID:             cfg.nodeID,
@@ -188,7 +219,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		ready.ClusterName = configuration.Facts["cluster.name"]
 		ready.NodeZone = configuration.Facts["node.zone"]
 	}
-	if err := encoder.Encode(ready); err != nil {
+	encoderMu.Lock()
+	err = encoder.Encode(ready)
+	encoderMu.Unlock()
+	if err != nil {
 		systemRuntime.stop()
 		return fmt.Errorf("encode ready event: %w", err)
 	}
@@ -202,7 +236,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	systemRuntime.stop()
 
-	if err := encoder.Encode(lifecycleEvent{Event: "stopped"}); err != nil {
+	encoderMu.Lock()
+	err = encoder.Encode(lifecycleEvent{Event: "stopped"})
+	encoderMu.Unlock()
+	if err != nil {
 		return fmt.Errorf("encode stopped event: %w", err)
 	}
 	return leaveErr
@@ -224,6 +261,7 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.Var(&cfg.componentKinds, "component", "application component kind to host (repeatable)")
 	flags.Var(&cfg.componentListeners, "component-listen", "component HTTP listener as kind=address (repeatable)")
 	flags.Var(&cfg.componentOptions, "component-option", "application-owned worker option as kind=value (repeatable)")
+	flags.StringVar(&cfg.ingressAddress, "ingress-address", "", "cluster ingress address recorded by the node that founds the cluster")
 	flags.StringVar(&cfg.routeSubject, "route-subject", "", "explicit Grove invocation subject used by directly hosted components")
 	flags.StringVar(&cfg.delvePath, "delve-path", "", "path to the Delve executable used for worker debugging")
 	flags.StringVar(&cfg.nodeID, "node-id", "", "stable process-lifetime Grove node ID")
@@ -273,6 +311,14 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	if len(cfg.componentKinds) != 0 && !cfg.systemNATSMembership && cfg.routeSubject == "" && len(cfg.componentKinds) > 1 {
 		return config{}, errApplicationPlacementCluster
 	}
+	if cfg.ingressAddress != "" && !cfg.systemNATSRecovery {
+		return config{}, errSystemNATSRecoveryCluster
+	}
+	if cfg.ingressAddress != "" {
+		cfg = hostEveryComponent(cfg)
+	} else if len(cfg.componentKinds) == 0 && cfg.systemNATSRecovery && cfg.routeSubject == "" {
+		cfg.adoptCluster = true
+	}
 	if err := validateConfiguredComponents(cfg); err != nil {
 		return config{}, err
 	}
@@ -292,6 +338,71 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 		return config{}, errSystemNATSClusterIdentity
 	}
 	return cfg, nil
+}
+
+// hostEveryComponent applies the runtime's placement default: a clustered
+// node hosts every component the application defines. Ingress is hosted by
+// the node founding the cluster and moves to a survivor through recovery.
+func hostEveryComponent(cfg config) config {
+	cfg.hostAll = true
+	for _, component := range activeApplication.Components {
+		if component.HTTPHandler == nil {
+			cfg.componentKinds = append(cfg.componentKinds, component.Kind)
+		} else if cfg.ingressAddress != "" {
+			cfg.componentKinds = append(cfg.componentKinds, component.Kind)
+			cfg.componentListeners = append(cfg.componentListeners, component.Kind+"="+cfg.ingressAddress)
+		}
+	}
+	return cfg
+}
+
+// resolveIngress makes the cluster's ingress address known to this node. The
+// founding node records it in control state; every other node reads it, so
+// recovery can move ingress onto any survivor. A node that names no component
+// joins a cluster founded this way by hosting every non-ingress component.
+func resolveIngress(ctx context.Context, cfg config, transport *systemnats.Transport, deployments *systemnats.Deployments) (config, error) {
+	if !cfg.hostAll && !cfg.adoptCluster {
+		return cfg, nil
+	}
+	hasIngress := false
+	for _, component := range activeApplication.Components {
+		hasIngress = hasIngress || component.HTTPHandler != nil
+	}
+	if !hasIngress {
+		return cfg, nil
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	var lastErr error
+	for {
+		view := deployments.Snapshot()
+		if view.Ready && cfg.hostAll && view.Ingress != cfg.ingressAddress {
+			lastErr = deployments.PutIngress(waitCtx, transport, cfg.ingressAddress)
+			view = deployments.Snapshot()
+		}
+		if view.Ready && (view.Ingress != "" || cfg.adoptCluster) {
+			if view.Ingress == "" {
+				return cfg, nil // not a runtime-placed cluster: host nothing
+			}
+			for _, component := range activeApplication.Components {
+				if component.HTTPHandler != nil {
+					if configuredValue(cfg.componentListeners, component.Kind) == "" {
+						cfg.componentListeners = append(cfg.componentListeners, component.Kind+"="+view.Ingress)
+					}
+				} else if cfg.adoptCluster {
+					cfg.componentKinds = append(cfg.componentKinds, component.Kind)
+				}
+			}
+			return cfg, nil
+		}
+		select {
+		case <-ticker.C:
+		case <-waitCtx.Done():
+			return cfg, fmt.Errorf("wait for cluster ingress address: %w", errors.Join(lastErr, waitCtx.Err()))
+		}
+	}
 }
 
 func validateConfiguredComponents(cfg config) error {
@@ -383,6 +494,13 @@ type systemNATSRuntime struct {
 	handlers          *systemnats.HandlerPlacements
 	handlersCancel    context.CancelFunc
 	handlersDone      chan struct{}
+	witnessCancel     context.CancelFunc
+	witnessDone       chan struct{}
+	eventsCancel      context.CancelFunc
+	eventsDone        chan struct{}
+	// metadataVoters is the JetStream metadata group size last observed by
+	// this node's server; zero while unknown.
+	metadataVoters atomic.Int32
 }
 
 func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error) {
@@ -462,9 +580,19 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 			return nil, err
 		}
 		runtime.startDeployments(ctx, deployments)
+		if cfg, err = resolveIngress(ctx, cfg, transport, deployments); err != nil {
+			runtime.stop()
+			return nil, err
+		}
 
 		desired := systemnats.NewDesired()
 		placementRecords := applicationPlacements(cfg)
+		if cfg.adoptCluster {
+			// A joining node hosts the components but does not claim their
+			// placement: the founder's records stay authoritative and recovery
+			// moves them when their node is lost.
+			placementRecords = nil
+		}
 		initialServiceIDs := applicationPlacedServiceIDs(cfg)
 		if restoreControlState {
 			if err := transport.ServeDesired(ctx, cfg.nodeID, desired); err != nil {
@@ -499,16 +627,35 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 			runtime.startDesired(ctx, desired)
 		}
 
-		health, err := systemnats.NewHealth(cfg.nodeID, membership, systemnats.HealthConfig{})
+		settled := func(nodes int) error {
+			if voters := int(runtime.metadataVoters.Load()); voters > nodes {
+				return systemnats.ClusterSettlingError(voters, nodes)
+			}
+			return nil
+		}
+		health, err := systemnats.NewHealth(cfg.nodeID, membership, systemnats.HealthConfig{
+			MinNodes: systemnats.MinClusterNodes,
+			Settled:  settled,
+		})
 		if err != nil {
 			runtime.stop()
 			return nil, err
 		}
+		// The cluster serves placement only once it has enough nodes.
+		placement.SetGate(func() error {
+			joined := len(health.Snapshot().Nodes)
+			if joined < systemnats.MinClusterNodes {
+				return systemnats.ClusterFormingError(joined, systemnats.MinClusterNodes)
+			}
+			return settled(joined)
+		})
 		if err := transport.ServeClusterView(ctx, cfg.nodeID, health); err != nil {
 			runtime.stop()
 			return nil, err
 		}
 		runtime.startHealth(ctx, health)
+		runtime.startWitnessRelease(ctx, health)
+		runtime.startControlPlaneEvents(ctx, cfg, health)
 
 		componentSpecs := applicationComponentSpecs(cfg)
 		if cfg.systemNATSRecovery {
@@ -567,6 +714,7 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 					Client:        client,
 					Configuration: cfg.applicationConfiguration.Value,
 					ConfigDigest:  cfg.applicationConfigDigest,
+					NodeID:        cfg.nodeID,
 					Options:       configuredOptions(cfg.componentOptions, kind),
 				}); err != nil {
 					runtime.stop()
@@ -753,6 +901,118 @@ func (r *systemNATSRuntime) startDeployments(ctx context.Context, deployments *s
 	}()
 }
 
+// startControlPlaneEvents reports leader elections, voter changes and cluster
+// formation as lifecycle events, so they appear in the cluster log view.
+func (r *systemNATSRuntime) startControlPlaneEvents(ctx context.Context, cfg config, health *systemnats.Health) {
+	if r.server == nil {
+		return
+	}
+	eventsCtx, cancel := context.WithCancel(ctx)
+	r.eventsCancel = cancel
+	r.eventsDone = make(chan struct{})
+	go func() {
+		defer close(r.eventsDone)
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		var (
+			leader     string
+			voters     int
+			joined     = -1
+			formed     bool
+			everLeader bool
+		)
+		emit := func(event lifecycleEvent) {
+			if cfg.emit == nil {
+				return
+			}
+			event.NodeID = cfg.nodeID
+			cfg.emit(event)
+		}
+		for {
+			select {
+			case <-ticker.C:
+			case <-eventsCtx.Done():
+				return
+			}
+			if count := len(health.Snapshot().Nodes); count != joined {
+				joined = count
+				if count >= systemnats.MinClusterNodes {
+					if !formed {
+						formed = true
+						emit(lifecycleEvent{Event: "cluster_formed", Detail: fmt.Sprintf("%d of %d nodes joined", count, systemnats.MinClusterNodes)})
+					}
+				} else if !formed {
+					emit(lifecycleEvent{Event: "cluster_forming", Detail: fmt.Sprintf("%d of %d nodes joined; not serving", count, systemnats.MinClusterNodes)})
+				}
+			}
+			nextLeader, nextVoters := r.server.MetadataState()
+			r.metadataVoters.Store(int32(nextVoters))
+			if nextVoters != 0 && nextVoters != voters {
+				if voters != 0 {
+					emit(lifecycleEvent{Event: "metadata_voters", Voters: nextVoters, Detail: fmt.Sprintf("changed from %d", voters)})
+				}
+				voters = nextVoters
+			}
+			switch {
+			case nextLeader == leader:
+			case nextLeader == "":
+				emit(lifecycleEvent{Event: "metadata_leader_lost", Leader: leader, Voters: voters, Detail: "control plane has no leader; placement and cluster operations fail fast"})
+			case leader == "" && !everLeader:
+				emit(lifecycleEvent{Event: "metadata_leader_elected", Leader: nextLeader, Voters: voters})
+			case leader == "":
+				emit(lifecycleEvent{Event: "metadata_leader_elected", Leader: nextLeader, Voters: voters, Detail: "re-elected after leader loss"})
+			default:
+				emit(lifecycleEvent{Event: "metadata_leader_changed", Leader: nextLeader, Voters: voters, Detail: "from " + leader})
+			}
+			if nextLeader != "" {
+				everLeader = true
+			}
+			leader = nextLeader
+		}
+	}()
+}
+
+// startWitnessRelease retires the bootstrap metadata witness once three
+// healthy logical nodes exist, so every node is one voter and the loss of any
+// single node leaves a quorum that can re-elect a metadata leader.
+func (r *systemNATSRuntime) startWitnessRelease(ctx context.Context, health *systemnats.Health) {
+	if r.server == nil {
+		return
+	}
+	witnessCtx, cancel := context.WithCancel(ctx)
+	r.witnessCancel = cancel
+	r.witnessDone = make(chan struct{})
+	go func() {
+		defer close(r.witnessDone)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+			case <-witnessCtx.Done():
+				return
+			}
+			if !r.server.HasPeer() {
+				continue
+			}
+			healthy := 0
+			for _, node := range health.Snapshot().Nodes {
+				if node.Health == systemnats.HealthHealthy {
+					healthy++
+				}
+			}
+			if healthy < systemnats.MinClusterNodes {
+				continue
+			}
+			releaseCtx, releaseCancel := context.WithTimeout(witnessCtx, 30*time.Second)
+			if r.server.ControlStateSettled(releaseCtx) {
+				_ = r.server.ReleaseWitness(releaseCtx)
+			}
+			releaseCancel()
+		}
+	}()
+}
+
 func (r *systemNATSRuntime) startRecovery(ctx context.Context, recovery *serviceRecovery) {
 	recoveryCtx, cancel := context.WithCancel(ctx)
 	r.recoveryCancel = cancel
@@ -774,6 +1034,16 @@ func (r *systemNATSRuntime) startReconciler(ctx context.Context, reconciler *des
 }
 
 func (r *systemNATSRuntime) stop() {
+	if r.eventsCancel != nil {
+		r.eventsCancel()
+		<-r.eventsDone
+		r.eventsCancel = nil
+	}
+	if r.witnessCancel != nil {
+		r.witnessCancel()
+		<-r.witnessDone
+		r.witnessCancel = nil
+	}
 	if r.reconcileCancel != nil {
 		r.reconcileCancel()
 		<-r.reconcileDone
@@ -823,6 +1093,10 @@ func (r *systemNATSRuntime) gracefulLeave(ctx context.Context, nodeID string) er
 	membership := r.membership.Snapshot()
 	if !membership.Ready {
 		return nil
+	}
+	if len(membership.Members) >= systemnats.MinClusterNodes && len(membership.Members)-1 < systemnats.MinClusterNodes {
+		return fmt.Errorf("%w: leaving would drop the cluster below %d nodes; add a replacement node first",
+			errClusterTooSmallToLeave, systemnats.MinClusterNodes)
 	}
 	if err := r.membership.BeginLeave(ctx, r.transport); err != nil {
 		return err

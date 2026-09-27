@@ -236,6 +236,7 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		Artifact:      localArtifact,
 		ReadStatus:    newStatusReader(transport, cfg.placementNodeID, localArtifact),
 		ListenAddress: cfg.listenAddress,
+		NodeID:        cfg.placementNodeID,
 		Options:       cfg.options,
 	}
 	if component.Register != nil {

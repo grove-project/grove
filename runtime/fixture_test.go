@@ -57,16 +57,6 @@ func testRuntimeDefinition() Definition {
 				{ServiceID: testapp.ServiceInventory, NodeID: "node-2"},
 				{ServiceID: testapp.ServiceWeb, NodeID: "node-1"},
 			},
-			StartupComponents: []ScenarioPlacement{
-				{ServiceID: testapp.ServiceOrders, NodeID: "node-1", Options: []string{"distributed"}},
-				{ServiceID: testapp.ServiceInventory, NodeID: "node-1"},
-				{ServiceID: testapp.ServicePayment, NodeID: "node-1"},
-				{ServiceID: testapp.ServiceShipping, NodeID: "node-1"},
-				{ServiceID: testapp.ServiceWeb, NodeID: "node-1"},
-				{ServiceID: testapp.ServiceInventory, NodeID: "node-2"},
-				{ServiceID: testapp.ServiceShipping, NodeID: "node-2"},
-				{ServiceID: testapp.ServicePayment, NodeID: "node-3"},
-			},
 			DebugPlacements: []ScenarioPlacement{
 				{ServiceID: testapp.ServiceWeb, NodeID: "node-1"},
 				{ServiceID: testapp.ServiceOrders, NodeID: "node-2", Options: []string{"distributed"}},

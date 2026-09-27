@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/grove-project/grove"
@@ -50,33 +51,70 @@ func (r *serviceRecovery) Run(ctx context.Context) error {
 	}
 }
 
+// reconcile recovers every placement owned by a lost node. Starting the
+// components is local work and never waits on the control plane, so ingress is
+// serving again as soon as the loss is observed; committing the new placement
+// records needs the replicated control state and waits for its leader.
 func (r *serviceRecovery) reconcile(ctx context.Context) error {
-	current, ok := selectRecovery(r.nodeID, r.health.Snapshot(), r.placement.Snapshot())
-	if !ok {
+	records := selectRecoveries(r.nodeID, r.health.Snapshot(), r.placement.Snapshot())
+	if len(records) == 0 {
 		return nil
 	}
+	sort.SliceStable(records, func(i, j int) bool {
+		return isIngressService(records[i].ServiceID) && !isIngressService(records[j].ServiceID)
+	})
+	var errs []error
+	started := make(map[grove.ServiceID]bool, len(records))
+	claimable := make(map[grove.ServiceID]bool, len(records))
+	for _, current := range records {
+		didStart, ready, err := r.ensureStarted(ctx, current.ServiceID)
+		started[current.ServiceID], claimable[current.ServiceID] = didStart, ready
+		errs = append(errs, err)
+	}
+	if !r.placement.Snapshot().Ready {
+		// No control-plane leader: fail fast instead of blocking on writes.
+		return errors.Join(append(errs, systemnats.ErrControlPlaneUnavailable)...)
+	}
+	for _, current := range records {
+		if claimable[current.ServiceID] {
+			errs = append(errs, r.claim(ctx, current, started[current.ServiceID]))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// ensureStarted starts serviceID locally if it is not running. ready reports
+// whether the component is running and its placement can be claimed.
+func (r *serviceRecovery) ensureStarted(ctx context.Context, serviceID grove.ServiceID) (started, ready bool, err error) {
+	component, ok := findComponent(r.components.SnapshotComponents(), serviceID)
+	if !ok || component.InvocationSubject == "" {
+		return false, false, errRecoveryComponentUnavailable
+	}
+	switch component.State {
+	case systemnats.ComponentStopped, systemnats.ComponentFailed:
+		if err := r.components.StartComponent(ctx, serviceID); err != nil {
+			return false, false, err
+		}
+		component, ok = findComponent(r.components.SnapshotComponents(), serviceID)
+		if !ok || component.State != systemnats.ComponentHealthy {
+			return true, false, errRecoveryComponentUnavailable
+		}
+		return true, true, nil
+	case systemnats.ComponentHealthy, systemnats.ComponentDebugging:
+		return false, true, nil
+	case systemnats.ComponentStarting, systemnats.ComponentStopping:
+		return false, false, nil
+	default:
+		return false, false, errRecoveryComponentUnavailable
+	}
+}
+
+// claim commits this node as the new owner of a lost node's placement.
+func (r *serviceRecovery) claim(ctx context.Context, current systemnats.PlacementRecord, started bool) error {
 	component, ok := findComponent(r.components.SnapshotComponents(), current.ServiceID)
 	if !ok || component.InvocationSubject == "" {
 		return errRecoveryComponentUnavailable
 	}
-	started := false
-	switch component.State {
-	case systemnats.ComponentStopped, systemnats.ComponentFailed:
-		if err := r.components.StartComponent(ctx, current.ServiceID); err != nil {
-			return err
-		}
-		started = true
-		component, ok = findComponent(r.components.SnapshotComponents(), current.ServiceID)
-		if !ok || component.State != systemnats.ComponentHealthy {
-			return errRecoveryComponentUnavailable
-		}
-	case systemnats.ComponentHealthy, systemnats.ComponentDebugging:
-	case systemnats.ComponentStarting, systemnats.ComponentStopping:
-		return nil
-	default:
-		return errRecoveryComponentUnavailable
-	}
-
 	replacement := systemnats.PlacementRecord{
 		ServiceID:         current.ServiceID,
 		NodeID:            r.nodeID,
@@ -94,6 +132,44 @@ func (r *serviceRecovery) reconcile(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+func isIngressService(serviceID grove.ServiceID) bool {
+	component, ok := activeApplication.componentByID(serviceID)
+	return ok && component.HTTPHandler != nil
+}
+
+// selectRecoveries returns every placement on a node observed to have failed,
+// for the coordinating (first healthy) node only. It uses the last-known
+// placement records, so recovery can start components while the control
+// plane has no leader.
+func selectRecoveries(
+	nodeID string,
+	cluster systemnats.ClusterView,
+	placement systemnats.PlacementView,
+) []systemnats.PlacementRecord {
+	if !cluster.Ready {
+		return nil
+	}
+	healthByNode := make(map[string]systemnats.ClusterNode, len(cluster.Nodes))
+	coordinator := ""
+	for _, node := range cluster.Nodes {
+		healthByNode[node.NodeID] = node
+		if node.Health == systemnats.HealthHealthy && (coordinator == "" || node.NodeID < coordinator) {
+			coordinator = node.NodeID
+		}
+	}
+	if coordinator == "" || coordinator != nodeID {
+		return nil
+	}
+	var records []systemnats.PlacementRecord
+	for _, record := range placement.Placements {
+		node, exists := healthByNode[record.NodeID]
+		if exists && node.Health == systemnats.HealthUnavailable && node.LastSeen != "" {
+			records = append(records, record)
+		}
+	}
+	return records
 }
 
 func selectRecovery(
