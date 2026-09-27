@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -103,6 +104,9 @@ type fakeComponentProcess struct {
 	doneOnce   sync.Once
 	mu         sync.Mutex
 	err        error
+	// execution defaults to a dedicated process; tests sharing one process
+	// between components set it.
+	execution processExecution
 }
 
 func newFakeComponentProcess() *fakeComponentProcess {
@@ -137,7 +141,12 @@ func (p *fakeComponentProcess) Err() error {
 	return p.err
 }
 
-func (p *fakeComponentProcess) PID() int { return 42 }
+func (p *fakeComponentProcess) Execution() processExecution {
+	if p.execution.processID == "" {
+		return processExecution{mode: systemnats.ExecutionIsolatedProcess, processID: "fake-worker", pid: 42}
+	}
+	return p.execution
+}
 
 func (p *fakeComponentProcess) exit(err error) {
 	p.mu.Lock()
@@ -199,5 +208,43 @@ func TestComponentManagerTracksExactDebuggedWorkerGeneration(t *testing.T) {
 	manager.endDebug(3, target.generation)
 	if failed.Error != "worker exited while debugging" {
 		t.Errorf("debugged worker failure = %#v", failed)
+	}
+}
+
+// A debugger attaches to a whole process, so components sharing the node's
+// application runtime take turns being debugged.
+func TestComponentManagerSerializesDebuggingOfOneSharedProcess(t *testing.T) {
+	shared := processExecution{mode: systemnats.ExecutionInProcess, processID: "app-runtime-1", pid: 7}
+	processes := map[grove.ServiceID]*fakeComponentProcess{2: newFakeComponentProcess(), 3: newFakeComponentProcess()}
+	for _, process := range processes {
+		process.execution = shared
+	}
+	manager := newComponentManager([]componentSpec{
+		{serviceID: 2, name: "Inventory", kind: "inventory", mode: systemnats.ExecutionInProcess},
+		{serviceID: 3, name: "Payment", kind: "payment", mode: systemnats.ExecutionInProcess},
+	}, func(_ context.Context, spec componentSpec) (componentProcess, error) {
+		return processes[spec.serviceID], nil
+	})
+	if err := manager.start(t.Context(), []grove.ServiceID{2, 3}); err != nil {
+		t.Fatal(err)
+	}
+	for _, component := range manager.SnapshotComponents().Components {
+		if component.ExecutionMode != systemnats.ExecutionInProcess || component.ProcessID != "app-runtime-1" || component.PID != 7 {
+			t.Errorf("%s execution = %q %q pid %d; want the shared runtime", component.Name, component.ExecutionMode, component.ProcessID, component.PID)
+		}
+	}
+	target, err := manager.beginDebug(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.processID != 7 || target.execution != shared {
+		t.Errorf("debug target = pid %d %#v; want the shared runtime", target.processID, target.execution)
+	}
+	if _, err := manager.beginDebug(3); !errors.Is(err, errComponentTransition) || !strings.Contains(err.Error(), "Inventory") {
+		t.Errorf("debugging Payment in the debugged process = %v; want it refused naming Inventory", err)
+	}
+	manager.endDebug(2, target.generation)
+	if _, err := manager.beginDebug(3); err != nil {
+		t.Errorf("debug Payment after the session ended: %v", err)
 	}
 }

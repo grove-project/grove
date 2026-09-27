@@ -962,6 +962,10 @@ type Handler func(context.Context, grove.RequestEnvelope) grove.ResponseEnvelope
 // Transport is a hidden System NATS request/reply connection.
 type Transport struct {
 	connection *nats.Conn
+	// local holds the endpoints this process serves through ServeEndpoint;
+	// Request invokes them in-process.
+	localMu sync.RWMutex
+	local   map[string]Handler
 }
 
 // Connect establishes a System NATS transport connection to url.
@@ -985,13 +989,18 @@ func Connect(ctx context.Context, url string) (*Transport, error) {
 // that one slow handler (for example waiting on a downstream call to a dead
 // node) does not block delivery of subsequent requests.
 func (t *Transport) Serve(ctx context.Context, subject string, handler Handler) error {
+	_, err := t.subscribe(ctx, subject, handler)
+	return err
+}
+
+func (t *Transport) subscribe(ctx context.Context, subject string, handler Handler) (*nats.Subscription, error) {
 	if subject == "" {
-		return &Error{Operation: "serve System NATS endpoint", Err: ErrSubjectRequired}
+		return nil, &Error{Operation: "serve System NATS endpoint", Err: ErrSubjectRequired}
 	}
 	if handler == nil {
-		return &Error{Operation: "serve System NATS endpoint", Err: ErrHandlerRequired}
+		return nil, &Error{Operation: "serve System NATS endpoint", Err: ErrHandlerRequired}
 	}
-	if _, err := t.connection.Subscribe(subject, func(message *nats.Msg) {
+	subscription, err := t.connection.Subscribe(subject, func(message *nats.Msg) {
 		go func() {
 			var request grove.RequestEnvelope
 			if err := grove.Decode(message.Data, &request); err != nil {
@@ -1004,15 +1013,17 @@ func (t *Transport) Serve(ctx context.Context, subject string, handler Handler) 
 			response.RequestID = request.RequestID
 			respond(message, response)
 		}()
-	}); err != nil {
-		return &Error{Operation: "subscribe System NATS endpoint", Err: err}
+	})
+	if err != nil {
+		return nil, &Error{Operation: "subscribe System NATS endpoint", Err: err}
 	}
 	flushCtx, cancel := operationContext(ctx)
 	defer cancel()
 	if err := t.connection.FlushWithContext(flushCtx); err != nil {
-		return &Error{Operation: "activate System NATS endpoint", Err: err}
+		_ = subscription.Unsubscribe()
+		return nil, &Error{Operation: "activate System NATS endpoint", Err: err}
 	}
-	return nil
+	return subscription, nil
 }
 
 func respond(message *nats.Msg, response grove.ResponseEnvelope) {
@@ -1032,6 +1043,9 @@ func (t *Transport) Request(
 ) (grove.ResponseEnvelope, error) {
 	if subject == "" {
 		return grove.ResponseEnvelope{}, &Error{Operation: "request System NATS endpoint", Err: ErrSubjectRequired}
+	}
+	if handler, ok := t.localHandler(subject); ok {
+		return dispatchLocal(ctx, handler, request), nil
 	}
 	encoded, err := grove.Encode(request)
 	if err != nil {

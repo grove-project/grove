@@ -76,11 +76,14 @@ func buildStatus(
 		}
 		for _, component := range components[node.NodeID].Components {
 			nodeStatus.Components = append(nodeStatus.Components, ComponentStatus{
-				ServiceID: component.ServiceID,
-				Name:      component.Name,
-				WorkerID:  component.WorkerID,
-				State:     string(component.State),
-				Error:     component.Error,
+				ServiceID:     component.ServiceID,
+				Name:          component.Name,
+				WorkerID:      component.WorkerID,
+				ExecutionMode: string(component.ExecutionMode),
+				ProcessID:     component.ProcessID,
+				PID:           component.PID,
+				State:         string(component.State),
+				Error:         component.Error,
 			})
 		}
 		status.Nodes = append(status.Nodes, nodeStatus)

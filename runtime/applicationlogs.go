@@ -121,6 +121,9 @@ func buildApplicationLogsView(
 				component.WorkerID,
 				component.State,
 			)
+			if component.ProcessID != "" {
+				componentLine += fmt.Sprintf(" process=%s pid=%d mode=%s", component.ProcessID, component.PID, component.ExecutionMode)
+			}
 			if component.Error != "" {
 				componentLine += " error=" + component.Error
 			}

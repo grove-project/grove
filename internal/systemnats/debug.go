@@ -53,6 +53,11 @@ type DebugTarget struct {
 	// ProcessID is the node-local attach target. It is consumed by the Grove
 	// gateway and must not be presented as a user-supplied selector.
 	ProcessID int `json:"process_id"`
+	// ExecutionMode and ExecutionProcess identify the process the debugger
+	// attaches to. A shared application runtime hosts other components too,
+	// and they pause with it at breakpoints.
+	ExecutionMode    ExecutionMode `json:"execution_mode,omitempty"`
+	ExecutionProcess string        `json:"execution_process,omitempty"`
 }
 
 // DebugController opens node-local debugger streams for hosted workers.

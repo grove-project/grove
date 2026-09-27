@@ -27,6 +27,38 @@ type applicationPlacementRow struct {
 	NodeID string `json:"node_id"`
 	Status string `json:"status"`
 	Owner  bool   `json:"owner,omitempty"`
+	applicationExecution
+}
+
+// applicationExecution is the process a placement executes in. Placement says
+// which node runs a handler; execution says which process on that node does,
+// and several placements usually share the node's application runtime.
+type applicationExecution struct {
+	ExecutionMode string `json:"execution_mode,omitempty"`
+	ProcessID     string `json:"process_id,omitempty"`
+	PID           int    `json:"pid,omitempty"`
+}
+
+// label renders the execution process for tables, or "-" when unknown.
+func (e applicationExecution) label() string {
+	if e.ProcessID == "" {
+		return "-"
+	}
+	label := e.ProcessID
+	if e.PID != 0 {
+		label += fmt.Sprintf(" (pid %d)", e.PID)
+	}
+	if e.ExecutionMode == string(systemnats.ExecutionIsolatedProcess) {
+		label += " isolated"
+	}
+	return label
+}
+
+// applicationProcessRow is one execution process on a node and the services
+// it runs.
+type applicationProcessRow struct {
+	applicationExecution
+	Services []string `json:"services"`
 }
 
 // applicationHandlerRow is one registered handler and where it runs.
@@ -55,12 +87,14 @@ type applicationHostedRow struct {
 	Scaling string `json:"scaling"`
 	Status  string `json:"status"`
 	Owner   bool   `json:"owner,omitempty"`
+	applicationExecution
 }
 
 type applicationNodeRow struct {
-	NodeID string                 `json:"node_id"`
-	Health string                 `json:"health"`
-	Hosted []applicationHostedRow `json:"hosted"`
+	NodeID    string                  `json:"node_id"`
+	Health    string                  `json:"health"`
+	Hosted    []applicationHostedRow  `json:"hosted"`
+	Processes []applicationProcessRow `json:"processes"`
 }
 
 type applicationServicesView struct {
@@ -94,6 +128,18 @@ func buildServicesView(handlers systemnats.HandlerPlacementView, status ClusterS
 	live := func(nodeID string) bool {
 		state, known := health[nodeID]
 		return !known || state == string(systemnats.HealthHealthy)
+	}
+	type nodeService struct {
+		nodeID  string
+		service grove.ServiceID
+	}
+	executions := map[nodeService]applicationExecution{}
+	for _, node := range status.Nodes {
+		for _, component := range node.Components {
+			executions[nodeService{node.NodeID, component.ServiceID}] = applicationExecution{
+				ExecutionMode: component.ExecutionMode, ProcessID: component.ProcessID, PID: component.PID,
+			}
+		}
 	}
 
 	type facts struct {
@@ -175,7 +221,9 @@ func buildServicesView(handlers systemnats.HandlerPlacementView, status ClusterS
 		seen := map[string]bool{}
 		add := func(nodeID, state string) {
 			seen[nodeID] = true
-			row.Placements = append(row.Placements, applicationPlacementRow{NodeID: nodeID, Status: state})
+			row.Placements = append(row.Placements, applicationPlacementRow{
+				NodeID: nodeID, Status: state, applicationExecution: executions[nodeService{nodeID, key.service}],
+			})
 		}
 		for _, nodeID := range placed {
 			add(nodeID, placementHealthy)
@@ -225,6 +273,7 @@ func buildServicesView(handlers systemnats.HandlerPlacementView, status ClusterS
 			Name: "(whole service)", Scaling: handlerScalingService,
 			Placements: []applicationPlacementRow{{
 				ID: strings.ToLower(service.Name) + "/1", NodeID: placement.NodeID, Status: state,
+				applicationExecution: executions[nodeService{placement.NodeID, placement.ServiceID}],
 			}},
 		}}
 	}
@@ -239,7 +288,7 @@ func buildServicesView(handlers systemnats.HandlerPlacementView, status ClusterS
 	nodes := map[string]*applicationNodeRow{}
 	nodeRow := func(id string) *applicationNodeRow {
 		if nodes[id] == nil {
-			nodes[id] = &applicationNodeRow{NodeID: id, Health: health[id], Hosted: []applicationHostedRow{}}
+			nodes[id] = &applicationNodeRow{NodeID: id, Health: health[id], Hosted: []applicationHostedRow{}, Processes: []applicationProcessRow{}}
 			if nodes[id].Health == "" {
 				nodes[id].Health = "unknown"
 			}
@@ -247,7 +296,22 @@ func buildServicesView(handlers systemnats.HandlerPlacementView, status ClusterS
 		return nodes[id]
 	}
 	for _, node := range status.Nodes {
-		nodeRow(node.NodeID)
+		row := nodeRow(node.NodeID)
+		byProcess := map[string]int{}
+		for _, component := range node.Components {
+			if component.ProcessID == "" {
+				continue
+			}
+			index, ok := byProcess[component.ProcessID]
+			if !ok {
+				index = len(row.Processes)
+				byProcess[component.ProcessID] = index
+				row.Processes = append(row.Processes, applicationProcessRow{
+					applicationExecution: executions[nodeService{node.NodeID, component.ServiceID}],
+				})
+			}
+			row.Processes[index].Services = append(row.Processes[index].Services, component.Name)
+		}
 	}
 	for _, service := range view.Services {
 		for _, handler := range service.Handlers {
@@ -256,6 +320,7 @@ func buildServicesView(handlers systemnats.HandlerPlacementView, status ClusterS
 				node.Hosted = append(node.Hosted, applicationHostedRow{
 					Service: service.Name, Handler: handler.Name, Scaling: handler.Scaling,
 					Status: placement.Status, Owner: placement.Owner,
+					applicationExecution: placement.applicationExecution,
 				})
 			}
 		}

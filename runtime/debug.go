@@ -82,13 +82,15 @@ func (c *debugController) OpenDebug(ctx context.Context, request systemnats.Debu
 		connection, dialErr := net.Dial("unix", socketPath)
 		if dialErr == nil {
 			return systemnats.DebugTarget{
-					ServiceID:      target.serviceID,
-					ServiceName:    target.serviceName,
-					NodeID:         c.nodeID,
-					WorkerID:       target.workerID,
-					ArtifactDigest: target.artifactDigest,
-					CodeVersion:    target.codeVersion,
-					ProcessID:      target.processID,
+					ServiceID:        target.serviceID,
+					ServiceName:      target.serviceName,
+					NodeID:           c.nodeID,
+					WorkerID:         target.workerID,
+					ArtifactDigest:   target.artifactDigest,
+					CodeVersion:      target.codeVersion,
+					ProcessID:        target.processID,
+					ExecutionMode:    target.execution.mode,
+					ExecutionProcess: target.execution.processID,
 				}, &delveStream{
 					connection: connection,
 					command:    command,
