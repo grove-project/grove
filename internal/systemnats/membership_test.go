@@ -282,6 +282,163 @@ func TestMembershipConverges(t *testing.T) {
 	}
 }
 
+// A replacement node joining while a previously killed node's membership
+// record is still present must still become ready. An abruptly failed node
+// is never marked Leaving and its record is never removed (that is
+// intentional: see MembershipRecord.Leaving), so its replica is never
+// evicted from the replicated control streams either. Regression test for
+// https://github.com/grove-project/grove/issues/36, where the *joining*
+// node's own control-state bootstrap wedged forever waiting for that
+// already-tolerated, permanently offline replica to report Current.
+func TestMembershipJoinAfterAbruptDeparture(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+
+	var servers []*systemnats.Server
+	var transports []*systemnats.Transport
+	var memberships []*systemnats.Membership
+	var nodeIDs []string
+	t.Cleanup(func() {
+		for _, transport := range transports {
+			transport.Close()
+		}
+		for i := len(servers) - 1; i >= 0; i-- {
+			servers[i].Shutdown()
+		}
+	})
+
+	startNode := func(nodeID, seedURL string) {
+		cfg := systemnats.ClusterConfig{
+			Name:              nodeID,
+			Host:              "127.0.0.1",
+			RouteHost:         "127.0.0.1",
+			JetStreamStoreDir: t.TempDir(),
+		}
+		if seedURL != "" {
+			cfg.SeedURLs = []string{seedURL}
+		}
+		server, err := systemnats.StartClusterServer(ctx, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		servers = append(servers, server)
+		transport, err := systemnats.Connect(ctx, server.URL())
+		if err != nil {
+			t.Fatal(err)
+		}
+		transports = append(transports, transport)
+		membership, err := systemnats.NewMembership(systemnats.MembershipRecord{
+			NodeID:             nodeID,
+			AdvertisedEndpoint: "nats-subject://system/" + nodeID,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		memberships = append(memberships, membership)
+		if err := transport.ServeMembership(ctx, nodeID, membership); err != nil {
+			t.Fatal(err)
+		}
+		nodeIDs = append(nodeIDs, nodeID)
+	}
+
+	startNode("node-1", "")
+	for i := 1; i < systemnats.MembershipReplicas; i++ {
+		startNode(fmt.Sprintf("node-%d", i+1), servers[0].RouteURL())
+	}
+
+	setupConnection, err := nats.Connect(servers[0].URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(setupConnection.Close)
+	setupJS, err := jetstream.New(setupConnection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bucket := range []string{
+		systemnats.PlacementBucket,
+		systemnats.DesiredBucket,
+		systemnats.DeploymentBucket,
+	} {
+		if _, err := setupJS.CreateKeyValue(ctx, jetstream.KeyValueConfig{
+			Bucket: bucket, Storage: jetstream.FileStorage, Replicas: 1,
+		}); err != nil {
+			t.Fatalf("create %s control bucket: %v", bucket, err)
+		}
+	}
+
+	runCtx, cancelRun := context.WithCancel(t.Context())
+	var runs sync.WaitGroup
+	runMembership := func(i int) {
+		runs.Add(1)
+		go func() {
+			defer runs.Done()
+			_ = memberships[i].Run(runCtx, transports[i])
+		}()
+	}
+	t.Cleanup(func() {
+		cancelRun()
+		runs.Wait()
+	})
+
+	want := make([]systemnats.MembershipRecord, len(nodeIDs))
+	for i, nodeID := range nodeIDs {
+		want[i] = systemnats.MembershipRecord{NodeID: nodeID, AdvertisedEndpoint: "nats-subject://system/" + nodeID}
+	}
+	for i := range memberships {
+		runMembership(i)
+	}
+	if _, err := waitForMembershipViews(ctx, transports, nodeIDs, want); err != nil {
+		t.Fatalf("initial cluster did not converge: %v", err)
+	}
+	for _, bucket := range []string{
+		systemnats.MembershipBucket,
+		systemnats.PlacementBucket,
+		systemnats.DesiredBucket,
+		systemnats.DeploymentBucket,
+	} {
+		if err := waitForBucketReplicas(ctx, servers[0].URL(), bucket, len(nodeIDs)); err != nil {
+			t.Fatalf("%s replicas before departure: %v", bucket, err)
+		}
+	}
+
+	// Abruptly kill node-2: no BeginLeave, no PrepareRetire/Retire. Its
+	// membership record is never marked Leaving, exactly like a kill -9 in
+	// production.
+	deadNodeID := nodeIDs[1]
+	servers[1].Shutdown()
+
+	// Join a replacement node while the cluster is still degraded.
+	startNode("node-4", servers[0].RouteURL())
+	runMembership(len(memberships) - 1)
+
+	wantAfterJoin := append(append([]systemnats.MembershipRecord(nil), want...), systemnats.MembershipRecord{
+		NodeID: "node-4", AdvertisedEndpoint: "nats-subject://system/node-4",
+	})
+	survivingIdx := []int{0, 2, 3} // node-1, node-3, node-4; node-2's transport is dead.
+	survivorTransports := make([]*systemnats.Transport, len(survivingIdx))
+	survivorNodeIDs := make([]string, len(survivingIdx))
+	for i, idx := range survivingIdx {
+		survivorTransports[i] = transports[idx]
+		survivorNodeIDs[i] = nodeIDs[idx]
+	}
+
+	joinCtx, joinCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer joinCancel()
+	views, err := waitForMembershipViews(joinCtx, survivorTransports, survivorNodeIDs, wantAfterJoin)
+	if err != nil {
+		t.Fatalf(
+			"replacement node did not become ready after joining a cluster still degraded from %s's abrupt departure: %v",
+			deadNodeID, err,
+		)
+	}
+	for i, view := range views {
+		if !view.Ready {
+			t.Errorf("%s membership view = %#v; want Ready", survivorNodeIDs[i], view)
+		}
+	}
+}
+
 func waitForBucketReplicas(ctx context.Context, serverURL, bucket string, want int) error {
 	connection, err := nats.Connect(serverURL)
 	if err != nil {

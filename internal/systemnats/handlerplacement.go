@@ -409,7 +409,7 @@ func (h *HandlerPlacements) reconcileReplicas(ctx context.Context, js jetstream.
 	for _, member := range view.Members {
 		records[member.NodeID] = member
 	}
-	_ = reconcileControlStateReplicas(ctx, js, records, false)
+	_, _ = reconcileControlStateReplicas(ctx, js, records, false)
 }
 
 func (h *HandlerPlacements) publishRegistrations(ctx context.Context, kv jetstream.KeyValue) error {
