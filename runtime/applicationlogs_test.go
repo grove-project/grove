@@ -216,7 +216,7 @@ func TestApplicationLogsShowLeaderElection(t *testing.T) {
 		`{"event":"metadata_leader_lost","node_id":"node-2","leader":"node-1","voters":3}`,
 		`{"event":"metadata_leader_elected","node_id":"node-2","leader":"node-3","voters":3,"detail":"re-elected after leader loss"}`,
 	}, "\n")
-	view := buildApplicationLogsView(ClusterStatus{Health: "healthy"}, nil, []applicationNodeLogs{{NodeID: "node-2", Output: output}}, "", nil)
+	view := buildApplicationLogsView(ClusterStatus{Health: "healthy"}, nil, []applicationNodeLogs{{NodeID: "node-2", Output: output}}, "", nil, "")
 	joined := strings.Join(view.Cluster, "\n")
 	for _, want := range []string{
 		"node=node-2 event=cluster_forming detail=1 of 3 nodes joined; not serving",
@@ -239,7 +239,7 @@ func TestApplicationLogsShowLeaderElection(t *testing.T) {
 	lost := buildApplicationLogsView(ClusterStatus{Health: "degraded"}, nil, []applicationNodeLogs{{
 		NodeID: "node-2",
 		Output: `{"event":"metadata_leader_lost","node_id":"node-2","leader":"node-1"}`,
-	}}, "", nil)
+	}}, "", nil, "")
 	found := false
 	for _, cause := range lost.Causes {
 		found = found || strings.Contains(cause, "metadata leader lost")
