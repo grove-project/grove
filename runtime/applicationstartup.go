@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ var (
 	errApplicationClusterUnreachable = errors.New("matching Grove cluster is unreachable")
 	errApplicationJoinUnavailable    = errors.New("no same-artifact Grove cluster is available to join")
 	errApplicationRolloutRequired    = errors.New("the discovered Grove cluster is running a different artifact; rollout is required")
+	errApplicationNodeCount          = errors.New("invalid node count")
 )
 
 func (c *applicationController) prepareConfiguredApplicationStartup(
@@ -75,7 +77,7 @@ func (c *applicationController) applicationStartAvailable() bool {
 }
 
 func (c *applicationController) startDiscoveredApplicationCluster(ctx context.Context, args []string) (any, error) {
-	webAddress, err := parseStartArguments(args)
+	webAddress, count, err := parseStartArguments(args)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +103,10 @@ func (c *applicationController) startDiscoveredApplicationCluster(ctx context.Co
 	}
 	node, ready, err := c.startDiscoveredApplicationNode(ctx, "node-1", "", webAddress)
 	if err != nil {
-		return nil, fmt.Errorf("bootstrap one-node application cluster: %w", err)
+		return nil, fmt.Errorf("bootstrap application cluster: %w", err)
+	}
+	founder := applicationDiscoveryNode{
+		NodeID: "node-1", SystemNATSURL: ready.SystemNATSURL, RouteURL: ready.SystemNATSRouteURL,
 	}
 	discovered := applicationDiscoveryRecord{
 		ProtocolVersion: applicationDiscoveryVersion,
@@ -111,9 +116,7 @@ func (c *applicationController) startDiscoveredApplicationCluster(ctx context.Co
 		ArtifactDigest:  inspection.ArtifactDigest,
 		WebAddress:      webAddress,
 		NextNode:        2,
-		Nodes: []applicationDiscoveryNode{{
-			NodeID: "node-1", SystemNATSURL: ready.SystemNATSURL, RouteURL: ready.SystemNATSRouteURL,
-		}},
+		Nodes:           []applicationDiscoveryNode{founder},
 	}
 	if err := discovery.publish(discovered); err != nil {
 		_ = node.Cleanup()
@@ -126,10 +129,17 @@ func (c *applicationController) startDiscoveredApplicationCluster(ctx context.Co
 	}
 	c.startAvailable = false
 	c.startupNodes = 0
-	c.localNodeID = "node-1"
-	c.lastEvent = "bootstrapped " + activeApplication.Name + " cluster with node-1"
+	c.localNodeIDs = []string{"node-1"}
 	c.mu.Unlock()
-	return applicationJoinResult{State: "started", NodeID: "node-1"}, nil
+	// The remaining nodes join through the founder exactly as a later Join
+	// would, so the cluster reaches the size it needs to serve.
+	started, err := c.addApplicationNodes(ctx, discovery, discovered, founder.RouteURL, count-1)
+	started = append([]string{"node-1"}, started...)
+	c.setLastEvent("bootstrapped " + activeApplication.Name + " cluster with " + strings.Join(started, ", "))
+	if err != nil {
+		return nil, fmt.Errorf("bootstrap application cluster after %s: %w", strings.Join(started, ", "), err)
+	}
+	return applicationJoinResult{State: "started", NodeIDs: started}, nil
 }
 
 // defaultIngressAddress is the ingress address offered when the operator does
@@ -142,17 +152,36 @@ func defaultIngressAddress() (string, error) {
 	return "127.0.0.1:" + strconv.Itoa(ports[0]), nil
 }
 
-// parseStartArguments reads the optional ingress address chosen for the new
-// cluster; without one the runtime picks a default.
-func parseStartArguments(args []string) (string, error) {
+// parseStartArguments reads the optional ingress address and node count chosen
+// for the new cluster. Without them the runtime picks a free ingress address
+// and starts the smallest cluster that serves.
+func parseStartArguments(args []string) (string, int, error) {
 	flags := flag.NewFlagSet("cluster.start", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	address := ""
 	flags.StringVar(&address, "ingress", "", "cluster ingress address")
+	count := flags.Int("nodes", systemnats.MinClusterNodes, "nodes to start in this process")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
-		return "", errConsoleArguments
+		return "", 0, errConsoleArguments
 	}
-	return address, nil
+	if *count < systemnats.MinClusterNodes {
+		return "", 0, fmt.Errorf("%w: a new cluster needs at least %d nodes", errApplicationNodeCount, systemnats.MinClusterNodes)
+	}
+	return address, *count, nil
+}
+
+// parseJoinArguments reads how many nodes this process adds to the cluster.
+func parseJoinArguments(args []string) (int, error) {
+	flags := flag.NewFlagSet("cluster.join", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	count := flags.Int("nodes", 1, "nodes to add from this process")
+	if err := flags.Parse(args); err != nil || flags.NArg() != 0 {
+		return 0, errConsoleArguments
+	}
+	if *count < 1 {
+		return 0, fmt.Errorf("%w: join at least one node", errApplicationNodeCount)
+	}
+	return *count, nil
 }
 
 func (c *applicationController) applicationJoinAvailable() bool {
@@ -162,8 +191,9 @@ func (c *applicationController) applicationJoinAvailable() bool {
 }
 
 func (c *applicationController) joinApplicationCluster(ctx context.Context, args []string) (any, error) {
-	if len(args) != 0 {
-		return nil, errConsoleArguments
+	count, err := parseJoinArguments(args)
+	if err != nil {
+		return nil, err
 	}
 	c.operationMu.Lock()
 	defer c.operationMu.Unlock()
@@ -193,30 +223,55 @@ func (c *applicationController) joinApplicationCluster(ctx context.Context, args
 	if err != nil {
 		return nil, err
 	}
-	nodeNumber := record.NextNode
-	nodeID := "node-" + strconv.Itoa(nodeNumber)
-	node, ready, err := c.startDiscoveredApplicationNode(ctx, nodeID, seed.RouteURL, record.WebAddress)
-	if err != nil {
-		return nil, fmt.Errorf("join application cluster as %s: %w", nodeID, err)
+	joined, err := c.addApplicationNodes(ctx, discovery, record, seed.RouteURL, count)
+	if len(joined) != 0 {
+		c.mu.Lock()
+		c.joinAvailable = false
+		c.startupNodes = 0
+		c.lastEvent = strings.Join(joined, ", ") + " joined the " + activeApplication.Name + " cluster"
+		c.mu.Unlock()
 	}
-	record.NextNode++
-	record.Revision++
-	record.Nodes = append(record.Nodes, applicationDiscoveryNode{
-		NodeID: nodeID, SystemNATSURL: ready.SystemNATSURL, RouteURL: ready.SystemNATSRouteURL,
-	})
-	if err := discovery.publish(record); err != nil {
-		_ = node.Cleanup()
+	if err != nil {
 		return nil, err
 	}
-	c.mu.Lock()
-	c.cluster.nodes = append(c.cluster.nodes, node)
-	c.cluster.systemNATSURL = ready.SystemNATSURL
-	c.localNodeID = nodeID
-	c.joinAvailable = false
-	c.startupNodes = 0
-	c.lastEvent = nodeID + " joined the " + activeApplication.Name + " cluster"
-	c.mu.Unlock()
-	return applicationJoinResult{State: "joined", NodeID: nodeID}, nil
+	return applicationJoinResult{State: "joined", NodeIDs: joined}, nil
+}
+
+// addApplicationNodes starts count nodes in this process, one at a time, each
+// joining through seedRoute under the next unused node ID. Discovery is
+// republished after every node so other processes always see the current
+// membership. It returns the IDs of the nodes that joined, even on error.
+func (c *applicationController) addApplicationNodes(
+	ctx context.Context,
+	discovery *applicationDiscovery,
+	record applicationDiscoveryRecord,
+	seedRoute string,
+	count int,
+) ([]string, error) {
+	joined := make([]string, 0, count)
+	for range count {
+		nodeID := "node-" + strconv.Itoa(record.NextNode)
+		node, ready, err := c.startDiscoveredApplicationNode(ctx, nodeID, seedRoute, record.WebAddress)
+		if err != nil {
+			return joined, fmt.Errorf("join application cluster as %s: %w", nodeID, err)
+		}
+		record.NextNode++
+		record.Revision++
+		record.Nodes = append(slices.Clone(record.Nodes), applicationDiscoveryNode{
+			NodeID: nodeID, SystemNATSURL: ready.SystemNATSURL, RouteURL: ready.SystemNATSRouteURL,
+		})
+		if err := discovery.publish(record); err != nil {
+			_ = node.Cleanup()
+			return joined, err
+		}
+		c.mu.Lock()
+		c.cluster.nodes = append(c.cluster.nodes, node)
+		c.cluster.systemNATSURL = ready.SystemNATSURL
+		c.localNodeIDs = append(c.localNodeIDs, nodeID)
+		c.mu.Unlock()
+		joined = append(joined, nodeID)
+	}
+	return joined, nil
 }
 
 func reachableApplicationDiscoveryNode(

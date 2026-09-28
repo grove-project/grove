@@ -14,25 +14,35 @@ Configuration-only changes use the exact same artifact rollout path.
 
 ## Demo sequence
 
-### 1. Start node 1
+### 1. Start the cluster
 Run the initial artifact:
 
 ```bash
 ./bin/groveshop
 ```
 
-No compatible Grove Shop cluster is discovered, so Grove offers **Start new cluster** as the only startup action. Confirm it, then open **Cluster** in the normal TUI.
+No compatible Grove Shop cluster is discovered, so Grove offers **Start new cluster** as the only startup action. It asks how many nodes to start and the ingress address:
 
-### 2. Join nodes 2 and 3
-Run the exact same artifact in two more terminals:
+```text
+┌──────────────── Start new cluster ────────────────┐
+│ Nodes to start (min 3): 3                         │
+│ Ingress address: 127.0.0.1:41873                  │
+│                   [ Run ]  [ Cancel ]             │
+└───────────────────────────────────────────────────┘
+```
+
+A cluster only serves once it has three nodes, so three is both the default and the minimum. Confirm it: this one process hosts node-1, node-2 and node-3, and the cluster serves as soon as it returns. Open **Cluster** in the normal TUI.
+
+### 2. Add nodes from another terminal
+Run the exact same artifact in a second terminal:
 
 ```bash
 ./bin/groveshop
 ```
 
-Each process discovers the existing cluster with the same application and artifact identity. The TUI suggests **Join** as the default action. Confirm it and open **Cluster** in each terminal.
+The process discovers the existing cluster with the same application and artifact identity. The TUI suggests **Join** as the default action and asks how many nodes this process adds (default 1). Enter 3 and confirm: node-4, node-5 and node-6 join. Open **Cluster** in both terminals.
 
-All three Cluster views must show the same three-node membership and service placement.
+Both Cluster views must show the same six-node membership and service placement. A terminal is no longer one node: each process hosts as many nodes as it was asked for, and quitting it retires all of them.
 
 ### 3. Open Grove Shop
 Open the Web URL exposed by the Grove-managed ingress and leave the browser open for the remainder of the lifecycle demo.
@@ -46,7 +56,7 @@ Create an order and verify:
 Created -> Reserved -> Paid -> Shipping -> Completed
 ```
 
-Quit one node from its GroveShop TUI. The surviving Cluster views must show its services relocate, the departing member disappear, and the cluster return to healthy. The browser remains reachable through the same ingress endpoint. Create another order and prove the application still works.
+Quit the first terminal's GroveShop TUI. Its nodes leave one at a time: the surviving Cluster view must show their services relocate, the departing members disappear, and the cluster return to healthy on node-4, node-5 and node-6. The browser remains reachable through the same ingress endpoint. Create another order and prove the application still works.
 
 A forcibly killed node remains visible as unavailable for diagnosis; only a graceful TUI exit retires membership automatically.
 
@@ -124,9 +134,8 @@ Expected:
 The human story is intentionally compact:
 
 ```text
-run artifact -> bootstrap cluster
-run same artifact -> join
-run same artifact -> join
+run artifact -> start cluster with 3 nodes
+run same artifact -> join, add N nodes
 
 kill node -> watch shared Cluster views -> service recovers
 

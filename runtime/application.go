@@ -49,7 +49,7 @@ type applicationController struct {
 	startAvailable bool
 	joinAvailable  bool
 	startupNodes   int
-	localNodeID    string
+	localNodeIDs   []string
 	lastEvent      string
 	debugSessions  map[string]console.DebugSession
 	startedAt      time.Time
@@ -79,8 +79,8 @@ type resilienceActionResult struct {
 }
 
 type applicationJoinResult struct {
-	State  string `json:"state"`
-	NodeID string `json:"node_id"`
+	State   string   `json:"state"`
+	NodeIDs []string `json:"node_ids"`
 }
 
 func newApplicationController(binaryPath, runtimeDir string) *applicationController {
@@ -167,14 +167,14 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 	if controller.applicationStartAvailable() {
 		actions = append(actions, console.Action{
 			Name: "cluster.start", Label: "Start new cluster", Section: "Cluster",
-			Description: "Start the first node of a new application cluster.",
+			Description: "Start a new application cluster with this process hosting its first nodes (at least three).",
 			Handler:     controller.startDiscoveredApplicationCluster,
 		})
 	}
 	if controller.applicationJoinAvailable() {
 		actions = append(actions, console.Action{
 			Name: "cluster.join", Label: "Join cluster", Section: "Cluster",
-			Description: "Join the discovered application cluster with this artifact.",
+			Description: "Add one or more nodes hosted by this process to the discovered application cluster.",
 			Handler:     controller.joinApplicationCluster,
 		})
 	}
@@ -1100,10 +1100,10 @@ func (c *applicationController) close() {
 	c.mu.Lock()
 	cluster := c.cluster
 	discovery := c.discovery
-	localNodeID := c.localNodeID
+	localNodeIDs := c.localNodeIDs
 	c.cluster = nil
 	c.discovery = nil
-	c.localNodeID = ""
+	c.localNodeIDs = nil
 	clear(c.debugSessions)
 	c.mu.Unlock()
 	if cluster != nil {
@@ -1113,10 +1113,12 @@ func (c *applicationController) close() {
 			cleanupApplicationNodes(cluster.nodes)
 		}
 	}
-	if discovery != nil && localNodeID != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = discovery.removeNode(ctx, localNodeID)
-		cancel()
+	if discovery != nil {
+		for _, nodeID := range localNodeIDs {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = discovery.removeNode(ctx, nodeID)
+			cancel()
+		}
 	}
 	if discovery != nil {
 		discovery.close()

@@ -74,12 +74,12 @@ Grove must distinguish:
 - **Build identity**: identifies the exact built artifact/version.
 
 On startup, the process discovers reachable Grove clusters for the same application identity:
-- If no matching cluster exists, the first process offers **Start new cluster** and bootstraps one node after confirmation.
-- If a matching cluster exists and its build identity matches the local binary, **Join cluster** is the only startup action. The flow does not offer a second cluster for the same application and build.
+- If no matching cluster exists, the first process offers **Start new cluster**, asks how many nodes to start (default and minimum three, the size a cluster needs to serve), and bootstraps that many nodes in the one process after confirmation.
+- If a matching cluster exists and its build identity matches the local binary, **Join cluster** is the only startup action. It asks how many nodes this process adds (default one). The flow does not offer a second cluster for the same application and build.
 - If a matching cluster exists but the build identity differs, the TUI treats the local binary as a rollout candidate and immediately suggests rolling that build out to the existing cluster.
 - Unrelated Grove applications must not be presented as join or rollout targets.
 
-For the canonical three-node demo, the intended human workflow is therefore: start the exact same Grove Shop binary in three terminals. The first instance creates the cluster; the second and third discover it and require only confirmation in the TUI to join. Do not require the operator to enter NATS addresses, PIDs, Grove-specific join flags, or other runtime implementation details.
+For the canonical demo, the intended human workflow is therefore: start the Grove Shop binary once and confirm **Start new cluster** to get a serving three-node cluster; start the exact same binary again in another terminal to add more nodes, confirming only how many. Nodes are not tied one-to-one to terminals. Do not require the operator to enter NATS addresses, PIDs, Grove-specific join flags, or other runtime implementation details.
 
 ### Shared Cluster TUI view
 

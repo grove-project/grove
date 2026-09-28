@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/derailed/tcell/v2"
 	"github.com/derailed/tview"
 	"github.com/grove-project/grove/console"
+	"github.com/grove-project/grove/internal/systemnats"
 )
 
 const (
@@ -573,8 +575,16 @@ func (v *applicationTUI) activateAction(action console.Action, args []string) {
 				v.setFlash(tcell.ColorOrangeRed, err.Error())
 				return
 			}
-			v.showArgumentDialog(action, "Start new cluster", "Ingress address", address, func(value string) []string {
-				return []string{"--ingress", value}
+			v.showFormDialog(action, "Start new cluster", []dialogField{
+				{label: "Nodes to start (min " + strconv.Itoa(systemnats.MinClusterNodes) + ")", initial: strconv.Itoa(systemnats.MinClusterNodes)},
+				{label: "Ingress address", initial: address},
+			}, func(values []string) []string {
+				return []string{"--nodes", values[0], "--ingress", values[1]}
+			})
+			return
+		case "cluster.join":
+			v.showArgumentDialog(action, "Join cluster", "Nodes to add", "1", func(value string) []string {
+				return []string{"--nodes", value}
 			})
 			return
 		case "debug.attach":
@@ -687,21 +697,46 @@ func (v *applicationTUI) showArgumentDialog(
 	title, label, initial string,
 	arguments func(string) []string,
 ) {
-	input := tview.NewInputField().SetLabel(label + ": ").SetText(initial)
+	v.showFormDialog(action, title, []dialogField{{label: label, initial: initial}}, func(values []string) []string {
+		return arguments(values[0])
+	})
+}
+
+// dialogField is one required input of an action dialog.
+type dialogField struct {
+	label   string
+	initial string
+}
+
+// showFormDialog asks for every field before running action. Enter moves to
+// the next field and runs the action from the last one.
+func (v *applicationTUI) showFormDialog(
+	action console.Action,
+	title string,
+	fields []dialogField,
+	arguments func([]string) []string,
+) {
 	form := tview.NewForm()
-	form.AddFormItem(input)
+	inputs := make([]*tview.InputField, len(fields))
+	for i, field := range fields {
+		inputs[i] = tview.NewInputField().SetLabel(field.label + ": ").SetText(field.initial)
+		form.AddFormItem(inputs[i])
+	}
 	form.SetButtonsAlign(tview.AlignCenter)
 	form.SetBorder(true)
 	form.SetTitle(" [::b]" + title + "[-:-:-] ")
 	form.SetBorderColor(tcell.ColorAqua)
 	submit := func() {
-		value := strings.TrimSpace(input.GetText())
-		if value == "" {
-			v.setFlash(tcell.ColorOrangeRed, label+" is required")
-			return
+		values := make([]string, len(inputs))
+		for i, input := range inputs {
+			values[i] = strings.TrimSpace(input.GetText())
+			if values[i] == "" {
+				v.setFlash(tcell.ColorOrangeRed, fields[i].label+" is required")
+				return
+			}
 		}
 		v.closeDialog()
-		v.startAction(action, arguments(value))
+		v.startAction(action, arguments(values))
 	}
 	form.AddButton("Run", submit)
 	form.AddButton("Cancel", v.closeDialog)
@@ -712,16 +747,21 @@ func (v *applicationTUI) showArgumentDialog(
 		}
 		return event
 	})
-	input.SetDoneFunc(func(key tcell.Key) {
-		if key == tcell.KeyEnter {
-			submit()
-		} else if key == tcell.KeyEscape {
-			v.closeDialog()
-		}
-	})
+	for i, input := range inputs {
+		input.SetDoneFunc(func(key tcell.Key) {
+			switch {
+			case key == tcell.KeyEnter && i == len(inputs)-1:
+				submit()
+			case key == tcell.KeyEnter:
+				v.app.SetFocus(inputs[i+1])
+			case key == tcell.KeyEscape:
+				v.closeDialog()
+			}
+		})
+	}
 	v.dialogOpen = true
-	v.pages.AddPage(applicationTUIDialogPage, centeredPrimitive(form, 72, 9), true, true)
-	v.app.SetFocus(input)
+	v.pages.AddPage(applicationTUIDialogPage, centeredPrimitive(form, 72, 7+2*len(fields)), true, true)
+	v.app.SetFocus(inputs[0])
 }
 
 func (v *applicationTUI) showHelp() {
