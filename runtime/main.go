@@ -60,6 +60,9 @@ type config struct {
 	componentKinds         stringValues
 	componentListeners     stringValues
 	componentOptions       stringValues
+	// isolatedComponents run in dedicated worker processes; every other
+	// component shares the node's application runtime process.
+	isolatedComponents stringValues
 	// ingressAddress is set only on the node that founds a cluster. It is the
 	// cluster's ingress address, recorded in control state for later nodes.
 	ingressAddress string
@@ -179,6 +182,10 @@ func execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		args = args[1:]
 		runCommand = runWorker
 	}
+	if len(args) != 0 && args[0] == applicationRuntimeCommand {
+		args = args[1:]
+		runCommand = runApplicationRuntime
+	}
 	return runCommand(ctx, args, stdout, stderr)
 }
 
@@ -261,6 +268,7 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.Var(&cfg.componentKinds, "component", "application component kind to host (repeatable)")
 	flags.Var(&cfg.componentListeners, "component-listen", "component HTTP listener as kind=address (repeatable)")
 	flags.Var(&cfg.componentOptions, "component-option", "application-owned worker option as kind=value (repeatable)")
+	flags.Var(&cfg.isolatedComponents, "component-isolate", "component kind to run in a dedicated worker process instead of the shared application runtime (repeatable)")
 	flags.StringVar(&cfg.ingressAddress, "ingress-address", "", "cluster ingress address recorded by the node that founds the cluster")
 	flags.StringVar(&cfg.routeSubject, "route-subject", "", "explicit Grove invocation subject used by directly hosted components")
 	flags.StringVar(&cfg.delvePath, "delve-path", "", "path to the Delve executable used for worker debugging")
@@ -419,6 +427,11 @@ func validateConfiguredComponents(cfg config) error {
 		listen := configuredValue(cfg.componentListeners, kind)
 		if (component.HTTPHandler != nil) != (listen != "") && !(cfg.systemNATSRecovery && component.HTTPHandler != nil) {
 			return fmt.Errorf("%w: %s", errApplicationListenRequired, component.Name)
+		}
+	}
+	for _, kind := range cfg.isolatedComponents {
+		if _, ok := activeApplication.componentByKind(kind); !ok {
+			return fmt.Errorf("%w: %q", ErrComponentUnknown, kind)
 		}
 	}
 	for _, assignment := range append(slices.Clone(cfg.componentListeners), cfg.componentOptions...) {
@@ -663,7 +676,7 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 		}
 		runtime.components = newComponentManager(
 			componentSpecs,
-			newWorkerStarter(url, cfg.nodeID),
+			newExecutionStarter(url, cfg.nodeID),
 		)
 		if err := transport.ServeComponents(ctx, cfg.nodeID, runtime.components); err != nil {
 			runtime.stop()
@@ -799,9 +812,20 @@ func componentSpecsForKinds(cfg config, kinds []string) []componentSpec {
 			codeVersion:    cfg.applicationCodeVersion,
 			listenAddress:  configuredValue(cfg.componentListeners, kind),
 			options:        configuredOptions(cfg.componentOptions, kind),
+			mode:           componentExecutionMode(cfg, kind),
 		})
 	}
 	return components
+}
+
+// componentExecutionMode is the initial execution policy: every component
+// runs in the node's shared application runtime unless it is explicitly
+// isolated.
+func componentExecutionMode(cfg config, kind string) systemnats.ExecutionMode {
+	if slices.Contains(cfg.isolatedComponents, kind) {
+		return systemnats.ExecutionIsolatedProcess
+	}
+	return systemnats.ExecutionInProcess
 }
 
 func applicationPlacedServiceIDs(cfg config) []grove.ServiceID {

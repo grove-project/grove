@@ -7,13 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/grove-project/grove"
@@ -30,7 +29,10 @@ type workerConfig struct {
 	options         []string
 }
 
+// workerProcess is a dedicated, isolated worker process running exactly one
+// component.
 type workerProcess struct {
+	id        string
 	cmd       *exec.Cmd
 	keepalive *os.File
 	done      chan struct{}
@@ -38,11 +40,7 @@ type workerProcess struct {
 	err       error
 }
 
-func newWorkerStarter(systemNATSURL, placementNodeID string) componentStarter {
-	return func(ctx context.Context, spec componentSpec) (componentProcess, error) {
-		return startWorkerProcess(ctx, systemNATSURL, placementNodeID, spec)
-	}
-}
+var isolatedWorkers atomic.Uint64
 
 func startWorkerProcess(ctx context.Context, systemNATSURL, placementNodeID string, spec componentSpec) (*workerProcess, error) {
 	executable, err := os.Executable()
@@ -83,7 +81,12 @@ func startWorkerProcess(ctx context.Context, systemNATSURL, placementNodeID stri
 		return nil, fmt.Errorf("start worker: %w", err)
 	}
 	parentRead.Close()
-	process := &workerProcess{cmd: cmd, keepalive: parentWrite, done: make(chan struct{})}
+	process := &workerProcess{
+		id:        "worker-" + strconv.FormatUint(isolatedWorkers.Add(1), 10),
+		cmd:       cmd,
+		keepalive: parentWrite,
+		done:      make(chan struct{}),
+	}
 	go func() {
 		err := cmd.Wait()
 		process.mu.Lock()
@@ -169,18 +172,15 @@ func (p *workerProcess) Err() error {
 	return p.err
 }
 
-func (p *workerProcess) PID() int {
-	return p.cmd.Process.Pid
+func (p *workerProcess) Execution() processExecution {
+	return processExecution{mode: systemnats.ExecutionIsolatedProcess, processID: p.id, pid: p.cmd.Process.Pid}
 }
 
+// runWorker runs one component in a dedicated, isolated worker process.
 func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	cfg, err := parseWorkerConfig(args, stderr)
 	if err != nil {
 		return err
-	}
-	inspection, applicationConfig, err := loadEmbeddedConfiguration()
-	if err != nil {
-		return fmt.Errorf("load embedded application configuration: %w", err)
 	}
 	workerCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -194,110 +194,36 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		cancel()
 	}()
 
-	transport, err := systemnats.Connect(workerCtx, cfg.systemNATSURL)
+	process, err := newApplicationProcess(workerCtx, cfg.systemNATSURL, cfg.placementNodeID)
 	if err != nil {
 		return err
 	}
-	defer transport.Close()
-	registry := &grove.Registry{}
-	client, err := transport.ObservedPlacementClient(cfg.placementNodeID)
-	if applicationDeclaresHandlers() {
-		client, err = grove.NewRoutedClient(transport.ObservedHandlerRouter(
-			cfg.placementNodeID, applicationManagesHandler, transport.ObservedPlacementRouter(cfg.placementNodeID)))
-	}
-	if err != nil {
-		return err
-	}
-	component, ok := activeApplication.componentByKind(cfg.component)
-	if !ok {
-		return fmt.Errorf("%w: %q", ErrComponentUnknown, cfg.component)
-	}
-	localArtifact := ArtifactStatus{
-		ApplicationID:  inspection.Manifest.ApplicationID,
-		CodeVersion:    inspection.Manifest.CodeVersion,
-		ArtifactDigest: inspection.ArtifactDigest,
-		ConfigRevision: applicationConfig.Revision,
-		ConfigDigest:   inspection.Config.Digest,
-	}
-	// Background workloads started by Register claim exclusive capabilities
-	// through the same provider as request handlers.
-	var provider *systemnats.RemoteExclusiveProvider
-	registerCtx := workerCtx
-	if applicationDeclaresHandlers() {
-		provider = transport.NewRemoteExclusiveProvider(workerCtx, cfg.placementNodeID, 0)
-		registerCtx = grove.WithExclusiveProvider(workerCtx, provider)
-	}
-	componentContext := ComponentContext{
-		Context:       registerCtx,
-		Registry:      registry,
-		Client:        client,
-		Configuration: applicationConfig.Value,
-		ConfigDigest:  inspection.Config.Digest,
-		Artifact:      localArtifact,
-		ReadStatus:    newStatusReader(transport, cfg.placementNodeID, localArtifact),
+	defer process.Close()
+	running, err := process.host(componentLaunch{
+		Kind:          cfg.component,
+		Subject:       cfg.subject,
 		ListenAddress: cfg.listenAddress,
-		NodeID:        cfg.placementNodeID,
 		Options:       cfg.options,
-	}
-	if component.Register != nil {
-		if err := component.Register(componentContext); err != nil {
-			return fmt.Errorf("register application component %s: %w", component.Name, err)
-		}
-	}
-	var (
-		webServer *http.Server
-		webDone   chan error
-	)
-	if component.HTTPHandler != nil {
-		listener, err := net.Listen("tcp", cfg.listenAddress)
-		if err != nil {
-			return fmt.Errorf("listen for application component %s: %w", component.Name, err)
-		}
-		handler, err := component.HTTPHandler(componentContext)
-		if err != nil {
-			_ = listener.Close()
-			return fmt.Errorf("create application component %s HTTP handler: %w", component.Name, err)
-		}
-		webServer = &http.Server{
-			Handler:           handler,
-			ReadHeaderTimeout: 5 * time.Second,
-		}
-		defer webServer.Close()
-		webDone = make(chan error, 1)
-		go func() { webDone <- webServer.Serve(listener) }()
-	}
-	dispatcher, err := grove.NewDispatcher(registry)
+	})
 	if err != nil {
-		return err
-	}
-	serve := systemnats.Handler(dispatcher.Dispatch)
-	if provider != nil {
-		serve = func(ctx context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
-			return dispatcher.Dispatch(grove.WithExclusiveProvider(ctx, provider), request)
-		}
-	}
-	if err := transport.Serve(workerCtx, cfg.subject, serve); err != nil {
 		return err
 	}
 	encoder := json.NewEncoder(stdout)
 	if err := encoder.Encode(lifecycleEvent{Event: "ready"}); err != nil {
+		running.kill()
 		return fmt.Errorf("encode worker ready event: %w", err)
 	}
 	select {
 	case <-workerCtx.Done():
-	case err := <-webDone:
-		return fmt.Errorf("serve application component %s: %w", component.Name, err)
+	case <-running.failed:
+		running.kill()
+		return running.failure
 	}
-	if webServer != nil {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
-		err := webServer.Shutdown(shutdownCtx)
-		shutdownCancel()
-		if err != nil {
-			return fmt.Errorf("stop application component %s: %w", component.Name, err)
-		}
-		if err := <-webDone; err != nil && !errors.Is(err, http.ErrServerClosed) {
-			return fmt.Errorf("serve application component %s: %w", component.Name, err)
-		}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), time.Second)
+	err = running.stop(shutdownCtx)
+	shutdownCancel()
+	if err != nil {
+		return err
 	}
 	if err := encoder.Encode(lifecycleEvent{Event: "stopped"}); err != nil {
 		return fmt.Errorf("encode worker stopped event: %w", err)

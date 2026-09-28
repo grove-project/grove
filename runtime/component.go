@@ -25,6 +25,9 @@ type componentSpec struct {
 	codeVersion    string
 	listenAddress  string
 	options        []string
+	// mode selects the execution process. Placement decided that this node
+	// hosts the component; mode decides which process on the node runs it.
+	mode systemnats.ExecutionMode
 }
 
 type componentProcess interface {
@@ -32,7 +35,9 @@ type componentProcess interface {
 	Kill(context.Context) error
 	Done() <-chan struct{}
 	Err() error
-	PID() int
+	// Execution identifies the process running the component, which other
+	// components may share.
+	Execution() processExecution
 }
 
 type componentDebugTarget struct {
@@ -42,6 +47,7 @@ type componentDebugTarget struct {
 	artifactDigest string
 	codeVersion    string
 	processID      int
+	execution      processExecution
 	generation     uint64
 	process        componentProcess
 }
@@ -111,7 +117,7 @@ func (m *componentManager) SnapshotComponents() systemnats.ComponentView {
 	for _, serviceID := range m.serviceIDs() {
 		component := m.components[serviceID]
 		component.mu.Lock()
-		components = append(components, systemnats.ComponentStatus{
+		status := systemnats.ComponentStatus{
 			ServiceID:         component.spec.serviceID,
 			Name:              component.spec.name,
 			InvocationSubject: component.spec.subject,
@@ -119,9 +125,17 @@ func (m *componentManager) SnapshotComponents() systemnats.ComponentView {
 			WorkerID:          componentWorkerID(component.spec, component.generation),
 			ArtifactDigest:    component.spec.artifactDigest,
 			CodeVersion:       component.spec.codeVersion,
+			ExecutionMode:     component.spec.mode,
 			State:             component.state,
 			Error:             component.err,
-		})
+		}
+		if component.process != nil {
+			execution := component.process.Execution()
+			status.ExecutionMode = execution.mode
+			status.ProcessID = execution.processID
+			status.PID = execution.pid
+		}
+		components = append(components, status)
 		component.mu.Unlock()
 	}
 	return systemnats.ComponentView{Components: components}
@@ -236,6 +250,29 @@ func (m *componentManager) beginDebug(serviceID grove.ServiceID) (componentDebug
 		return componentDebugTarget{}, errComponentNotHosted
 	}
 	component.mu.Lock()
+	if component.state != systemnats.ComponentHealthy || component.process == nil {
+		component.mu.Unlock()
+		return componentDebugTarget{}, errComponentTransition
+	}
+	execution := component.process.Execution()
+	component.mu.Unlock()
+	// A debugger attaches to a whole process. Components sharing the node's
+	// application runtime therefore share one debug session at a time.
+	for _, otherID := range m.serviceIDs() {
+		other := m.components[otherID]
+		if other == component {
+			continue
+		}
+		other.mu.Lock()
+		busy := other.state == systemnats.ComponentDebugging && other.process != nil &&
+			other.process.Execution().processID == execution.processID
+		name := other.spec.name
+		other.mu.Unlock()
+		if busy {
+			return componentDebugTarget{}, fmt.Errorf("%w: process %s is already being debugged through %s", errComponentTransition, execution.processID, name)
+		}
+	}
+	component.mu.Lock()
 	defer component.mu.Unlock()
 	if component.state != systemnats.ComponentHealthy || component.process == nil {
 		return componentDebugTarget{}, errComponentTransition
@@ -247,7 +284,8 @@ func (m *componentManager) beginDebug(serviceID grove.ServiceID) (componentDebug
 		workerID:       componentWorkerID(component.spec, component.generation),
 		artifactDigest: component.spec.artifactDigest,
 		codeVersion:    component.spec.codeVersion,
-		processID:      component.process.PID(),
+		processID:      execution.pid,
+		execution:      execution,
 		generation:     component.generation,
 		process:        component.process,
 	}, nil

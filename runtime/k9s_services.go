@@ -148,7 +148,7 @@ func placementsScreen(service applicationServiceRow, handler applicationHandlerR
 	screen := servicesScreen{
 		title: "APP / SERVICES / " + strings.ToUpper(service.Name) + " / " + strings.ToUpper(handler.Name), level: "placements",
 		service: service.Name, handler: handler.Name,
-		columns: []string{"PLACEMENT", "NODE", "STATUS", "ROLE"},
+		columns: []string{"PLACEMENT", "NODE", "STATUS", "ROLE", "PROCESS"},
 		hint:    servicesHintBase + "  [aqua::b]<d>[-:-:-] Debug  [aqua::b]<l>[-:-:-] Logs",
 	}
 	if handler.Transfer {
@@ -160,7 +160,7 @@ func placementsScreen(service applicationServiceRow, handler applicationHandlerR
 			role = fmt.Sprintf("owner (epoch %d)", handler.Epoch)
 		}
 		screen.rows = append(screen.rows, servicesRow{
-			cells:   []string{placement.ID, placement.NodeID, placement.Status, role},
+			cells:   []string{placement.ID, placement.NodeID, placement.Status, role, placement.label()},
 			service: service.ServiceID, method: handler.Method, node: placement.NodeID, color: statusColor(placement.Status),
 		})
 	}
@@ -170,12 +170,12 @@ func placementsScreen(service applicationServiceRow, handler applicationHandlerR
 func nodesScreen(view applicationServicesView) servicesScreen {
 	screen := servicesScreen{
 		title: "CLUSTER / NODES", level: "nodes",
-		columns: []string{"NODE", "HEALTH", "PLACEMENTS"},
+		columns: []string{"NODE", "HEALTH", "PLACEMENTS", "PROCESSES"},
 		hint:    servicesHintBase,
 	}
 	for _, node := range view.Nodes {
 		screen.rows = append(screen.rows, servicesRow{
-			cells: []string{node.NodeID, node.Health, fmt.Sprint(len(node.Hosted))},
+			cells: []string{node.NodeID, node.Health, fmt.Sprint(len(node.Hosted)), fmt.Sprint(len(node.Processes))},
 			node:  node.NodeID, color: statusColor(node.Health),
 		})
 	}
@@ -185,7 +185,7 @@ func nodesScreen(view applicationServicesView) servicesScreen {
 func hostedScreen(node applicationNodeRow) servicesScreen {
 	screen := servicesScreen{
 		title: "CLUSTER / NODES / " + strings.ToUpper(node.NodeID), level: "hosted",
-		columns: []string{"SERVICE", "HANDLER", "SCALING", "STATUS", "ROLE"},
+		columns: []string{"SERVICE", "HANDLER", "SCALING", "STATUS", "ROLE", "PROCESS"},
 		hint:    servicesHintBase,
 	}
 	for _, hosted := range node.Hosted {
@@ -194,7 +194,7 @@ func hostedScreen(node applicationNodeRow) servicesScreen {
 			role = "owner"
 		}
 		screen.rows = append(screen.rows, servicesRow{
-			cells: []string{hosted.Service, hosted.Handler, hosted.Scaling, hosted.Status, role},
+			cells: []string{hosted.Service, hosted.Handler, hosted.Scaling, hosted.Status, role, hosted.label()},
 			node:  node.NodeID, color: statusColor(hosted.Status),
 		})
 	}

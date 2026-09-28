@@ -371,3 +371,55 @@ func TestServicesAndNodesHaveHotkeys(t *testing.T) {
 		t.Errorf("hint line %q does not advertise services and nodes", hint)
 	}
 }
+
+// Placements say which node runs a service; the view also says which process
+// on that node does, and shows many services sharing one application runtime.
+func TestServicesViewShowsServicesSharingOneProcess(t *testing.T) {
+	previous := activeApplication
+	t.Cleanup(func() { activeApplication = previous })
+	activeApplication = Definition{Components: []Component{
+		{ServiceID: 1, Name: "Orders", Kind: "orders"},
+		{ServiceID: 2, Name: "Inventory", Kind: "inventory"},
+		{ServiceID: 3, Name: "Payment", Kind: "payment"},
+	}}
+	shared := func(id grove.ServiceID, name string) ComponentStatus {
+		return ComponentStatus{ServiceID: id, Name: name, State: "healthy", ExecutionMode: "in-process", ProcessID: "app-runtime-1", PID: 100}
+	}
+	view := buildServicesView(systemnats.HandlerPlacementView{}, ClusterStatus{
+		Nodes: []NodeStatus{{NodeID: "node-1", Health: "healthy", Components: []ComponentStatus{
+			shared(1, "Orders"),
+			shared(2, "Inventory"),
+			{ServiceID: 3, Name: "Payment", State: "healthy", ExecutionMode: "isolated-process", ProcessID: "worker-1", PID: 200},
+		}}},
+		Placements: []PlacementStatus{
+			{ServiceID: 1, Name: "Orders", NodeID: "node-1", Health: "healthy"},
+			{ServiceID: 2, Name: "Inventory", NodeID: "node-1", Health: "healthy"},
+			{ServiceID: 3, Name: "Payment", NodeID: "node-1", Health: "healthy"},
+		},
+	})
+	if len(view.Nodes) != 1 || len(view.Nodes[0].Processes) != 2 {
+		t.Fatalf("nodes = %#v; want one node with two processes", view.Nodes)
+	}
+	runtimeProcess := view.Nodes[0].Processes[0]
+	if runtimeProcess.ProcessID != "app-runtime-1" || runtimeProcess.PID != 100 || strings.Join(runtimeProcess.Services, ",") != "Orders,Inventory" {
+		t.Errorf("shared process = %#v; want Orders and Inventory in app-runtime-1", runtimeProcess)
+	}
+	labels := map[string]string{}
+	for _, hosted := range view.Nodes[0].Hosted {
+		labels[hosted.Service] = hosted.label()
+	}
+	want := map[string]string{
+		"Orders":    "app-runtime-1 (pid 100)",
+		"Inventory": "app-runtime-1 (pid 100)",
+		"Payment":   "worker-1 (pid 200) isolated",
+	}
+	for service, label := range want {
+		if labels[service] != label {
+			t.Errorf("%s process = %q; want %q", service, labels[service], label)
+		}
+	}
+	screen := nodesScreen(view)
+	if got := screen.rows[0].cells[3]; got != "2" {
+		t.Errorf("node processes cell = %q; want 2", got)
+	}
+}

@@ -298,9 +298,16 @@ type NodeStatus struct {
 type ComponentStatus struct {
 	ServiceID grove.ServiceID `json:"service_id"`
 	Name      string          `json:"name"`
-	WorkerID  string          `json:"worker_id"`
-	State     string          `json:"state"`
-	Error     string          `json:"error,omitempty"`
+	// WorkerID identifies the component instance generation, not a process.
+	WorkerID string `json:"worker_id"`
+	// ExecutionMode, ProcessID and PID identify the process running the
+	// component. Components in the node's shared application runtime report
+	// the same process.
+	ExecutionMode string `json:"execution_mode,omitempty"`
+	ProcessID     string `json:"process_id,omitempty"`
+	PID           int    `json:"pid,omitempty"`
+	State         string `json:"state"`
+	Error         string `json:"error,omitempty"`
 }
 
 type PlacementStatus struct {

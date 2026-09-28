@@ -20,6 +20,9 @@ func executeDebug(ctx context.Context, parsed invocation, transport *systemnats.
 	fmt.Fprintf(output, "Service  %s (%d)\n", strings.ToLower(target.ServiceName), target.ServiceID)
 	fmt.Fprintf(output, "Node     %s\n", target.NodeID)
 	fmt.Fprintf(output, "Worker   %s\n", target.WorkerID)
+	if target.ExecutionProcess != "" {
+		fmt.Fprintf(output, "Process  %s (%s)\n", target.ExecutionProcess, target.ExecutionMode)
+	}
 	fmt.Fprintf(output, "Artifact %s\n", target.ArtifactDigest)
 	fmt.Fprintf(output, "Version  %s\n", target.CodeVersion)
 	fmt.Fprintf(output, "DAP listening locally on %s\n", session.Address)
