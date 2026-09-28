@@ -71,7 +71,9 @@ func TestResolveTUISelection(t *testing.T) {
 	}{
 		{name: "cluster status", input: "Cluster > Status", wantName: "cluster.status", wantOK: true},
 		{name: "cluster start", input: "Cluster > Start new cluster", wantName: "cluster.start", wantOK: true},
+		{name: "cluster start with nodes", input: "Cluster > Start new cluster > 5", wantName: "cluster.start", wantArgs: []string{"--nodes", "5"}, wantOK: true},
 		{name: "cluster join", input: "Cluster > Join", wantName: "cluster.join", wantOK: true},
+		{name: "cluster join with nodes", input: "Cluster > Join cluster > 2", wantName: "cluster.join", wantArgs: []string{"--nodes", "2"}, wantOK: true},
 		{name: "new rollout", input: "Deployments > New rollout > configs/acme.yaml", wantName: "rollout.start", wantArgs: []string{"--config", "configs/acme.yaml"}, wantOK: true},
 		{name: "debug demo", input: "Deployments > Debug demo > Start", wantName: "debug.demo.start", wantOK: true},
 		{name: "application action", input: "Application > Run integrity check", wantName: groveshop.ActionVerifyOrders, wantOK: true},
@@ -443,6 +445,43 @@ func waitForConsoleState(t *testing.T, path string) {
 		case <-ticker.C:
 		case <-ctx.Done():
 			t.Fatalf("wait for application console state %q: %v", path, ctx.Err())
+		}
+	}
+}
+
+func TestClusterStartAndJoinNodeCounts(t *testing.T) {
+	starts := []struct {
+		args        []string
+		wantAddress string
+		wantNodes   int
+		wantErr     error
+	}{
+		{args: nil, wantNodes: 3},
+		{args: []string{"--nodes", "5", "--ingress", "127.0.0.1:8080"}, wantAddress: "127.0.0.1:8080", wantNodes: 5},
+		{args: []string{"--nodes", "2"}, wantErr: errApplicationNodeCount},
+		{args: []string{"--nodes", "many"}, wantErr: errConsoleArguments},
+		{args: []string{"extra"}, wantErr: errConsoleArguments},
+	}
+	for _, test := range starts {
+		address, nodes, err := parseStartArguments(test.args)
+		if !errors.Is(err, test.wantErr) || (test.wantErr == nil && (address != test.wantAddress || nodes != test.wantNodes)) {
+			t.Errorf("parseStartArguments(%q) = (%q, %d, %v); want (%q, %d, %v)", test.args, address, nodes, err, test.wantAddress, test.wantNodes, test.wantErr)
+		}
+	}
+	joins := []struct {
+		args      []string
+		wantNodes int
+		wantErr   error
+	}{
+		{args: nil, wantNodes: 1},
+		{args: []string{"--nodes", "4"}, wantNodes: 4},
+		{args: []string{"--nodes", "0"}, wantErr: errApplicationNodeCount},
+		{args: []string{"--nodes", "x"}, wantErr: errConsoleArguments},
+	}
+	for _, test := range joins {
+		nodes, err := parseJoinArguments(test.args)
+		if !errors.Is(err, test.wantErr) || (test.wantErr == nil && nodes != test.wantNodes) {
+			t.Errorf("parseJoinArguments(%q) = (%d, %v); want (%d, %v)", test.args, nodes, err, test.wantNodes, test.wantErr)
 		}
 	}
 }

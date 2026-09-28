@@ -11,8 +11,8 @@ Grove Shop's application code lives in its own repository, [grove-project/groves
 A developer builds one Grove Shop application artifact containing application services, embedded Web UI, Grove runtime/operational surface, deployment metadata, and embedded customer configuration.
 
 Running the artifact is the primary human workflow:
-- the first instance discovers no compatible cluster and offers **Start new cluster**;
-- another instance of the same application and exact artifact discovers the cluster and suggests **Join**;
+- the first instance discovers no compatible cluster and offers **Start new cluster**, asking how many nodes to start (at least three);
+- another instance of the same application and exact artifact discovers the cluster, suggests **Join**, and asks how many nodes to add;
 - a different artifact of the same application discovers the cluster and suggests **Roll out this build**.
 
 Code changes and embedded-configuration changes are not separate deployment mechanisms. Both produce a new immutable artifact identity and use the same candidate, health-gating, cutover, and rollback flow.

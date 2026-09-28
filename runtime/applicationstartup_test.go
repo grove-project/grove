@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -108,26 +109,28 @@ func TestConfiguredArtifactBootstrapsThenJoinsOneCluster(t *testing.T) {
 	}
 	defer discovery.close()
 
-	// A cluster needs three nodes: with one or two it forms but does not
-	// serve, and a node may not leave if that would drop it below three. So
-	// nodes are replaced one at a time, adding before removing.
-	consoles := make([]*testArtifactConsole, 0, 6)
-	startNode := func(existingNodes int) {
+	// A cluster needs three nodes to serve, so Start new cluster bootstraps
+	// three nodes from one console and every later console adds nodes with
+	// Join. A node may not leave if that would drop the cluster below three,
+	// so the original generation is replaced by adding before removing.
+	consoles := make([]*testArtifactConsole, 0, 3)
+	launch := func(existingNodes int, wantNodes ...string) {
 		console := startTestArtifactConsole(t, ctx, configuredPath, discoveryAddress, filepath.Join(directory, "console-"+strconv.Itoa(len(consoles)+1)+".json"))
 		consoles = append(consoles, console)
-		wantNode := "node-" + strconv.Itoa(len(consoles))
 		if existingNodes == 0 {
 			waitForArtifactConsoleText(t, ctx, console, "No Grove Test App cluster discovered")
 			if output := console.output.String(); !strings.Contains(output, "> Start new cluster") || strings.Contains(output, "Join cluster") || strings.Contains(output, "New rollout") {
-				t.Fatalf("first-node startup screen = %q", output)
+				t.Fatalf("first-console startup screen = %q", output)
 			}
+			// Without a node count, Start new cluster starts the three nodes a
+			// cluster needs to serve.
 			output := runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, "cluster.start")
 			var started applicationJoinResult
 			if err := json.Unmarshal(output, &started); err != nil {
 				t.Fatalf("decode cluster start result %q: %v", output, err)
 			}
-			if started.State != "started" || started.NodeID != wantNode {
-				t.Fatalf("cluster start result = %#v", started)
+			if started.State != "started" || !slices.Equal(started.NodeIDs, wantNodes) {
+				t.Fatalf("cluster start result = %#v; want %v started", started, wantNodes)
 			}
 			return
 		}
@@ -135,15 +138,19 @@ func TestConfiguredArtifactBootstrapsThenJoinsOneCluster(t *testing.T) {
 		if output := console.output.String(); !strings.Contains(output, "> Join cluster") ||
 			!strings.Contains(output, "Nodes    "+strconv.Itoa(existingNodes)) ||
 			strings.Contains(output, "Start new cluster") || strings.Contains(output, "New rollout") {
-			t.Fatalf("join startup screen for %s = %q", wantNode, output)
+			t.Fatalf("join startup screen for %v = %q", wantNodes, output)
 		}
-		output := runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, "cluster.join")
+		args := []string{"cluster.join"}
+		if len(wantNodes) != 1 {
+			args = append(args, "--nodes", strconv.Itoa(len(wantNodes)))
+		}
+		output := runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, args...)
 		var joined applicationJoinResult
 		if err := json.Unmarshal(output, &joined); err != nil {
 			t.Fatalf("decode join result %q: %v", output, err)
 		}
-		if joined.State != "joined" || joined.NodeID != wantNode {
-			t.Fatalf("join result = %#v; want node %s joined", joined, wantNode)
+		if joined.State != "joined" || !slices.Equal(joined.NodeIDs, wantNodes) {
+			t.Fatalf("join result = %#v; want %v joined", joined, wantNodes)
 		}
 	}
 	// serving waits for the cluster to serve with wantNodes nodes and proves it
@@ -159,50 +166,19 @@ func TestConfiguredArtifactBootstrapsThenJoinsOneCluster(t *testing.T) {
 		}
 		return record
 	}
-	// forming asserts a cluster with fewer than three nodes does not serve.
-	forming := func(wantNodes int) {
-		t.Helper()
-		record := waitForApplicationDiscoveryNodes(t, ctx, discovery, wantNodes)
-		attempt, cancelAttempt := context.WithTimeout(ctx, 5*time.Second)
-		defer cancelAttempt()
-		var status ClusterStatus
-		if err := readApplicationJSON(attempt, "http://"+record.WebAddress+"/grove/status", &status); err == nil && status.Ready {
-			t.Fatalf("a %d-node cluster reports ready: %#v", wantNodes, status)
-		}
-		if order, err := createApplicationOrder(attempt, record.WebAddress, "forming-"+strconv.Itoa(wantNodes)); err == nil && applicationOrderCompleted(order) {
-			t.Fatalf("a %d-node cluster served an order: %#v", wantNodes, order)
-		}
-	}
-
-	startNode(0) // node-1
-	forming(1)
-	startNode(1) // node-2
-	forming(2)
-	startNode(2) // node-3: the third node makes the cluster serve
+	launch(0, "node-1", "node-2", "node-3")
 	serving(3, "three-nodes")
-	startNode(3) // node-4
+	launch(3, "node-4")
 	serving(4, "four-nodes")
+	launch(4, "node-5", "node-6")
+	serving(6, "six-nodes")
 
-	// Replace the complete original generation, one node at a time, so the
-	// final membership is exactly node-4,node-5,node-6. This catches placement
-	// observers that restart empty during stream migration and never
-	// rediscover existing keys.
-	consoles[1].stop(t) // node-2 leaves: 4 -> 3
+	// Quitting the first console retires node-1, node-2 and node-3 one at a
+	// time, so the final membership is exactly node-4,node-5,node-6. This
+	// catches placement observers that restart empty during stream migration
+	// and never rediscover existing keys.
+	consoles[0].stop(t)
 	record := waitForApplicationDiscoveryNodes(t, ctx, discovery, 3)
-	waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 3, "node-2")
-	serving(3, "after-node-2-retirement")
-
-	startNode(3) // node-5: 3 -> 4
-	serving(4, "after-node-5-joined")
-	consoles[0].stop(t) // node-1 leaves: 4 -> 3
-	record = waitForApplicationDiscoveryNodes(t, ctx, discovery, 3)
-	waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 3, "node-1")
-	serving(3, "after-node-1-retirement")
-
-	startNode(3) // node-6: 3 -> 4
-	serving(4, "after-node-6-joined")
-	consoles[2].stop(t) // node-3 leaves: 4 -> 3
-	record = waitForApplicationDiscoveryNodes(t, ctx, discovery, 3)
 	status := waitForApplicationClusterStage(t, ctx, record.WebAddress, inspection.ArtifactDigest, 3, 5)
 	waitForApplicationControlReplicas(t, ctx, record.Nodes[0].SystemNATSURL, 3)
 	wantFinalNodes := []string{"node-4", "node-5", "node-6"}
@@ -217,7 +193,7 @@ func TestConfiguredArtifactBootstrapsThenJoinsOneCluster(t *testing.T) {
 	if order, err := waitForApplicationOrder(ctx, record.WebAddress, "after-complete-node-replacement"); err != nil || !applicationOrderCompleted(order) {
 		t.Fatalf("order after complete node replacement = %#v, error=%v", order, err)
 	}
-	for _, index := range []int{3, 4, 5} {
+	for _, index := range []int{1, 2} {
 		output := runConfiguredArtifactAction(t, ctx, configuredPath, consoles[index].statePath, "cluster.status")
 		var observed ClusterStatus
 		if err := json.Unmarshal(output, &observed); err != nil {
@@ -228,7 +204,7 @@ func TestConfiguredArtifactBootstrapsThenJoinsOneCluster(t *testing.T) {
 		}
 	}
 
-	for _, index := range []int{5, 4, 3} {
+	for _, index := range []int{2, 1} {
 		consoles[index].stop(t)
 	}
 	if _, exists, err := discovery.discover(ctx); err != nil || exists {
@@ -372,7 +348,7 @@ func waitForApplicationControlReplicas(t *testing.T, ctx context.Context, system
 }
 
 func TestConfiguredArtifactGracefulLeaveRetiresNodeAndRecoversServices(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 180*time.Second)
 	defer cancel()
 	directory := t.TempDir()
 	discoveryAddress := testApplicationDiscoveryAddress(t)
@@ -387,20 +363,12 @@ func TestConfiguredArtifactGracefulLeaveRetiresNodeAndRecoversServices(t *testin
 		t.Fatal(err)
 	}
 
-	consoles := make([]*testArtifactConsole, 0, 4)
-	for index := range 4 {
-		console := startTestArtifactConsole(
-			t, ctx, configuredPath, discoveryAddress,
-			filepath.Join(directory, "console-"+strconv.Itoa(index+1)+".json"),
-		)
-		consoles = append(consoles, console)
-		if index == 0 {
-			waitForArtifactConsoleText(t, ctx, console, "No Grove Test App cluster discovered")
-			runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, "cluster.start")
-		} else {
-			waitForArtifactConsoleText(t, ctx, console, "Grove cluster discovered")
-			runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, "cluster.join")
-		}
+	// The first console starts node-1..3 and the second adds node-4..6, so
+	// quitting the first retires the original generation one node at a time
+	// while three nodes remain.
+	consoles := []*testArtifactConsole{
+		startClusterConsole(t, ctx, configuredPath, discoveryAddress, filepath.Join(directory, "console-1.json")),
+		joinClusterConsole(t, ctx, configuredPath, discoveryAddress, filepath.Join(directory, "console-2.json"), 3),
 	}
 
 	discovery, err := newApplicationDiscovery(inspection.Manifest.ApplicationID, inspection.Config.Facts["cluster.name"])
@@ -410,24 +378,25 @@ func TestConfiguredArtifactGracefulLeaveRetiresNodeAndRecoversServices(t *testin
 	defer discovery.close()
 	record, exists, err := discovery.discover(ctx)
 	if err != nil || !exists {
-		t.Fatalf("discover four-node cluster: exists=%t error=%v", exists, err)
+		t.Fatalf("discover six-node cluster: exists=%t error=%v", exists, err)
 	}
-	if len(record.Nodes) != 4 {
+	if len(record.Nodes) != 6 {
 		t.Fatalf("nodes before graceful leave = %#v", record.Nodes)
 	}
-	status := waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 4, "")
+	status := waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 6, "")
 	if len(status.Placements) != 5 {
 		t.Fatalf("placements before graceful leave = %#v", status.Placements)
 	}
 
-	// node-1 initially owns Orders and Web. Quitting its application console
-	// must relocate both services, preserve the Web address, and then delete its
-	// membership.
+	// node-1 initially owns Orders and Web. Quitting the application console
+	// that hosts node-1..3 must relocate their services, preserve the Web
+	// address, and then delete their membership.
+	retired := []string{"node-1", "node-2", "node-3"}
 	consoles[0].stop(t)
 	status = waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 3, "node-1")
 	for _, placement := range status.Placements {
-		if placement.NodeID == "node-1" || placement.Health != string(systemnats.ComponentHealthy) {
-			t.Fatalf("placement after node-1 retirement = %#v", placement)
+		if slices.Contains(retired, placement.NodeID) || placement.Health != string(systemnats.ComponentHealthy) {
+			t.Fatalf("placement after node-1..3 retirement = %#v", placement)
 		}
 	}
 	order, err := waitForApplicationOrder(ctx, record.WebAddress, "after-node-1-retirement")
@@ -446,14 +415,12 @@ func TestConfiguredArtifactGracefulLeaveRetiresNodeAndRecoversServices(t *testin
 		t.Fatalf("discovery nodes after graceful leave = %#v", record.Nodes)
 	}
 	for _, node := range record.Nodes {
-		if node.NodeID == "node-1" {
+		if slices.Contains(retired, node.NodeID) {
 			t.Fatalf("retired node remains discoverable: %#v", record.Nodes)
 		}
 	}
 
-	for _, index := range []int{3, 2, 1} {
-		consoles[index].stop(t)
-	}
+	consoles[1].stop(t)
 }
 
 func waitForApplicationClusterShape(
@@ -629,6 +596,39 @@ func runConfiguredArtifactAction(
 	return output
 }
 
+// startClusterConsole launches an application console that finds no cluster
+// and starts a new one with the default node count.
+func startClusterConsole(
+	t *testing.T,
+	ctx context.Context,
+	binaryPath string,
+	discoveryAddress string,
+	statePath string,
+) *testArtifactConsole {
+	t.Helper()
+	console := startTestArtifactConsole(t, ctx, binaryPath, discoveryAddress, statePath)
+	waitForArtifactConsoleText(t, ctx, console, "No Grove Test App cluster discovered")
+	runConfiguredArtifactAction(t, ctx, binaryPath, console.statePath, "cluster.start")
+	return console
+}
+
+// joinClusterConsole launches an application console that discovers the
+// running cluster and adds that many nodes to it.
+func joinClusterConsole(
+	t *testing.T,
+	ctx context.Context,
+	binaryPath string,
+	discoveryAddress string,
+	statePath string,
+	nodes int,
+) *testArtifactConsole {
+	t.Helper()
+	console := startTestArtifactConsole(t, ctx, binaryPath, discoveryAddress, statePath)
+	waitForArtifactConsoleText(t, ctx, console, "Grove cluster discovered")
+	runConfiguredArtifactAction(t, ctx, binaryPath, console.statePath, "cluster.join", "--nodes", strconv.Itoa(nodes))
+	return console
+}
+
 func waitForJoinedApplicationStatus(
 	t *testing.T,
 	ctx context.Context,
@@ -680,24 +680,10 @@ func TestJoinedNodeWithNeverSeenIDHostsRuntimeChosenComponents(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	consoles := make([]*testArtifactConsole, 0, 5)
-	startConsole := func(action string) {
-		console := startTestArtifactConsole(
-			t, ctx, configuredPath, discoveryAddress,
-			filepath.Join(directory, "console-"+strconv.Itoa(len(consoles)+1)+".json"),
-		)
-		consoles = append(consoles, console)
-		if action == "cluster.start" {
-			waitForArtifactConsoleText(t, ctx, console, "No Grove Test App cluster discovered")
-		} else {
-			waitForArtifactConsoleText(t, ctx, console, "Grove cluster discovered")
-		}
-		runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, action)
+	consoles := []*testArtifactConsole{
+		startClusterConsole(t, ctx, configuredPath, discoveryAddress, filepath.Join(directory, "console-1.json")),
+		joinClusterConsole(t, ctx, configuredPath, discoveryAddress, filepath.Join(directory, "console-2.json"), 1),
 	}
-	startConsole("cluster.start")
-	startConsole("cluster.join")
-	startConsole("cluster.join")
-	startConsole("cluster.join")
 
 	discovery, err := newApplicationDiscovery(inspection.Manifest.ApplicationID, inspection.Config.Facts["cluster.name"])
 	if err != nil {
@@ -710,13 +696,13 @@ func TestJoinedNodeWithNeverSeenIDHostsRuntimeChosenComponents(t *testing.T) {
 	}
 	waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 4, "")
 
-	// Node-3 leaves (four nodes down to the three a cluster needs), then a
+	// Node-4 leaves (four nodes down to the three a cluster needs), then a
 	// node joins: the join flow never reuses IDs, so the new node is node-5,
 	// which no definition or test ever listed.
-	consoles[2].stop(t)
-	waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 3, "node-3")
-	startConsole("cluster.join")
-	status := waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 4, "node-3")
+	consoles[1].stop(t)
+	waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 3, "node-4")
+	consoles = append(consoles, joinClusterConsole(t, ctx, configuredPath, discoveryAddress, filepath.Join(directory, "console-3.json"), 1))
+	status := waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 4, "node-4")
 
 	var joined *NodeStatus
 	for i := range status.Nodes {
@@ -740,17 +726,14 @@ func TestJoinedNodeWithNeverSeenIDHostsRuntimeChosenComponents(t *testing.T) {
 	if err != nil || !applicationOrderCompleted(order) {
 		t.Fatalf("order after node-5 joined = %#v, %v", order, err)
 	}
-	for i := len(consoles) - 1; i >= 0; i-- {
-		if i != 2 {
-			consoles[i].stop(t)
-		}
-	}
+	consoles[2].stop(t)
+	consoles[0].stop(t)
 }
 
 // Ingress is placed by the runtime: when the node serving the web address is
 // lost, a surviving node takes the address over without any directive.
 func TestIngressMovesToSurvivorWhenServingNodeLeaves(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 180*time.Second)
 	defer cancel()
 	directory := t.TempDir()
 	discoveryAddress := testApplicationDiscoveryAddress(t)
@@ -764,20 +747,12 @@ func TestIngressMovesToSurvivorWhenServingNodeLeaves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	consoles := make([]*testArtifactConsole, 0, 4)
-	for index := range 4 {
-		console := startTestArtifactConsole(
-			t, ctx, configuredPath, discoveryAddress,
-			filepath.Join(directory, "console-"+strconv.Itoa(index+1)+".json"),
-		)
-		consoles = append(consoles, console)
-		if index == 0 {
-			waitForArtifactConsoleText(t, ctx, console, "No Grove Test App cluster discovered")
-			runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, "cluster.start")
-		} else {
-			waitForArtifactConsoleText(t, ctx, console, "Grove cluster discovered")
-			runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, "cluster.join")
-		}
+	// The first console starts node-1..3 and the second adds node-4..6, so
+	// quitting the first retires the original generation one node at a time
+	// while three nodes remain.
+	consoles := []*testArtifactConsole{
+		startClusterConsole(t, ctx, configuredPath, discoveryAddress, filepath.Join(directory, "console-1.json")),
+		joinClusterConsole(t, ctx, configuredPath, discoveryAddress, filepath.Join(directory, "console-2.json"), 3),
 	}
 	discovery, err := newApplicationDiscovery(inspection.Manifest.ApplicationID, inspection.Config.Facts["cluster.name"])
 	if err != nil {
@@ -788,22 +763,20 @@ func TestIngressMovesToSurvivorWhenServingNodeLeaves(t *testing.T) {
 	if err != nil || !exists {
 		t.Fatalf("discover cluster: exists=%t error=%v", exists, err)
 	}
-	status := waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 4, "")
+	status := waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 6, "")
 	if node := applicationPlacementNodeFromStatus(status, groveshop.ServiceWeb); node != "node-1" {
 		t.Fatalf("ingress starts on %q; want the bootstrap node-1", node)
 	}
 
 	consoles[0].stop(t)
 	status = waitForApplicationClusterShape(t, ctx, record.WebAddress, inspection.ArtifactDigest, 3, "node-1")
-	if node := applicationPlacementNodeFromStatus(status, groveshop.ServiceWeb); node == "" || node == "node-1" {
-		t.Fatalf("ingress placement after node-1 left = %q", node)
+	if node := applicationPlacementNodeFromStatus(status, groveshop.ServiceWeb); node == "" || slices.Contains([]string{"node-1", "node-2", "node-3"}, node) {
+		t.Fatalf("ingress placement after node-1..3 left = %q", node)
 	}
 	order, err := waitForApplicationOrder(ctx, record.WebAddress, "after-ingress-move")
 	if err != nil || !applicationOrderCompleted(order) {
 		t.Fatalf("order through moved ingress = %#v, %v", order, err)
 	}
-	consoles[3].stop(t)
-	consoles[2].stop(t)
 	consoles[1].stop(t)
 }
 
@@ -827,24 +800,8 @@ func TestIngressMovesToSurvivorWhenServingNodeIsKilled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	consoles := make([]*testArtifactConsole, 0, 3)
-	for index := range 3 {
-		console := startTestArtifactConsole(
-			t, ctx, configuredPath, discoveryAddress,
-			filepath.Join(directory, "console-"+strconv.Itoa(index+1)+".json"),
-		)
-		consoles = append(consoles, console)
-		phase("console " + strconv.Itoa(index+1) + " up")
-		if index == 0 {
-			waitForArtifactConsoleText(t, ctx, console, "No Grove Test App cluster discovered")
-			runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, "cluster.start")
-			phase("cluster.start returned (founder Grovlet ready)")
-		} else {
-			waitForArtifactConsoleText(t, ctx, console, "Grove cluster discovered")
-			runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, "cluster.join")
-			phase("cluster.join returned (joiner Grovlet ready)")
-		}
-	}
+	console := startClusterConsole(t, ctx, configuredPath, discoveryAddress, filepath.Join(directory, "console-1.json"))
+	phase("cluster.start returned (node-1..3 ready in one console)")
 	discovery, err := newApplicationDiscovery(inspection.Manifest.ApplicationID, inspection.Config.Facts["cluster.name"])
 	if err != nil {
 		t.Fatal(err)
@@ -984,8 +941,7 @@ func TestIngressMovesToSurvivorWhenServingNodeIsKilled(t *testing.T) {
 	if _, err := survivorJS.AccountInfo(ctx); err != nil {
 		t.Fatalf("survivors have no metadata leader after node-1 was killed: %v", err)
 	}
-	consoles[2].stop(t)
-	consoles[1].stop(t)
+	console.stop(t)
 }
 
 // metadataVoters returns the JetStream metadata group size reported by the
@@ -1096,23 +1052,9 @@ func TestReplacementNodeJoinsAfterThirdNodeIsKilled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	consoles := make([]*testArtifactConsole, 0, 4)
-	startConsole := func(action string) {
-		console := startTestArtifactConsole(
-			t, ctx, configuredPath, discoveryAddress,
-			filepath.Join(directory, "console-"+strconv.Itoa(len(consoles)+1)+".json"),
-		)
-		consoles = append(consoles, console)
-		if action == "cluster.start" {
-			waitForArtifactConsoleText(t, ctx, console, "No Grove Test App cluster discovered")
-		} else {
-			waitForArtifactConsoleText(t, ctx, console, "Grove cluster discovered")
-		}
-		runConfiguredArtifactAction(t, ctx, configuredPath, console.statePath, action)
+	consoles := []*testArtifactConsole{
+		startClusterConsole(t, ctx, configuredPath, discoveryAddress, filepath.Join(directory, "console-1.json")),
 	}
-	startConsole("cluster.start")
-	startConsole("cluster.join")
-	startConsole("cluster.join")
 
 	discovery, err := newApplicationDiscovery(inspection.Manifest.ApplicationID, inspection.Config.Facts["cluster.name"])
 	if err != nil {
@@ -1168,7 +1110,7 @@ func TestReplacementNodeJoinsAfterThirdNodeIsKilled(t *testing.T) {
 	}
 
 	// The replacement is a brand-new node, not node-3 coming back.
-	startConsole("cluster.join")
+	consoles = append(consoles, joinClusterConsole(t, ctx, configuredPath, discoveryAddress, filepath.Join(directory, "console-2.json"), 1))
 	phase("replacement node joined")
 	ticker := time.NewTicker(applicationConditionInterval)
 	defer ticker.Stop()
@@ -1216,7 +1158,6 @@ func TestReplacementNodeJoinsAfterThirdNodeIsKilled(t *testing.T) {
 			t.Errorf("cluster log lacks %q:\n%s", want, clusterLog)
 		}
 	}
-	for _, index := range []int{3, 1, 0} {
-		consoles[index].stop(t)
-	}
+	consoles[1].stop(t)
+	consoles[0].stop(t)
 }

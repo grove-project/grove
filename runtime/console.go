@@ -169,7 +169,7 @@ func summarizeInteractiveResult(result any) string {
 			value.DAPEndpoint,
 		)
 	case applicationJoinResult:
-		return fmt.Sprintf("Cluster: %s\nNode: %s", value.State, value.NodeID)
+		return fmt.Sprintf("Cluster: %s\nNodes: %s", value.State, strings.Join(value.NodeIDs, ", "))
 	case ClusterStatus:
 		return fmt.Sprintf("Cluster: %s\nNodes: %d\nServices: %d", value.Health, len(value.Nodes), len(value.Placements))
 	}
@@ -206,8 +206,12 @@ func resolveTUISelection(line string) (string, []string, bool) {
 			return "cluster.status", nil, true
 		case parts[0] == "Cluster" && parts[1] == "Start new cluster" && len(parts) == 2:
 			return "cluster.start", nil, true
+		case parts[0] == "Cluster" && parts[1] == "Start new cluster" && len(parts) == 3 && parts[2] != "":
+			return "cluster.start", []string{"--nodes", parts[2]}, true
 		case parts[0] == "Cluster" && (parts[1] == "Join" || parts[1] == "Join cluster") && len(parts) == 2:
 			return "cluster.join", nil, true
+		case parts[0] == "Cluster" && (parts[1] == "Join" || parts[1] == "Join cluster") && len(parts) == 3 && parts[2] != "":
+			return "cluster.join", []string{"--nodes", parts[2]}, true
 		case parts[0] == "Cluster" && parts[1] == "Restart cluster" && len(parts) == 2:
 			return "cluster.restart", nil, true
 		case parts[0] == "Deployments" && parts[1] == "New rollout" && len(parts) == 3 && parts[2] != "":
