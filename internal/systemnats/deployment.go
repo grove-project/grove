@@ -327,12 +327,21 @@ func (d *Deployments) PutArtifact(ctx context.Context, transport *Transport, art
 	return nil
 }
 
+// ingressWriteAttemptTimeout bounds one PutIngress attempt. A write published
+// while the deployment stream is being resized can be lost without a reply, so
+// an attempt must give up and let the caller retry instead of waiting out the
+// caller's whole deadline (grove#42).
+const ingressWriteAttemptTimeout = 2 * time.Second
+
 // PutIngress records the cluster-wide ingress address, or accepts an identical
-// retry. The first address wins; a different one is ErrIngressChanged.
+// retry. The first address wins; a different one is ErrIngressChanged. Each
+// call is one bounded attempt; callers retry transient failures.
 func (d *Deployments) PutIngress(ctx context.Context, transport *Transport, address string) error {
 	if host, port, err := net.SplitHostPort(address); err != nil || host == "" || port == "" {
 		return &Error{Operation: "validate ingress address", Err: ErrIngressInvalid}
 	}
+	ctx, cancel := context.WithTimeout(ctx, ingressWriteAttemptTimeout)
+	defer cancel()
 	kv, err := deploymentKV(ctx, transport)
 	if err != nil {
 		return &Error{Operation: "write ingress address", Err: err}

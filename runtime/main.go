@@ -390,10 +390,20 @@ func resolveIngress(ctx context.Context, cfg config, transport *systemnats.Trans
 			lastErr = deployments.PutIngress(waitCtx, transport, cfg.ingressAddress)
 			view = deployments.Snapshot()
 		}
-		if view.Ready && (view.Ingress != "" || cfg.adoptCluster) {
-			if view.Ingress == "" {
+		ingressKnown := view.Ready && view.Ingress != ""
+		if view.Ready && !ingressKnown && cfg.adoptCluster {
+			// No ingress recorded yet. A runtime-placed founder records its
+			// ingress before any placement, so placements without an ingress
+			// mean an explicitly placed cluster; no placements means the
+			// founder may still be recording it, so keep waiting (grove#40).
+			placed, err := systemnats.RecordedPlacements(waitCtx, transport)
+			if err != nil {
+				lastErr = err
+			} else if len(placed) != 0 {
 				return cfg, nil // not a runtime-placed cluster: host nothing
 			}
+		}
+		if ingressKnown {
 			for _, component := range activeApplication.Components {
 				if component.HTTPHandler != nil {
 					if configuredValue(cfg.componentListeners, component.Kind) == "" {
@@ -596,6 +606,12 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 		if cfg, err = resolveIngress(ctx, cfg, transport, deployments); err != nil {
 			runtime.stop()
 			return nil, err
+		}
+		if restoreControlState && cfg.hostAll {
+			if cfg, err = rejoinRuntimePlacedCluster(ctx, cfg, transport); err != nil {
+				runtime.stop()
+				return nil, err
+			}
 		}
 
 		desired := systemnats.NewDesired()
@@ -841,7 +857,36 @@ func applicationStartupState(cfg config, desired systemnats.DesiredView) ([]syst
 	if cfg.systemNATSRecovery && desired.Ready && len(desired.Deployments) != 0 {
 		return nil, nil
 	}
+	if cfg.adoptCluster {
+		return nil, applicationPlacedServiceIDs(cfg)
+	}
 	return applicationPlacements(cfg), applicationPlacedServiceIDs(cfg)
+}
+
+// rejoinRuntimePlacedCluster lets a restarted founding node rejoin a cluster
+// whose services recovery already moved to other nodes. It must not reclaim
+// those placements or bind the ingress a survivor now serves (grove#41), so
+// it joins like any other node: it hosts every non-ingress component without
+// claiming placement, and keeps the ingress listener only so recovery can move
+// the ingress back if its current node fails.
+func rejoinRuntimePlacedCluster(ctx context.Context, cfg config, transport *systemnats.Transport) (config, error) {
+	records, err := systemnats.RecordedPlacements(ctx, transport)
+	if err != nil {
+		return cfg, fmt.Errorf("read placements before rejoining: %w", err)
+	}
+	movedAway := slices.ContainsFunc(records, func(record systemnats.PlacementRecord) bool {
+		return record.NodeID != cfg.nodeID
+	})
+	if !movedAway {
+		return cfg, nil
+	}
+	cfg.hostAll = false
+	cfg.adoptCluster = true
+	cfg.componentKinds = slices.DeleteFunc(slices.Clone(cfg.componentKinds), func(kind string) bool {
+		component, _ := activeApplication.componentByKind(kind)
+		return component.HTTPHandler != nil
+	})
+	return cfg, nil
 }
 
 func waitForDesiredState(ctx context.Context, desired *systemnats.Desired) (systemnats.DesiredView, error) {

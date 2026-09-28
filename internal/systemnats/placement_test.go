@@ -336,3 +336,49 @@ func TestNewPlacementRejectsInvalidRecords(t *testing.T) {
 		t.Errorf("nil placement client error = %v; want %v", err, systemnats.ErrPlacementRequired)
 	}
 }
+
+func TestRecordedPlacementsReadsControlState(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	_, transports := startPlacementCluster(t, ctx)
+
+	records, err := systemnats.RecordedPlacements(ctx, transports[1])
+	if err != nil || len(records) != 0 {
+		t.Fatalf("placements before any record = %#v, %v; want none", records, err)
+	}
+
+	want := systemnats.PlacementRecord{
+		ServiceID:         7,
+		NodeID:            "node-1",
+		InvocationSubject: "_GROVE.system.invoke.node-1",
+		ArtifactDigest:    testDigest("a"),
+	}
+	placement, err := systemnats.NewPlacement([]systemnats.PlacementRecord{want})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancelRun := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = placement.Run(runCtx, transports[0])
+	}()
+	t.Cleanup(func() {
+		cancelRun()
+		<-done
+	})
+
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		records, err = systemnats.RecordedPlacements(ctx, transports[1])
+		if err == nil && len(records) == 1 && records[0] == want {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatalf("recorded placements = %#v, %v; want [%#v]", records, err, want)
+		}
+	}
+}
