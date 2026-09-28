@@ -306,6 +306,23 @@ func TestApplicationStartupStateUsesRestoredIntent(t *testing.T) {
 	}
 }
 
+func TestApplicationStartupStateAdoptingNodeClaimsNoPlacement(t *testing.T) {
+	// A founder restarting into a cluster whose services recovery moved away
+	// rejoins as an adopting node: it hosts components without reclaiming
+	// their placement (grove#41).
+	cfg := config{
+		systemNATSRecovery:        true,
+		systemNATSSubject:         "_GROVE.system.restart.node-1",
+		componentKinds:            []string{"orders"},
+		adoptCluster:              true,
+		applicationArtifactDigest: grovletArtifactDigest,
+	}
+	placements, services := applicationStartupState(cfg, systemnats.DesiredView{Ready: true})
+	if len(placements) != 0 || !slices.Equal(services, []grove.ServiceID{groveshop.ServiceOrders}) {
+		t.Fatalf("adopting state = %#v, %v; want no placement claim and the Orders worker", placements, services)
+	}
+}
+
 func TestApplicationDebugTopologyIncludesFiveDedicatedWorkers(t *testing.T) {
 	cfgs := []config{
 		{nodeID: "node-1", systemNATSSubject: "debug.node-1", componentKinds: []string{"web"}, componentListeners: []string{"web=127.0.0.1:8080"}, applicationArtifactDigest: grovletArtifactDigest},

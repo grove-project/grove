@@ -146,6 +146,45 @@ func (p *Placement) Run(ctx context.Context, transport *Transport) error {
 	}
 }
 
+// RecordedPlacements reads every placement record in the cluster's control
+// state. It never creates the placement bucket; a missing bucket has none.
+func RecordedPlacements(ctx context.Context, transport *Transport) ([]PlacementRecord, error) {
+	js, err := jetstream.New(transport.connection)
+	if err != nil {
+		return nil, fmt.Errorf("new JetStream client: %w", err)
+	}
+	operationCtx, cancel := operationContext(ctx)
+	defer cancel()
+	kv, err := js.KeyValue(operationCtx, PlacementBucket)
+	if errors.Is(err, jetstream.ErrBucketNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open placement bucket: %w", err)
+	}
+	keys, err := kv.ListKeys(operationCtx)
+	if err != nil {
+		return nil, fmt.Errorf("list placement records: %w", err)
+	}
+	defer keys.Stop()
+	var records []PlacementRecord
+	for key := range keys.Keys() {
+		entry, err := kv.Get(operationCtx, key)
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read placement record %q: %w", key, err)
+		}
+		record, err := decodePlacementRecord(key, entry.Value())
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, nil
+}
+
 func (p *Placement) watch(ctx context.Context, transport *Transport) error {
 	js, err := jetstream.New(transport.connection)
 	if err != nil {

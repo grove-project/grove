@@ -111,6 +111,9 @@ func parseDebugDemoArguments(args []string) (string, error) {
 
 func startDebugApplicationCluster(ctx context.Context, artifactPath, delvePath string, inspection artifact.Inspection) (*applicationCluster, error) {
 	nodeCount := activeApplication.scenarioDebugNodeCount()
+	if nodeCount < 1 {
+		return nil, fmt.Errorf("start debug demo cluster: %w", errApplicationScenarioNodes)
+	}
 	routePorts, err := reserveApplicationPorts(nodeCount)
 	if err != nil {
 		return nil, fmt.Errorf("reserve debug demo route ports: %w", err)

@@ -32,6 +32,10 @@ var (
 	errApplicationConfigRequired = errors.New("rollout configuration path is required")
 	errApplicationNotDeployed    = errors.New("Grove application is not deployed")
 	errCandidateMustFail         = errors.New("a second lifecycle rollout must exercise application-owned invalid configuration")
+	// errApplicationScenarioNodes is returned by the scripted demo actions for
+	// an application whose Scenario declares no demo nodes, such as one that
+	// leaves component placement to the runtime (grove#43).
+	errApplicationScenarioNodes = errors.New("application scenario declares no demo nodes")
 )
 
 type applicationController struct {
@@ -568,6 +572,9 @@ func startApplicationCluster(
 	inspection artifact.Inspection,
 ) (*applicationCluster, error) {
 	nodeCount := activeApplication.scenarioNodeCount()
+	if nodeCount < 1 {
+		return nil, fmt.Errorf("start application cluster: %w", errApplicationScenarioNodes)
+	}
 	routePorts, err := reserveApplicationPorts(nodeCount)
 	if err != nil {
 		return nil, fmt.Errorf("reserve application route ports: %w", err)
