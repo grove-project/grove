@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/grove-project/grove/internal/controlplane"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -19,7 +20,7 @@ const (
 	MembershipBucket = "GROVE_MEMBERSHIP"
 	// MembershipReplicas is the number of JetStream replicas maintained for
 	// authoritative Grove membership.
-	MembershipReplicas = 3
+	MembershipReplicas = controlplane.MaxControlStateReplicas
 
 	membershipKeyPrefix   = "nodes."
 	membershipSubjectRoot = "_GROVE.system.membership."
@@ -28,26 +29,11 @@ const (
 )
 
 var (
-	// ErrMembershipRecordInvalid is returned when a membership record lacks its
-	// explicit logical identity or advertised endpoint.
-	ErrMembershipRecordInvalid = errors.New("grove membership record is invalid")
-	// ErrMembershipRequired is returned when a membership endpoint has no view
-	// to report.
+	// ErrMembershipRequired is returned when an operation has no membership
+	// view.
 	ErrMembershipRequired    = errors.New("grove membership view is required")
 	errMembershipWatchClosed = errors.New("grove membership watch closed")
 )
-
-// MembershipRecord is the minimum authoritative identity stored for one Grove
-// node. Liveness and health are intentionally not part of this record.
-type MembershipRecord struct {
-	// NodeID is the node's stable logical identity.
-	NodeID string `json:"node_id"`
-	// AdvertisedEndpoint is the node's Grove transport endpoint.
-	AdvertisedEndpoint string `json:"advertised_endpoint"`
-	// Leaving distinguishes an intentional graceful shutdown from an
-	// unavailable node. It is reset when the same logical node starts again.
-	Leaving bool `json:"leaving,omitempty"`
-}
 
 // BeginLeave records graceful shutdown intent while the node is still able to
 // participate in the replicated control plane.
@@ -103,7 +89,7 @@ func readKnownMembershipRecords(
 		if err := json.Unmarshal(entry.Value(), &observed); err != nil {
 			return nil, fmt.Errorf("decode membership record %q: %w", entry.Key(), err)
 		}
-		if entry.Key() != MembershipKey(observed.NodeID) || observed.AdvertisedEndpoint == "" {
+		if entry.Key() != MembershipKey(observed.NodeID) || !controlplane.ValidMembershipRecord(observed) {
 			return nil, fmt.Errorf("validate membership record %q: %w", entry.Key(), ErrMembershipRecordInvalid)
 		}
 		records[observed.NodeID] = observed
@@ -147,17 +133,6 @@ func (m *Membership) AllLeaving(
 	return registered != 0, nil
 }
 
-// MembershipView is one Grovlet's current observation of authoritative
-// membership state.
-type MembershipView struct {
-	// Ready reports whether the initial JetStream/KV watch snapshot completed.
-	Ready bool `json:"ready"`
-	// Members contains the observed records sorted by node ID.
-	Members []MembershipRecord `json:"members"`
-	// Error describes the latest transient initialization or watch failure.
-	Error string `json:"error,omitempty"`
-}
-
 // Membership maintains one watcher-derived local view of the authoritative
 // JetStream/KV membership bucket.
 type Membership struct {
@@ -170,7 +145,7 @@ type Membership struct {
 
 // NewMembership creates the membership observer for record.
 func NewMembership(record MembershipRecord) (*Membership, error) {
-	if record.NodeID == "" || record.AdvertisedEndpoint == "" {
+	if !controlplane.ValidMembershipRecord(record) {
 		return nil, &Error{Operation: "configure Grove membership", Err: ErrMembershipRecordInvalid}
 	}
 	return &Membership{
@@ -279,7 +254,7 @@ func (m *Membership) watch(ctx context.Context, transport *Transport) error {
 				if err := json.Unmarshal(entry.Value(), &record); err != nil {
 					return fmt.Errorf("decode membership record %q: %w", entry.Key(), err)
 				}
-				if entry.Key() != MembershipKey(record.NodeID) || record.AdvertisedEndpoint == "" {
+				if entry.Key() != MembershipKey(record.NodeID) || !controlplane.ValidMembershipRecord(record) {
 					return fmt.Errorf("validate membership record %q: %w", entry.Key(), ErrMembershipRecordInvalid)
 				}
 				records[record.NodeID] = record
@@ -318,7 +293,7 @@ func (m *Membership) reconcileControlState(
 	js jetstream.JetStream,
 	records map[string]MembershipRecord,
 ) error {
-	replicas := controlStateReplicaCount(records)
+	replicas := controlplane.ControlStateReplicas(records)
 	m.mu.RLock()
 	reconciled := m.reconciledReplicas
 	m.mu.RUnlock()
@@ -385,7 +360,7 @@ func readMembershipRecords(ctx context.Context, kv jetstream.KeyValue) (map[stri
 		if err := json.Unmarshal(entry.Value(), &record); err != nil {
 			return nil, fmt.Errorf("decode membership record %q: %w", key, err)
 		}
-		if key != MembershipKey(record.NodeID) || record.AdvertisedEndpoint == "" {
+		if key != MembershipKey(record.NodeID) || !controlplane.ValidMembershipRecord(record) {
 			return nil, fmt.Errorf("validate membership record %q: %w", key, ErrMembershipRecordInvalid)
 		}
 		records[record.NodeID] = record

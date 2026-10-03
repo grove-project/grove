@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sort"
 	"sync"
 	"time"
 
+	"github.com/grove-project/grove/internal/controlplane"
 	"github.com/nats-io/nats.go"
 )
 
@@ -33,17 +33,6 @@ var (
 	ErrHealthRequired = errors.New("health tracker is required")
 )
 
-// HealthState is one Grovlet's derived liveness observation for a member.
-type HealthState string
-
-const (
-	// HealthHealthy means a heartbeat arrived within the configured deadline.
-	HealthHealthy HealthState = "healthy"
-	// HealthUnavailable means no heartbeat arrived within the configured
-	// deadline.
-	HealthUnavailable HealthState = "unavailable"
-)
-
 // HealthConfig controls ephemeral heartbeat publication and failure
 // observation.
 type HealthConfig struct {
@@ -57,29 +46,6 @@ type HealthConfig struct {
 	HeartbeatInterval time.Duration
 	// UnavailableAfter is the maximum receiver-side age considered healthy.
 	UnavailableAfter time.Duration
-}
-
-// ClusterNode combines authoritative membership identity with locally observed
-// ephemeral health.
-type ClusterNode struct {
-	// NodeID is the node's stable logical identity.
-	NodeID string `json:"node_id"`
-	// AdvertisedEndpoint is the node's Grove transport endpoint.
-	AdvertisedEndpoint string `json:"advertised_endpoint"`
-	// Health is this observer's current derived liveness state.
-	Health HealthState `json:"health"`
-	// LastSeen is the receiver-side RFC3339 timestamp of the latest heartbeat.
-	LastSeen string `json:"last_seen,omitempty"`
-}
-
-// ClusterView is one Grovlet's machine-readable membership and health view.
-type ClusterView struct {
-	// Ready reports whether authoritative membership has initialized.
-	Ready bool `json:"ready"`
-	// Nodes contains membership-scoped observations sorted by node ID.
-	Nodes []ClusterNode `json:"nodes"`
-	// Error describes the latest membership initialization failure.
-	Error string `json:"error,omitempty"`
 }
 
 type heartbeat struct {
@@ -191,35 +157,12 @@ func (h *Health) record(nodeID string, receivedAt time.Time) {
 
 func (h *Health) evaluate(now time.Time) {
 	membership := h.membership.Snapshot()
-	nodes := make([]ClusterNode, 0, len(membership.Members))
 	h.mu.RLock()
-	for _, member := range membership.Members {
-		lastSeen := h.lastSeen[member.NodeID]
-		state := HealthUnavailable
-		if !member.Leaving && !lastSeen.IsZero() && now.Sub(lastSeen) <= h.config.UnavailableAfter {
-			state = HealthHealthy
-		}
-		node := ClusterNode{
-			NodeID:             member.NodeID,
-			AdvertisedEndpoint: member.AdvertisedEndpoint,
-			Health:             state,
-		}
-		if !lastSeen.IsZero() {
-			node.LastSeen = lastSeen.Format(time.RFC3339Nano)
-		}
-		nodes = append(nodes, node)
-	}
+	view := controlplane.EvaluateHealth(membership, h.lastSeen, now, h.config.UnavailableAfter)
 	h.mu.RUnlock()
-	sort.Slice(nodes, func(i, j int) bool {
-		return nodes[i].NodeID < nodes[j].NodeID
-	})
 
 	h.mu.Lock()
-	h.view = ClusterView{
-		Ready: membership.Ready,
-		Nodes: nodes,
-		Error: membership.Error,
-	}
+	h.view = view
 	h.mu.Unlock()
 }
 
@@ -230,15 +173,7 @@ func (h *Health) Snapshot() ClusterView {
 	nodes := make([]ClusterNode, len(h.view.Nodes))
 	copy(nodes, h.view.Nodes)
 	view := ClusterView{Ready: h.view.Ready, Nodes: nodes, Error: h.view.Error}
-	if view.Ready && len(nodes) < h.config.MinNodes {
-		view.Ready = false
-		view.Error = ClusterFormingError(len(nodes), h.config.MinNodes).Error()
-	} else if view.Ready && h.config.Settled != nil {
-		if err := h.config.Settled(len(nodes)); err != nil {
-			view.Ready = false
-			view.Error = err.Error()
-		}
-	}
+	view = controlplane.GateClusterView(view, h.config.MinNodes, h.config.Settled)
 	return view
 }
 

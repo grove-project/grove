@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/internal/controlplane"
 	"github.com/grove-project/grove/internal/placement"
 	"github.com/nats-io/nats.go"
 )
@@ -29,27 +30,7 @@ func (h *HandlerPlacements) Resolved() HandlerPlacementView {
 		view.Ready = false
 		return view
 	}
-	liveSet := make(map[string]bool, len(live))
-	for _, id := range live {
-		liveSet[id] = true
-	}
-	resolved := view.Placements[:0]
-	for _, p := range view.Placements {
-		nodes := p.Nodes[:0]
-		for _, n := range p.Nodes {
-			if liveSet[n.NodeID] {
-				nodes = append(nodes, n)
-			} else {
-				view.Lost = append(view.Lost, LostPlacement{Service: p.Service, Method: p.Method, NodeID: n.NodeID})
-			}
-		}
-		if len(nodes) != 0 {
-			p.Nodes = nodes
-			resolved = append(resolved, p)
-		}
-	}
-	view.Placements = resolved
-	return view
+	return controlplane.ResolveHandlerPlacements(view, live)
 }
 
 // ServeHandlerPlacement registers nodeID's endpoint for its resolved handler
