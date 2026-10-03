@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/internal/systemnats"
@@ -378,16 +377,15 @@ func (c *applicationController) appServices(ctx context.Context, args []string) 
 	if len(args) != 0 {
 		return nil, errConsoleArguments
 	}
-	status, statusErr := c.status(ctx)
-	c.mu.RLock()
-	cluster := c.cluster
-	c.mu.RUnlock()
-	if cluster == nil {
+	target, attached := c.inspection()
+	if !attached {
+		status, _ := c.status(ctx)
 		view := buildServicesView(systemnats.HandlerPlacementView{}, status)
 		view.Error = "not deployed"
 		return view, nil
 	}
-	handlers, err := readHandlerPlacement(ctx, cluster.systemNATSURL, status)
+	status, statusErr := target.status(ctx)
+	handlers, err := readHandlerPlacement(ctx, target, status)
 	view := buildServicesView(handlers, status)
 	if err != nil && applicationDeclaresHandlers() {
 		view.Error = err.Error()
@@ -397,31 +395,15 @@ func (c *applicationController) appServices(ctx context.Context, args []string) 
 	return view, nil
 }
 
-// readHandlerPlacement asks healthy nodes in turn for their resolved view.
-// Apps that declare no handlers legitimately have none.
-func readHandlerPlacement(ctx context.Context, systemNATSURL string, status ClusterStatus) (systemnats.HandlerPlacementView, error) {
-	if !applicationDeclaresHandlers() || systemNATSURL == "" {
+// readHandlerPlacement reads the cluster's resolved handler placement. Apps
+// that declare no handlers legitimately have none.
+func readHandlerPlacement(ctx context.Context, target inspectionTarget, status ClusterStatus) (systemnats.HandlerPlacementView, error) {
+	if !applicationDeclaresHandlers() || target.url == "" {
 		return systemnats.HandlerPlacementView{}, nil
 	}
-	transport, err := systemnats.Connect(ctx, systemNATSURL)
+	inspector, err := target.inspector(ctx)
 	if err != nil {
 		return systemnats.HandlerPlacementView{}, err
 	}
-	defer transport.Close()
-	var lastErr error = fmt.Errorf("no healthy node reported handler placement")
-	for _, node := range status.Nodes {
-		if node.Health != string(systemnats.HealthHealthy) {
-			continue
-		}
-		requestCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-		view, err := transport.RequestHandlerPlacement(requestCtx, node.NodeID)
-		cancel()
-		if err == nil && view.Ready {
-			return view, nil
-		}
-		if err != nil {
-			lastErr = err
-		}
-	}
-	return systemnats.HandlerPlacementView{}, lastErr
+	return inspector.Handlers(ctx, status)
 }

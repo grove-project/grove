@@ -129,7 +129,7 @@ func (d *applicationDemo) startKnownGood(ctx context.Context, configPath string)
 	}
 	d.attach(cluster)
 	d.event("deployed " + inspection.Config.Revision)
-	status, err := waitForClusterStatus(ctx, cluster.webAddress, func(status ClusterStatus) bool {
+	status, err := waitForClusterStatus(ctx, cluster, func(status ClusterStatus) bool {
 		return applicationStatusHealthy(status, inspection.ArtifactDigest) && status.Rollout != nil && status.Rollout.Phase == string(systemnats.RolloutActive)
 	})
 	if err != nil {
@@ -172,7 +172,7 @@ func (d *applicationDemo) rejectBrokenCandidate(ctx context.Context, cluster *ap
 	if err != nil {
 		return rolloutActionResult{}, fmt.Errorf("record pending candidate: %w", err)
 	}
-	pendingStatus, err := waitForClusterStatus(ctx, cluster.webAddress, func(status ClusterStatus) bool {
+	pendingStatus, err := waitForClusterStatus(ctx, cluster, func(status ClusterStatus) bool {
 		return status.Rollout != nil && status.Rollout.Phase == string(systemnats.RolloutPending) &&
 			status.CandidateArtifact != nil && status.CandidateArtifact.ArtifactDigest == candidate.ArtifactDigest
 	})
@@ -211,7 +211,7 @@ func (d *applicationDemo) rejectBrokenCandidate(ctx context.Context, cluster *ap
 	if _, err := operator.Rollback(ctx, pending, routes, failure); err != nil {
 		return rolloutActionResult{}, fmt.Errorf("rollback failed candidate: %w", err)
 	}
-	status, err := waitForClusterStatus(ctx, cluster.webAddress, func(status ClusterStatus) bool {
+	status, err := waitForClusterStatus(ctx, cluster, func(status ClusterStatus) bool {
 		return applicationStatusHealthy(status, cluster.artifact.ArtifactDigest) && status.Rollout != nil &&
 			status.Rollout.Phase == string(systemnats.RolloutRolledBack) && status.Rollout.Failure != nil
 	})

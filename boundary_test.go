@@ -53,6 +53,13 @@ var importRules = []importRule{
 		Forbidden: []string{modulePath + "/internal/systemnats", "github.com/nats-io/..."},
 	},
 	{
+		// Inspection reads control-plane state through a read-only port
+		// that the System NATS adapter implements.
+		Name:      "inspection does not depend on NATS",
+		From:      []string{modulePath + "/internal/inspect"},
+		Forbidden: []string{modulePath + "/internal/systemnats", "github.com/nats-io/..."},
+	},
+	{
 		// Grove Shop is a standalone application that consumes Grove.
 		Name:      "Grove does not depend on Grove Shop",
 		From:      []string{modulePath + "/..."},
@@ -147,6 +154,73 @@ func namedCalls(t *testing.T, path string, names []string) []string {
 		return true
 	})
 	return calls
+}
+
+// presentationFiles build what the console, its TUI and the grove CLI show.
+// They read cluster state only through internal/inspect.
+var presentationFiles = []string{
+	"runtime/application.go",
+	"runtime/appinfo.go",
+	"runtime/appservices.go",
+	"runtime/applicationlogs.go",
+	"runtime/console.go",
+	"runtime/k9s_tui.go",
+	"runtime/k9s_services.go",
+	"cmd/grove/main.go",
+}
+
+// controlPlaneViewReads are the raw control-plane view requests that
+// inspect.Source wraps.
+var controlPlaneViewReads = []string{
+	"RequestClusterView", "RequestPlacement", "RequestDeployments", "RequestComponents", "RequestHandlerPlacement",
+}
+
+// TestPresentationReadsThroughInspection proves the console, TUI and CLI read
+// cluster state through the inspection surface: their files make no raw
+// control-plane view request, and no production code reads Grove status from
+// an application's ingress, which only the application itself serves.
+func TestPresentationReadsThroughInspection(t *testing.T) {
+	for _, path := range presentationFiles {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("presentation file %s: %v; update presentationFiles", path, err)
+			continue
+		}
+		for _, call := range namedCalls(t, path, controlPlaneViewReads) {
+			t.Errorf("%s: presentation code reads control-plane views through internal/inspect", call)
+		}
+	}
+	for _, pkg := range listModulePackages(t) {
+		if matches(pkg.ImportPath, modulePath+"/internal/testapp/...") {
+			continue
+		}
+		for _, file := range pkg.GoFiles {
+			path := filepath.Join(pkg.Dir, file)
+			for _, literal := range stringLiterals(t, path) {
+				if strings.Contains(literal, "/grove/status") {
+					t.Errorf("%s reads Grove status from the application's ingress; read it through internal/inspect", literal)
+				}
+			}
+		}
+	}
+}
+
+// stringLiterals returns the positions and values of string literals in the
+// Go file at path.
+func stringLiterals(t *testing.T, path string) []string {
+	t.Helper()
+	fileSet := token.NewFileSet()
+	file, err := parser.ParseFile(fileSet, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	var literals []string
+	ast.Inspect(file, func(node ast.Node) bool {
+		if literal, ok := node.(*ast.BasicLit); ok && literal.Kind == token.STRING {
+			literals = append(literals, fileSet.Position(literal.Pos()).String()+" "+literal.Value)
+		}
+		return true
+	})
+	return literals
 }
 
 type listedPackage struct {

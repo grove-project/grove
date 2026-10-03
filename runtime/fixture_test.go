@@ -297,3 +297,22 @@ func waitForApplicationOrder(ctx context.Context, webAddress, orderID string) (t
 	}
 	return value.(testapp.Order), nil
 }
+
+// readApplicationJSON GETs url from an application's ingress and decodes the
+// JSON answer into output.
+func readApplicationJSON(ctx context.Context, url string, output any) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		return fmt.Errorf("GET %s: %s: %s", url, response.Status, body)
+	}
+	return json.NewDecoder(response.Body).Decode(output)
+}

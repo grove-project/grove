@@ -196,6 +196,18 @@ func (c *fakeControlClient) RequestComponents(_ context.Context, nodeID string) 
 	return c.components[nodeID], nil
 }
 
+func (c *fakeControlClient) RequestPlacement(context.Context, string) (systemnats.PlacementView, error) {
+	return systemnats.PlacementView{}, nil
+}
+
+func (c *fakeControlClient) RequestDeployments(context.Context, string) (systemnats.DeploymentView, error) {
+	return systemnats.DeploymentView{}, nil
+}
+
+func (c *fakeControlClient) RequestHandlerPlacement(context.Context, string) (systemnats.HandlerPlacementView, error) {
+	return systemnats.HandlerPlacementView{}, nil
+}
+
 func (c *fakeControlClient) RequestStartComponent(_ context.Context, nodeID string, serviceID grove.ServiceID) (systemnats.ComponentView, error) {
 	c.action = componentStart
 	c.nodeID = nodeID

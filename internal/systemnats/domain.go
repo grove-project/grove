@@ -59,6 +59,25 @@ type (
 	LostPlacement        = controlplane.LostPlacement
 )
 
+// Hosted components.
+type (
+	ComponentState  = controlplane.ComponentState
+	ExecutionMode   = controlplane.ExecutionMode
+	ComponentStatus = controlplane.ComponentStatus
+	ComponentView   = controlplane.ComponentView
+)
+
+const (
+	ComponentStarting        = controlplane.ComponentStarting
+	ComponentHealthy         = controlplane.ComponentHealthy
+	ComponentDebugging       = controlplane.ComponentDebugging
+	ComponentStopping        = controlplane.ComponentStopping
+	ComponentStopped         = controlplane.ComponentStopped
+	ComponentFailed          = controlplane.ComponentFailed
+	ExecutionInProcess       = controlplane.ExecutionInProcess
+	ExecutionIsolatedProcess = controlplane.ExecutionIsolatedProcess
+)
+
 // Domain errors keep their identity, so errors.Is matches either name.
 var (
 	ErrMembershipRecordInvalid     = controlplane.ErrMembershipRecordInvalid
