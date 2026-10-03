@@ -97,17 +97,19 @@ replays one scenario through both the TestCluster and
 `controlplane.PlanHandlerPlacements`, and requires identical placements and
 epochs after every step. The scenario covers start, owner crash, takeover,
 restart, isolation, reconnect, and an exclusive handler deleted and recreated.
-`grovetest/reuse_test.go` fails if the TestCluster stops calling these
-functions. See [testing.md](testing.md) for the other test layers.
+A delegation rule in the root `boundary_test.go` fails if the TestCluster
+stops calling these functions. See [testing.md](testing.md) for the other test layers.
 
 The TestCluster does not model service placement records or recovery yet.
 
 ## Guards
 
-- `internal/placement/boundary_test.go`:
-  - `TestPlacementIsPure` allows only the standard library and the SDK root.
-  - `TestPlacementDecisionsHaveOneOwner` fails if `internal/controlplane`,
-    `runtime` or `grovetest` stops delegating its decisions to this package.
-- `internal/controlplane/boundary_test.go` keeps the control-plane domain free
-  of NATS.
-- `grovetest/conformance_test.go` keeps the simulation equal to production.
+The root `boundary_test.go` holds these rules (see
+[testing.md](testing.md#architecture-rules)):
+- a pure rule allows `internal/placement` only the standard library and the
+  SDK root;
+- delegation rules fail if `internal/controlplane`, `runtime` or `grovetest`
+  stops calling the placement function it relies on;
+- a pure rule keeps the control-plane domain free of NATS.
+
+`grovetest/conformance_test.go` keeps the simulation equal to production.
