@@ -27,6 +27,15 @@ type debugAttachResult struct {
 	DAPEndpoint    string          `json:"dap_endpoint"`
 }
 
+// Summary says where the debugger is ready.
+func (r debugAttachResult) Summary() string {
+	return fmt.Sprintf("Debugger ready: %s on %s/%s\nDAP: %s", r.ServiceName, r.NodeID, r.WorkerID, r.DAPEndpoint)
+}
+
+// debugAttachAction stays active after its initial result until the DAP
+// client disconnects.
+var _ console.Session = (*debugAttachAction)(nil)
+
 type debugAttachAction struct {
 	result    debugAttachResult
 	session   debugAttachSession

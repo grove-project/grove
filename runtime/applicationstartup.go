@@ -29,6 +29,11 @@ type applicationJoinResult struct {
 	NodeIDs []string `json:"node_ids"`
 }
 
+// Summary describes the cluster this process entered.
+func (r applicationJoinResult) Summary() string {
+	return fmt.Sprintf("Cluster: %s\nNodes: %s", r.State, strings.Join(r.NodeIDs, ", "))
+}
+
 // applicationHost owns the nodes a configured application process hosts in
 // its discovered cluster: finding the cluster, founding a new one, joining
 // an existing one, and leaving it gracefully. Node processes are launched

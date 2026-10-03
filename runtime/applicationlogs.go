@@ -9,19 +9,13 @@ import (
 
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/console"
+	"github.com/grove-project/grove/internal/consoleview"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
 const applicationLogLineLimit = 250
 
-type applicationLogsView struct {
-	Health        string                 `json:"health"`
-	Causes        []string               `json:"causes"`
-	Application   []string               `json:"application"`
-	Cluster       []string               `json:"cluster"`
-	SystemNATS    []string               `json:"system_nats"`
-	DebugSessions []console.DebugSession `json:"debug_sessions"`
-}
+type applicationLogsView = consoleview.Logs
 
 type applicationNodeLogs struct {
 	NodeID string

@@ -57,6 +57,24 @@ type resilienceActionResult struct {
 	Status          ClusterStatus `json:"status"`
 }
 
+// Summary describes the rollout for interactive frontends.
+func (r rolloutActionResult) Summary() string {
+	return fmt.Sprintf("Rollout: %s\nWeb UI: %s", r.State, r.WebURL)
+}
+
+// Summary names the recovered service and the application probe's result.
+func (r resilienceActionResult) Summary() string {
+	serviceName := "Service"
+	result := fmt.Sprintf("%v", r.Result)
+	if scenario := activeApplication.Scenario; scenario != nil {
+		serviceName = applicationServiceName(scenario.RecoveryServiceID)
+		if scenario.ProbeSummary != nil {
+			result = scenario.ProbeSummary(r.Result)
+		}
+	}
+	return fmt.Sprintf("%s recovered: %s -> %s\nResult: %s", serviceName, r.FailedNodeID, r.RecoveredNodeID, result)
+}
+
 func parseRolloutArguments(args []string) (string, error) {
 	flags := flag.NewFlagSet("rollout.start", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
