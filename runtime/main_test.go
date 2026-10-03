@@ -23,14 +23,32 @@ import (
 	"github.com/grove-project/grove/internal/artifact"
 	"github.com/grove-project/grove/internal/systemnats"
 	groveshop "github.com/grove-project/grove/internal/testapp"
+	"github.com/grove-project/grove/internal/testbin"
 )
 
 var (
-	grovletPath           string
-	debugGrovletPath      string
-	delvePath             string
-	grovletArtifactDigest string
+	grovletBinary = testbin.New("test Grovlet", func(ctx context.Context, dir string) (string, error) {
+		return grovetest.BuildGrovlet(ctx, dir, "./internal/testapp/cmd/testapp")
+	})
+	debugGrovletBinary = testbin.New("debug test Grovlet", func(ctx context.Context, dir string) (string, error) {
+		return grovetest.BuildDebugGrovlet(ctx, dir, "./internal/testapp/cmd/testapp")
+	})
+	delveTool = testbin.New("dlv", func(ctx context.Context, _ string) (string, error) {
+		output, err := exec.CommandContext(ctx, "go", "tool", "-n", "dlv").Output()
+		return strings.TrimSpace(string(output)), err
+	})
+	grovletDigest = testbin.Derive(grovletBinary, "test Grovlet artifact digest", func(path string) (string, error) {
+		inspection, err := artifact.InspectFile(path)
+		return inspection.ArtifactDigest, err
+	})
 )
+
+// The real-process artifacts are built on first use; each getter skips the
+// calling test under -short.
+func grovletPath(tb testing.TB) string           { return grovletBinary.Get(tb) }
+func debugGrovletPath(tb testing.TB) string      { return debugGrovletBinary.Get(tb) }
+func delvePath(tb testing.TB) string             { return delveTool.Get(tb) }
+func grovletArtifactDigest(tb testing.TB) string { return grovletDigest.Get(tb) }
 
 func TestStandaloneGrovletReportsBootstrapReadiness(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
@@ -41,7 +59,7 @@ func TestStandaloneGrovletReportsBootstrapReadiness(t *testing.T) {
 	}
 	t.Cleanup(server.Shutdown)
 	node, err := grovetest.StartNode(
-		grovletPath,
+		grovletPath(t),
 		"--node-id", "candidate-inventory",
 		"--advertise-endpoint", "nats-subject://system/candidate-inventory",
 		"--system-nats-url", server.URL(),
@@ -60,7 +78,7 @@ func TestStandaloneGrovletReportsBootstrapReadiness(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(transport.Close)
-	if err := transport.WaitBootstrapHealthy(ctx, "candidate-inventory", grovletArtifactDigest); err != nil {
+	if err := transport.WaitBootstrapHealthy(ctx, "candidate-inventory", grovletArtifactDigest(t)); err != nil {
 		t.Fatalf("wait for exact candidate readiness: %v; logs=%q", err, node.Logs())
 	}
 }
@@ -288,7 +306,7 @@ func TestApplicationStartupStateUsesRestoredIntent(t *testing.T) {
 		systemNATSRecovery:        true,
 		systemNATSSubject:         "_GROVE.system.restart.node-1",
 		componentKinds:            []string{"orders"},
-		applicationArtifactDigest: grovletArtifactDigest,
+		applicationArtifactDigest: grovletArtifactDigest(t),
 	}
 	placements, services := applicationStartupState(cfg, systemnats.DesiredView{Ready: true})
 	if len(placements) != 1 || !slices.Equal(services, []grove.ServiceID{groveshop.ServiceOrders}) {
@@ -297,7 +315,7 @@ func TestApplicationStartupStateUsesRestoredIntent(t *testing.T) {
 	restored := systemnats.DesiredView{Ready: true, Deployments: []systemnats.DesiredDeployment{{
 		ApplicationID:  "grove-shop",
 		Version:        "current",
-		ArtifactDigest: grovletArtifactDigest,
+		ArtifactDigest: grovletArtifactDigest(t),
 		Components:     []systemnats.DesiredComponent{{ServiceID: groveshop.ServiceOrders, NodeID: "node-1"}},
 	}}}
 	placements, services = applicationStartupState(cfg, restored)
@@ -315,7 +333,7 @@ func TestApplicationStartupStateAdoptingNodeClaimsNoPlacement(t *testing.T) {
 		systemNATSSubject:         "_GROVE.system.restart.node-1",
 		componentKinds:            []string{"orders"},
 		adoptCluster:              true,
-		applicationArtifactDigest: grovletArtifactDigest,
+		applicationArtifactDigest: grovletArtifactDigest(t),
 	}
 	placements, services := applicationStartupState(cfg, systemnats.DesiredView{Ready: true})
 	if len(placements) != 0 || !slices.Equal(services, []grove.ServiceID{groveshop.ServiceOrders}) {
@@ -325,11 +343,11 @@ func TestApplicationStartupStateAdoptingNodeClaimsNoPlacement(t *testing.T) {
 
 func TestApplicationDebugTopologyIncludesFiveDedicatedWorkers(t *testing.T) {
 	cfgs := []config{
-		{nodeID: "node-1", systemNATSSubject: "debug.node-1", componentKinds: []string{"web"}, componentListeners: []string{"web=127.0.0.1:8080"}, applicationArtifactDigest: grovletArtifactDigest},
-		{nodeID: "node-2", systemNATSSubject: "debug.node-2", componentKinds: []string{"orders"}, componentOptions: []string{"orders=distributed"}, applicationArtifactDigest: grovletArtifactDigest},
-		{nodeID: "node-3", systemNATSSubject: "debug.node-3", componentKinds: []string{"inventory"}, applicationArtifactDigest: grovletArtifactDigest},
-		{nodeID: "node-4", systemNATSSubject: "debug.node-4", componentKinds: []string{"payment"}, applicationArtifactDigest: grovletArtifactDigest},
-		{nodeID: "node-5", systemNATSSubject: "debug.node-5", componentKinds: []string{"shipping"}, applicationArtifactDigest: grovletArtifactDigest},
+		{nodeID: "node-1", systemNATSSubject: "debug.node-1", componentKinds: []string{"web"}, componentListeners: []string{"web=127.0.0.1:8080"}, applicationArtifactDigest: grovletArtifactDigest(t)},
+		{nodeID: "node-2", systemNATSSubject: "debug.node-2", componentKinds: []string{"orders"}, componentOptions: []string{"orders=distributed"}, applicationArtifactDigest: grovletArtifactDigest(t)},
+		{nodeID: "node-3", systemNATSSubject: "debug.node-3", componentKinds: []string{"inventory"}, applicationArtifactDigest: grovletArtifactDigest(t)},
+		{nodeID: "node-4", systemNATSSubject: "debug.node-4", componentKinds: []string{"payment"}, applicationArtifactDigest: grovletArtifactDigest(t)},
+		{nodeID: "node-5", systemNATSSubject: "debug.node-5", componentKinds: []string{"shipping"}, applicationArtifactDigest: grovletArtifactDigest(t)},
 	}
 	wantServices := []grove.ServiceID{
 		groveshop.ServiceWeb,
@@ -437,7 +455,7 @@ func TestRun(t *testing.T) {
 }
 
 func TestGrovletProcess(t *testing.T) {
-	node, err := grovetest.StartNode(grovletPath)
+	node, err := grovetest.StartNode(grovletPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +489,7 @@ func TestGrovletSystemNATSTransport(t *testing.T) {
 	)
 
 	host, err := grovetest.StartNode(
-		grovletPath,
+		grovletPath(t),
 		"--system-nats-listen", "127.0.0.1:0",
 		"--system-nats-subject", hostSubject,
 	)
@@ -489,7 +507,7 @@ func TestGrovletSystemNATSTransport(t *testing.T) {
 	serverURL := readyEventFromLogs(t, host.Logs()).SystemNATSURL
 
 	peer, err := grovetest.StartNode(
-		grovletPath,
+		grovletPath(t),
 		"--system-nats-url", serverURL,
 		"--system-nats-subject", peerSubject,
 	)
@@ -556,7 +574,7 @@ func TestGrovletSystemNATSCluster(t *testing.T) {
 	readyEvents := make([]lifecycleEvent, 0, len(subjects))
 
 	seed, err := grovetest.StartNode(
-		grovletPath,
+		grovletPath(t),
 		"--node-id", "node-1",
 		"--advertise-endpoint", "nats-subject://system/node-1",
 		"--system-nats-listen", "127.0.0.1:0",
@@ -584,7 +602,7 @@ func TestGrovletSystemNATSCluster(t *testing.T) {
 	for i := 1; i < len(subjects); i++ {
 		nodeID := fmt.Sprintf("node-%d", i+1)
 		node, err := grovetest.StartNode(
-			grovletPath,
+			grovletPath(t),
 			"--node-id", nodeID,
 			"--advertise-endpoint", "nats-subject://system/"+nodeID,
 			"--system-nats-listen", "127.0.0.1:0",
@@ -776,7 +794,7 @@ func startMembershipGrovlets(t *testing.T, ctx context.Context, nodeArgs ...[]st
 		if len(nodeArgs) != 0 {
 			args = append(args, nodeArgs[i]...)
 		}
-		node, err := grovetest.StartNode(grovletPath, args...)
+		node, err := grovetest.StartNode(grovletPath(t), args...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -991,13 +1009,13 @@ func TestGrovletServicePlacementConvergesAndRoutes(t *testing.T) {
 			ServiceID:         groveshop.ServiceOrders,
 			NodeID:            cluster.nodeIDs[0],
 			InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders),
-			ArtifactDigest:    grovletArtifactDigest,
+			ArtifactDigest:    grovletArtifactDigest(t),
 		},
 		{
 			ServiceID:         groveshop.ServiceInventory,
 			NodeID:            cluster.nodeIDs[1],
 			InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory),
-			ArtifactDigest:    grovletArtifactDigest,
+			ArtifactDigest:    grovletArtifactDigest(t),
 		},
 	}
 	views, err := waitForGrovletPlacement(ctx, cluster, want)
@@ -1180,8 +1198,8 @@ func TestGrovletComponentLifecycle(t *testing.T) {
 		[]string{"--system-nats-subject", observerSubject},
 	)
 	wantPlacement := []systemnats.PlacementRecord{
-		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest},
-		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest},
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest(t)},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest(t)},
 	}
 	if _, err := waitForGrovletPlacement(ctx, cluster, wantPlacement); err != nil {
 		t.Fatalf("%v\n%s", err, clusterLogs(cluster.nodes))
@@ -1275,8 +1293,8 @@ func TestGrovletNodeFailureIdentifiesAffectedPlacement(t *testing.T) {
 		[]string{"--system-nats-subject", "_GROVE.system.failure.node-3"},
 	)
 	wantPlacement := []systemnats.PlacementRecord{
-		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest},
-		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest},
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest(t)},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest(t)},
 	}
 	if _, err := waitForGrovletPlacement(ctx, cluster, wantPlacement); err != nil {
 		t.Fatalf("%v\n%s", err, clusterLogs(cluster.nodes))
@@ -1351,8 +1369,8 @@ func TestGrovletRecoversServiceAfterHostingNodeFailure(t *testing.T) {
 		[]string{"--system-nats-subject", observerSubject, "--system-nats-recovery"},
 	)
 	initialPlacement := []systemnats.PlacementRecord{
-		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest},
-		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest},
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest(t)},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest(t)},
 	}
 	if _, err := waitForGrovletPlacement(ctx, cluster, initialPlacement); err != nil {
 		t.Fatalf("wait for initial placement: %v\n%s", err, clusterLogs(cluster.nodes))
@@ -1389,7 +1407,7 @@ func TestGrovletRecoversServiceAfterHostingNodeFailure(t *testing.T) {
 	}
 	recoveredPlacement := []systemnats.PlacementRecord{
 		initialPlacement[0],
-		{ServiceID: groveshop.ServiceInventory, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest(t)},
 	}
 	if _, err := waitForGrovletPlacementObservers(ctx, cluster, survivors, recoveredPlacement); err != nil {
 		t.Fatalf("wait for recovered placement: %v\n%s", err, clusterLogs(cluster.nodes))
@@ -1430,8 +1448,8 @@ func TestGrovletDesiredStateRestartsKilledComponent(t *testing.T) {
 		[]string{"--system-nats-subject", "_GROVE.system.desired.node-3", "--system-nats-recovery"},
 	)
 	placement := []systemnats.PlacementRecord{
-		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest},
-		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest},
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest(t)},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest(t)},
 	}
 	if _, err := waitForGrovletPlacement(ctx, cluster, placement); err != nil {
 		t.Fatalf("wait for placement: %v\n%s", err, clusterLogs(cluster.nodes))
@@ -1442,7 +1460,7 @@ func TestGrovletDesiredStateRestartsKilledComponent(t *testing.T) {
 	desired := systemnats.DesiredDeployment{
 		ApplicationID:  "grove-shop",
 		Version:        "current",
-		ArtifactDigest: grovletArtifactDigest,
+		ArtifactDigest: grovletArtifactDigest(t),
 		Components: []systemnats.DesiredComponent{
 			{ServiceID: groveshop.ServiceOrders, NodeID: "node-1"},
 			{ServiceID: groveshop.ServiceInventory, NodeID: "node-2"},
@@ -1511,8 +1529,8 @@ func TestGrovletClusterRestartReconstructsDesiredDeployment(t *testing.T) {
 		}
 	}
 	placement := []systemnats.PlacementRecord{
-		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest},
-		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest},
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: componentInvocationSubject(ordersSubject, groveshop.ServiceOrders), ArtifactDigest: grovletArtifactDigest(t)},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: componentInvocationSubject(inventorySubject, groveshop.ServiceInventory), ArtifactDigest: grovletArtifactDigest(t)},
 	}
 	if _, err := waitForGrovletPlacement(ctx, cluster, placement); err != nil {
 		t.Fatalf("wait for initial placement: %v\n%s", err, clusterLogs(cluster.nodes))
@@ -1520,7 +1538,7 @@ func TestGrovletClusterRestartReconstructsDesiredDeployment(t *testing.T) {
 	desired := systemnats.DesiredDeployment{
 		ApplicationID:  "grove-shop",
 		Version:        "current",
-		ArtifactDigest: grovletArtifactDigest,
+		ArtifactDigest: grovletArtifactDigest(t),
 		Components: []systemnats.DesiredComponent{
 			{ServiceID: groveshop.ServiceOrders, NodeID: "node-1"},
 			{ServiceID: groveshop.ServiceInventory, NodeID: "node-2"},
@@ -1642,7 +1660,7 @@ func TestGrovletCrossNodeServiceInvocation(t *testing.T) {
 	)
 
 	ordersNode, err := grovetest.StartNode(
-		grovletPath,
+		grovletPath(t),
 		"--node-id", "orders-node",
 		"--advertise-endpoint", "nats-subject://system/orders-node",
 		"--system-nats-listen", "127.0.0.1:0",
@@ -1667,7 +1685,7 @@ func TestGrovletCrossNodeServiceInvocation(t *testing.T) {
 	}
 
 	inventoryNode, err := grovetest.StartNode(
-		grovletPath,
+		grovletPath(t),
 		"--node-id", "inventory-node",
 		"--advertise-endpoint", "nats-subject://system/inventory-node",
 		"--system-nats-url", serverURL,
@@ -1769,36 +1787,8 @@ func readyEventFromLogs(t *testing.T, logs string) lifecycleEvent {
 }
 
 func TestMain(m *testing.M) {
-	buildDir, err := os.MkdirTemp("", "grovlet-command-build-")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	path, buildErr := grovetest.BuildGrovlet(ctx, buildDir, "./internal/testapp/cmd/testapp")
-	debugPath, debugBuildErr := grovetest.BuildDebugGrovlet(ctx, buildDir, "./internal/testapp/cmd/testapp")
-	delveCommand := exec.CommandContext(ctx, "go", "tool", "-n", "dlv")
-	delveOutput, delveErr := delveCommand.Output()
-	cancel()
-	if err := errors.Join(buildErr, debugBuildErr, delveErr); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		_ = os.RemoveAll(buildDir)
-		os.Exit(1)
-	}
-	grovletPath = path
-	debugGrovletPath = debugPath
-	delvePath = strings.TrimSpace(string(delveOutput))
-	inspection, inspectErr := artifact.InspectFile(path)
-	if inspectErr != nil {
-		fmt.Fprintln(os.Stderr, inspectErr)
-		_ = os.RemoveAll(buildDir)
-		os.Exit(1)
-	}
-	grovletArtifactDigest = inspection.ArtifactDigest
-
 	code := m.Run()
-	if err := os.RemoveAll(buildDir); err != nil && code == 0 {
+	if err := testbin.Cleanup(); err != nil && code == 0 {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}

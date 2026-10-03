@@ -43,7 +43,7 @@ func TestGroveShopMVPLifecycle(t *testing.T) {
 	currentPath := directory + "/grove-shop-acme"
 	candidatePath := directory + "/grove-shop-acme-broken"
 	writeConfigFile(t, currentConfig, "acme-r42", "cloud", 100)
-	if output, err := runGroveCommand(ctx, "config", "embed", "--binary", grovletPath, "--config", currentConfig, "--output", currentPath); err != nil {
+	if output, err := runGroveCommand(t, ctx, "config", "embed", "--binary", grovletPath(t), "--config", currentConfig, "--output", currentPath); err != nil {
 		t.Fatalf("produce Artifact A: %v; output=%q", err, output)
 	}
 	currentInspection, err := artifact.InspectFile(currentPath)
@@ -260,7 +260,7 @@ func TestGroveShopMVPLifecycle(t *testing.T) {
 	}
 	assertMVPOrder(t, ctx, cluster.webAddress, "mvp-after-rollback")
 
-	resilienceOutput, err := runGroveCommand(ctx, "test", "--binary", currentPath, "--resilience")
+	resilienceOutput, err := runGroveCommand(t, ctx, "test", "--binary", currentPath, "--resilience")
 	wantResilienceOutput := "Grove Test App E2E\n✓ baseline\nKilled service 2 host node-2\n✓ failure detected\n✓ service 2 recovered on node-1\n✓ flow after recovery\nPASS\n"
 	if err != nil || resilienceOutput != wantResilienceOutput {
 		t.Fatalf("MVP resilience workflow = %v; output=%q", err, resilienceOutput)

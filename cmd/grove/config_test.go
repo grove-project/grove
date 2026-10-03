@@ -139,14 +139,14 @@ func TestExecuteConfigLifecycle(t *testing.T) {
 }
 
 func TestCompileWithTargetPreservesTargetValidation(t *testing.T) {
-	valid, err := compileWithTarget(t.Context(), grovletPath, []byte("inventory:\n  reservation_buffer: 3\n"))
+	valid, err := compileWithTarget(t.Context(), grovletPath(t), []byte("inventory:\n  reservation_buffer: 3\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if valid.Revision != "default" || valid.Encoding != "gob" {
 		t.Errorf("target compilation = %#v", valid)
 	}
-	_, err = compileWithTarget(t.Context(), grovletPath, []byte("inventory:\n  reservation_buffer: -1\n"))
+	_, err = compileWithTarget(t.Context(), grovletPath(t), []byte("inventory:\n  reservation_buffer: -1\n"))
 	var targetErr *targetCompilationError
 	if !errors.As(err, &targetErr) || targetErr.failure.Field != "inventory.reservation_buffer" {
 		t.Errorf("target validation error = %v; want structured reservation_buffer failure", err)
@@ -171,19 +171,19 @@ func TestConfiguredArtifactLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	output, err := runGroveCommand(ctx, "config", "validate", "--binary", grovletPath, "--config", cloudConfig)
+	output, err := runGroveCommand(t, ctx, "config", "validate", "--binary", grovletPath(t), "--config", cloudConfig)
 	if err != nil || !strings.Contains(output, "Configuration  valid") {
 		t.Fatalf("validate cloud config: %v; output=%q", err, output)
 	}
-	output, err = runGroveCommand(ctx, "config", "embed", "--binary", grovletPath, "--config", cloudConfig, "--output", cloudArtifact)
+	output, err = runGroveCommand(t, ctx, "config", "embed", "--binary", grovletPath(t), "--config", cloudConfig, "--output", cloudArtifact)
 	if err != nil || !strings.Contains(output, "node.zone") || !strings.Contains(output, "cloud") {
 		t.Fatalf("embed cloud config: %v; output=%q", err, output)
 	}
-	output, err = runGroveCommand(ctx, "config", "embed", "--binary", grovletPath, "--config", edgeConfig, "--output", edgeArtifact)
+	output, err = runGroveCommand(t, ctx, "config", "embed", "--binary", grovletPath(t), "--config", edgeConfig, "--output", edgeArtifact)
 	if err != nil || !strings.Contains(output, "node.zone") || !strings.Contains(output, "edge") {
 		t.Fatalf("embed edge config: %v; output=%q", err, output)
 	}
-	base, err := artifact.InspectFile(grovletPath)
+	base, err := artifact.InspectFile(grovletPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,11 +204,11 @@ func TestConfiguredArtifactLifecycle(t *testing.T) {
 	if cloud.Config.Facts["node.zone"] != "cloud" || edge.Config.Facts["node.zone"] != "edge" {
 		t.Errorf("variant node facts = cloud %v, edge %v", cloud.Config.Facts, edge.Config.Facts)
 	}
-	output, err = runGroveCommand(ctx, "config", "inspect", "--binary", edgeArtifact)
+	output, err = runGroveCommand(t, ctx, "config", "inspect", "--binary", edgeArtifact)
 	if err != nil || !strings.Contains(output, "Config revision  acme-edge-r42") || !strings.Contains(output, "node.zone        edge") {
 		t.Fatalf("inspect edge config: %v; output=%q", err, output)
 	}
-	output, err = runGroveCommand(ctx, "config", "extract", "--binary", cloudArtifact, "--output", extractedConfig)
+	output, err = runGroveCommand(t, ctx, "config", "extract", "--binary", cloudArtifact, "--output", extractedConfig)
 	if err != nil || !strings.Contains(output, "Extracted ") {
 		t.Fatalf("extract cloud config: %v; output=%q", err, output)
 	}
@@ -220,7 +220,7 @@ func TestConfiguredArtifactLifecycle(t *testing.T) {
 		t.Errorf("extracted config = %q", extracted)
 	}
 	invalidArtifact := filepath.Join(directory, "invalid-artifact")
-	output, err = runGroveCommand(ctx, "config", "embed", "--binary", grovletPath, "--config", invalidConfig, "--output", invalidArtifact)
+	output, err = runGroveCommand(t, ctx, "config", "embed", "--binary", grovletPath(t), "--config", invalidConfig, "--output", invalidArtifact)
 	if err == nil || !strings.Contains(output, "inventory.reservation_buffer") {
 		t.Fatalf("invalid config result: %v; output=%q", err, output)
 	}
@@ -236,7 +236,7 @@ func TestConfiguredArtifactLifecycle(t *testing.T) {
 			t.Errorf("configured Grovlet readiness = %q", logs)
 		}
 	}
-	if err := waitForGroveOutput(ctx, systemNATSURL, "node-3", "Cluster     healthy\nNodes       3 / 3 healthy\nComponents  2 / 2 healthy\n", "status"); err != nil {
+	if err := waitForGroveOutput(t, ctx, systemNATSURL, "node-3", "Cluster     healthy\nNodes       3 / 3 healthy\nComponents  2 / 2 healthy\n", "status"); err != nil {
 		t.Fatalf("wait for configured deployment: %v\n%s", err, grovletLogs(nodes))
 	}
 	transport, err := systemnats.Connect(ctx, systemNATSURL)

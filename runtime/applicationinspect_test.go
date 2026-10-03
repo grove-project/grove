@@ -18,7 +18,7 @@ import (
 func TestConsoleStatusDoesNotDependOnApplicationIngress(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	controller := newApplicationController(grovletPath, t.TempDir())
+	controller := newApplicationController(grovletPath(t), t.TempDir())
 	t.Cleanup(controller.close)
 	active, err := controller.startRollout(ctx, []string{"--config", filepath.Join("..", "configs", "acme.yaml")})
 	if err != nil {

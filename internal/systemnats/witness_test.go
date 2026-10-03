@@ -55,7 +55,7 @@ func TestFounderRestartKeepsRetiredWitnessOut(t *testing.T) {
 	if !founder.HasPeer() {
 		t.Fatal("founder has no bootstrap witness")
 	}
-	waitForVoters(t, ctx, founder, systemnats.MembershipReplicas+1)
+	waitForVoters(t, ctx, servers, systemnats.MembershipReplicas+1)
 	for !founder.ControlStateSettled(ctx) {
 		if ctx.Err() != nil {
 			t.Fatal("control state did not settle")
@@ -65,7 +65,7 @@ func TestFounderRestartKeepsRetiredWitnessOut(t *testing.T) {
 	if err := founder.ReleaseWitness(ctx); err != nil {
 		t.Fatalf("release witness: %v", err)
 	}
-	waitForVoters(t, ctx, founder, systemnats.MembershipReplicas)
+	waitForVoters(t, ctx, servers, systemnats.MembershipReplicas)
 
 	shutdown()
 	results := make([]*systemnats.Server, len(configs))
@@ -89,7 +89,7 @@ func TestFounderRestartKeepsRetiredWitnessOut(t *testing.T) {
 	if founder.HasPeer() {
 		t.Fatal("restarted founder brought its retired witness back")
 	}
-	waitForVoters(t, ctx, founder, systemnats.MembershipReplicas)
+	waitForVoters(t, ctx, servers, systemnats.MembershipReplicas)
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, voters := founder.MetadataState(); voters > systemnats.MembershipReplicas {
@@ -124,24 +124,33 @@ func replicateControlState(t *testing.T, ctx context.Context, founder *systemnat
 				break
 			}
 			if ctx.Err() != nil {
-				t.Fatalf("create %s control bucket: %v", bucket, err)
+				t.Fatalf("create %s control bucket: %v; founder sees %s", bucket, err, metadataView(founder))
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
 }
 
-func waitForVoters(t *testing.T, ctx context.Context, server *systemnats.Server, want int) {
+func waitForVoters(t *testing.T, ctx context.Context, servers []*systemnats.Server, want int) {
 	t.Helper()
 	for {
-		leader, voters := server.MetadataState()
-		if leader != "" && voters == want {
-			return
+		views := make([]string, 0, len(servers))
+		for _, server := range servers {
+			leader, voters := server.MetadataState()
+			if leader != "" && voters == want {
+				return
+			}
+			views = append(views, fmt.Sprintf("leader %q with %d voters", leader, voters))
 		}
 		select {
 		case <-ctx.Done():
-			t.Fatalf("metadata leader %q with %d voters; want %d voters: %v", leader, voters, want, ctx.Err())
+			t.Fatalf("want %d metadata voters: %v; %v", want, views, ctx.Err())
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
+}
+
+func metadataView(server *systemnats.Server) string {
+	leader, voters := server.MetadataState()
+	return fmt.Sprintf("leader %q with %d voters", leader, voters)
 }

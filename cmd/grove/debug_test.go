@@ -171,9 +171,9 @@ func startDebugCluster(t *testing.T, ctx context.Context) debugCluster {
 			"--system-nats-seed", "nats-route://127.0.0.1:" + strconv.Itoa(routePorts[seed]),
 			"--system-nats-membership",
 			"--system-nats-subject", "_GROVE.system.debug." + nodeID,
-			"--delve-path", delvePath,
+			"--delve-path", delvePath(t),
 		}
-		node, err := grovetest.StartNode(debugGrovletPath, append(args, extras[i]...)...)
+		node, err := grovetest.StartNode(debugGrovletPath(t), append(args, extras[i]...)...)
 		if err != nil {
 			cleanupGrovetestNodes(cluster.nodes)
 			t.Fatalf("start %s: %v", nodeID, err)
@@ -302,7 +302,7 @@ func startDebugCommand(t *testing.T, ctx context.Context, statePath, service, li
 	running := &runningDebugCommand{done: make(chan error, 1)}
 	running.command = exec.CommandContext(
 		ctx,
-		grovePath,
+		grovePath(t),
 		"debug",
 		"--service", service,
 		"--listen", listen,

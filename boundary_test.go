@@ -65,6 +65,13 @@ var importRules = []importRule{
 		Forbidden: []string{modulePath + "/internal/systemnats", "github.com/nats-io/..."},
 	},
 	{
+		// Test-binary builds serve tests only (internal/testbin).
+		Name:      "production does not depend on test binary builds",
+		From:      []string{modulePath + "/..."},
+		Except:    []string{modulePath + "/internal/testbin"},
+		Forbidden: []string{modulePath + "/internal/testbin"},
+	},
+	{
 		// Inspection reads control-plane state through a read-only port
 		// that the System NATS adapter implements.
 		Name:      "inspection does not depend on NATS",

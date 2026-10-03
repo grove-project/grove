@@ -11,9 +11,12 @@ import (
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/grovetest"
 	groveshop "github.com/grove-project/grove/internal/testapp"
+	"github.com/grove-project/grove/internal/testbin"
 )
 
-var grovletPath string
+var grovletBinary = testbin.New("test Grovlet", func(ctx context.Context, dir string) (string, error) {
+	return grovetest.BuildGrovlet(ctx, dir, "./internal/testapp/cmd/testapp")
+})
 
 // Call keeps the service boundary and application-owned types visible at the
 // call site.
@@ -163,7 +166,7 @@ func TestCallRunsGroveShopLocally(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	node, err := grovetest.StartNode(grovletPath)
+	node, err := grovetest.StartNode(grovletBinary.Get(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,24 +212,8 @@ func TestCallRunsGroveShopLocally(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
-	buildDir, err := os.MkdirTemp("", "grove-invocation-build-")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	path, buildErr := grovetest.BuildGrovlet(ctx, buildDir, "./internal/testapp/cmd/testapp")
-	cancel()
-	if buildErr != nil {
-		fmt.Fprintln(os.Stderr, buildErr)
-		_ = os.RemoveAll(buildDir)
-		os.Exit(1)
-	}
-	grovletPath = path
-
 	code := m.Run()
-	if err := os.RemoveAll(buildDir); err != nil && code == 0 {
+	if err := testbin.Cleanup(); err != nil && code == 0 {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}

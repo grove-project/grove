@@ -10,7 +10,7 @@ import (
 func TestGroveTestCommand(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	output, err := runGroveCommand(ctx, "test", "--binary", grovletPath)
+	output, err := runGroveCommand(t, ctx, "test", "--binary", grovletPath(t))
 	if err != nil {
 		t.Fatalf("grove test: %v; output=%q", err, output)
 	}
@@ -23,7 +23,7 @@ func TestGroveTestCommand(t *testing.T) {
 func TestGroveTestCommandReturnsFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
-	output, err := runGroveCommand(ctx, "test", "--binary", t.TempDir()+"/missing")
+	output, err := runGroveCommand(t, ctx, "test", "--binary", t.TempDir()+"/missing")
 	if err == nil {
 		t.Fatal("grove test accepted a missing artifact")
 	}
@@ -35,7 +35,7 @@ func TestGroveTestCommandReturnsFailure(t *testing.T) {
 func TestGroveTestResilienceCommand(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
-	output, err := runGroveCommand(ctx, "test", "--binary", grovletPath, "--resilience")
+	output, err := runGroveCommand(t, ctx, "test", "--binary", grovletPath(t), "--resilience")
 	if err != nil {
 		t.Fatalf("grove test --resilience: %v; output=%q", err, output)
 	}

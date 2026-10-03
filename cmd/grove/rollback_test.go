@@ -25,7 +25,7 @@ func TestBrokenInventoryCandidateRollsBack(t *testing.T) {
 	currentPath := directory + "/grove-shop-current"
 	candidatePath := directory + "/grove-shop-broken"
 	writeConfigFile(t, currentConfig, "acme-r42", "cloud", 3)
-	if output, err := runGroveCommand(ctx, "config", "embed", "--binary", grovletPath, "--config", currentConfig, "--output", currentPath); err != nil {
+	if output, err := runGroveCommand(t, ctx, "config", "embed", "--binary", grovletPath(t), "--config", currentConfig, "--output", currentPath); err != nil {
 		t.Fatalf("embed current artifact: %v; output=%q", err, output)
 	}
 	currentInspection, err := artifact.InspectFile(currentPath)
@@ -165,7 +165,7 @@ func embedBrokenInventoryArtifact(t *testing.T, output string) artifact.Inspecti
 	if err != nil {
 		t.Fatal(err)
 	}
-	inspection, err := artifact.EmbedFile(grovletPath, output, artifact.Compilation{
+	inspection, err := artifact.EmbedFile(grovletPath(t), output, artifact.Compilation{
 		ProtocolVersion: artifact.CompilerProtocolVersion,
 		Revision:        configuration.Revision,
 		Encoding:        "gob",

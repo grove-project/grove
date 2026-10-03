@@ -34,10 +34,7 @@ type loadGenStatus struct {
 func TestHandlerLevelPlacementAcrossGrovlets(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 	defer cancel()
-	binary, err := grovetest.BuildGrovlet(ctx, t.TempDir(), "./internal/testapp/cmd/handlerapp")
-	if err != nil {
-		t.Fatal(err)
-	}
+	binary := handlerGrovletPath(t)
 
 	// Three nodes host Payment. A fourth hosts only the ingress and is never
 	// killed, so which payment node owns the workload does not matter.

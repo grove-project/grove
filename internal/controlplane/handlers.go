@@ -160,6 +160,20 @@ func PlanHandlerPlacements(
 	live []string,
 	leaseEpochs map[string]uint64,
 ) HandlerPlacementPlan {
+	return PlanHandlerPlacementsWith(placement.Place, nodes, placements, live, leaseEpochs)
+}
+
+// PlanHandlerPlacementsWith is PlanHandlerPlacements with place deciding the
+// node sets instead of placement.Place. Production always uses Place; the
+// grovetest TestCluster passes a test's own policy through here so every
+// other reconciliation rule (epochs, deletes, endpoints) stays production's.
+func PlanHandlerPlacementsWith(
+	place func(placement.Topology) map[placement.Handler][]string,
+	nodes map[string]NodeHandlers,
+	placements map[placement.Handler]HandlerPlacement,
+	live []string,
+	leaseEpochs map[string]uint64,
+) HandlerPlacementPlan {
 	liveSet := make(map[string]bool, len(live))
 	for _, id := range live {
 		liveSet[id] = true
@@ -193,7 +207,7 @@ func PlanHandlerPlacements(
 	for id, record := range placements {
 		topology.Current[id] = record.NodeIDs()
 	}
-	desired := placement.Place(topology)
+	desired := place(topology)
 
 	var plan HandlerPlacementPlan
 	for _, id := range sortedHandlers(desired) {

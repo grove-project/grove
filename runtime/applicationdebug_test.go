@@ -76,10 +76,10 @@ func runGroveShopDebuggingDemo(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
 	statePath := filepath.Join(t.TempDir(), "console.json")
-	consoleCommand := exec.CommandContext(ctx, debugGrovletPath)
+	consoleCommand := exec.CommandContext(ctx, debugGrovletPath(t))
 	consoleCommand.Env = append(os.Environ(),
 		consoleStateEnvironment+"="+statePath,
-		"PATH="+filepath.Dir(delvePath)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"PATH="+filepath.Dir(delvePath(t))+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 	input, err := consoleCommand.StdinPipe()
 	if err != nil {
@@ -141,7 +141,7 @@ func runGroveShopDebuggingDemo(t *testing.T) {
 		groveshop.ServicePayment:   string(systemnats.ComponentDebugging),
 		groveshop.ServiceShipping:  string(systemnats.ComponentHealthy),
 	}
-	if _, err := waitForDebugApplicationStates(ctx, statePath, wantDebugging); err != nil {
+	if _, err := waitForDebugApplicationStates(t, ctx, statePath, wantDebugging); err != nil {
 		t.Fatalf("observe independent debug sessions: %v; console=%s", err, consoleOutput.String())
 	}
 	logsOutput := runDebugApplicationAction(t, ctx, statePath, "logs.view")
@@ -204,7 +204,7 @@ func runGroveShopDebuggingDemo(t *testing.T) {
 	for serviceID := range wantDebugging {
 		wantHealthy[serviceID] = string(systemnats.ComponentHealthy)
 	}
-	finalStatus, err := waitForDebugApplicationStates(ctx, statePath, wantHealthy)
+	finalStatus, err := waitForDebugApplicationStates(t, ctx, statePath, wantHealthy)
 	if err != nil {
 		t.Fatalf("wait for normal supervision: %v; console=%s", err, consoleOutput.String())
 	}
@@ -250,7 +250,7 @@ type runningDebugApplicationAction struct {
 func startDebugApplicationAction(t *testing.T, ctx context.Context, statePath, service, listen string) *runningDebugApplicationAction {
 	t.Helper()
 	running := &runningDebugApplicationAction{done: make(chan error, 1)}
-	running.command = exec.CommandContext(ctx, debugGrovletPath, "action", "debug.attach", service, "--listen", listen)
+	running.command = exec.CommandContext(ctx, debugGrovletPath(t), "action", "debug.attach", service, "--listen", listen)
 	running.command.Env = append(os.Environ(), consoleStateEnvironment+"="+statePath)
 	running.command.Stdout = &running.output
 	running.command.Stderr = &running.output
@@ -317,14 +317,14 @@ func (b *applicationSynchronizedBuffer) String() string {
 	return b.buffer.String()
 }
 
-func waitForDebugApplicationStates(ctx context.Context, statePath string, want map[grove.ServiceID]string) (ClusterStatus, error) {
+func waitForDebugApplicationStates(t testing.TB, ctx context.Context, statePath string, want map[grove.ServiceID]string) (ClusterStatus, error) {
 	ticker := time.NewTicker(applicationConditionInterval)
 	defer ticker.Stop()
 	var last ClusterStatus
 	var lastErr error
 	for {
 		attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		output, err := runDebugApplicationActionResult(attemptCtx, statePath, "cluster.status")
+		output, err := runDebugApplicationActionResult(t, attemptCtx, statePath, "cluster.status")
 		cancel()
 		if err == nil {
 			err = json.Unmarshal(output, &last)
@@ -356,8 +356,8 @@ func applicationComponentState(status ClusterStatus, serviceID grove.ServiceID) 
 	return ""
 }
 
-func runDebugApplicationActionResult(ctx context.Context, statePath string, args ...string) ([]byte, error) {
-	command := exec.CommandContext(ctx, debugGrovletPath, append([]string{"action"}, args...)...)
+func runDebugApplicationActionResult(t testing.TB, ctx context.Context, statePath string, args ...string) ([]byte, error) {
+	command := exec.CommandContext(ctx, debugGrovletPath(t), append([]string{"action"}, args...)...)
 	command.Env = append(os.Environ(), consoleStateEnvironment+"="+statePath)
 	return command.CombinedOutput()
 }
@@ -375,7 +375,7 @@ func applicationWorkerFromStatus(status ClusterStatus, serviceID grove.ServiceID
 
 func runDebugApplicationAction(t *testing.T, ctx context.Context, statePath string, args ...string) []byte {
 	t.Helper()
-	command := exec.CommandContext(ctx, debugGrovletPath, append([]string{"action"}, args...)...)
+	command := exec.CommandContext(ctx, debugGrovletPath(t), append([]string{"action"}, args...)...)
 	command.Env = append(os.Environ(), consoleStateEnvironment+"="+statePath)
 	output, err := command.CombinedOutput()
 	if err != nil {

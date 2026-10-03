@@ -19,7 +19,7 @@ func TestNewCluster(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
 
-	cluster, err := grovetest.NewCluster(grovletPath, 3)
+	cluster, err := grovetest.NewCluster(grovletPath(t), 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestNewCluster(t *testing.T) {
 }
 
 func TestNewClusterRejectsInvalidNodeCount(t *testing.T) {
-	_, err := grovetest.NewCluster(grovletPath, 0)
+	_, err := grovetest.NewCluster(grovletPath(t), 0)
 	if !errors.Is(err, grovetest.ErrInvalidNodeCount) {
 		t.Errorf("NewCluster node count error = %v; want %v", err, grovetest.ErrInvalidNodeCount)
 	}

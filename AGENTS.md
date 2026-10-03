@@ -59,6 +59,8 @@ Every capability must be fully testable through `go test`. Distributed E2E tests
 
 No manual setup, Docker, shell-script orchestration, or human verification may be required for acceptance.
 
+The test layers, what each simulates, and when to use each are in [docs/architecture/testing.md](docs/architecture/testing.md). `go test -short ./...` runs every layer except real processes in about a minute.
+
 ## No same-host shortcuts
 A Grovlet is a logical node, not a host. Multi-process tests may share a machine, but Grovlets must communicate as if they were on different hosts. Node identity must be independent of host identity.
 
