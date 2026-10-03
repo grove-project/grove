@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/internal/placement"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
@@ -37,20 +38,31 @@ func applicationManagesHandler(service grove.ServiceID, method grove.MethodID) b
 	return false
 }
 
+// clusterMembers adapts a health view to the members placement decides over.
+// A node has failed once it was seen healthy and is now unavailable.
+func clusterMembers(view systemnats.ClusterView) ([]placement.Member, bool) {
+	if !view.Ready {
+		return nil, false
+	}
+	members := make([]placement.Member, 0, len(view.Nodes))
+	for _, node := range view.Nodes {
+		members = append(members, placement.Member{
+			ID:     node.NodeID,
+			Live:   node.Health == systemnats.HealthHealthy,
+			Failed: node.Health == systemnats.HealthUnavailable && node.LastSeen != "",
+		})
+	}
+	return members, true
+}
+
 // liveNodesFromHealth adapts Health to the handler placement live-node view.
 func liveNodesFromHealth(health *systemnats.Health) func() ([]string, bool) {
 	return func() ([]string, bool) {
-		view := health.Snapshot()
-		if !view.Ready {
+		members, ready := clusterMembers(health.Snapshot())
+		if !ready {
 			return nil, false
 		}
-		live := make([]string, 0, len(view.Nodes))
-		for _, node := range view.Nodes {
-			if node.Health == systemnats.HealthHealthy {
-				live = append(live, node.NodeID)
-			}
-		}
-		return live, true
+		return placement.LiveNodes(members), true
 	}
 }
 

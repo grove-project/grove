@@ -45,6 +45,18 @@ var importRules = []importRule{
 		Forbidden: []string{modulePath + "/internal/testapp/..."},
 	},
 	{
+		// Placement decisions are pure so production and grovetest share them
+		// (docs/architecture/placement.md).
+		Name: "placement decisions do not depend on storage, transport or runtime",
+		From: []string{modulePath + "/internal/placement"},
+		Forbidden: []string{
+			"github.com/nats-io/...",
+			modulePath + "/internal/systemnats",
+			modulePath + "/internal/controlplane",
+			modulePath + "/runtime/...",
+		},
+	},
+	{
 		// Rollout orchestration sequences control-plane records through a
 		// Store port; the System NATS adapter implements it, so the
 		// orchestration is tested without a server.

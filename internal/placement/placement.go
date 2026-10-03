@@ -1,6 +1,16 @@
-// Package placement decides where registered handlers run and which
-// placement serves each call. It is pure and deterministic so the same logic
-// runs in production reconciliation and in the grovetest TestCluster.
+// Package placement is Grove's placement subsystem. It owns every decision
+// about where work runs:
+//
+//   - Place and NextEpoch decide which nodes run each handler and fence
+//     exclusive ownership with an epoch.
+//   - Selector picks the placement that serves each call.
+//   - Recover decides where a failed node's services move.
+//   - DecideClaim and LeaseHolds decide when an exclusive owner may act.
+//
+// It is pure and deterministic, with no storage, transport or clock of its
+// own, so production (internal/controlplane records stored by
+// internal/systemnats) and the grovetest TestCluster run the same rules. See
+// docs/architecture/placement.md.
 package placement
 
 import (
@@ -53,8 +63,9 @@ type Topology struct {
 
 // Place returns handler -> sorted node IDs. Automatic handlers are placed on
 // every node that registered them. An exclusive handler is placed on exactly
-// one node: its current owner while still eligible, otherwise the lowest node
-// ID. Exclusivity constrains only that handler, not its service.
+// one node: its current owner while still eligible, otherwise the lowest
+// eligible node ID (the rule Coordinator also uses). Exclusivity constrains
+// only that handler, not its service.
 func Place(t Topology) map[Handler][]string {
 	eligible := make(map[Handler][]string)
 	exclusive := make(map[Handler]bool)
@@ -71,7 +82,7 @@ func Place(t Topology) map[Handler][]string {
 			placements[h] = ids
 			continue
 		}
-		owner := ids[0]
+		owner := lowest(ids)
 		for _, current := range t.Current[h] {
 			for _, id := range ids {
 				if id == current {
@@ -98,6 +109,15 @@ func NextEpoch(previous, next []string, epoch uint64) uint64 {
 		}
 	}
 	return epoch + 1
+}
+
+// FencedEpoch is the epoch an exclusive handler gets when its owners change
+// from previous to next. stored is the epoch of its stored placement (zero if
+// none is stored) and claimed the highest epoch any lease on its capability
+// has been claimed at. Epochs only grow, even when a placement is deleted and
+// recreated, because the lease remembers the highest epoch ever claimed.
+func FencedEpoch(previous, next []string, stored, claimed uint64) uint64 {
+	return NextEpoch(previous, next, max(stored, claimed))
 }
 
 // Selector spreads calls round-robin across a handler's healthy placements.
