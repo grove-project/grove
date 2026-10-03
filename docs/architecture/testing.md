@@ -117,6 +117,10 @@ the dependency or the call that broke it.
 In the same file, `TestPresentationReadsThroughInspection` keeps the console,
 TUI and CLI reading through `internal/inspect`, and `TestTUIOwnsNoActionNames`
 keeps `internal/tui` reading actions from their metadata.
+`TestPackagesAreDocumented` requires every package to have a row in
+[packages.md](packages.md) and a package comment, and
+`TestRetiredTermsStayRetired` keeps the spellings the
+[glossary](../glossary.md) retired out of docs and code.
 
 A rule also fails when it stops matching anything, for example after a rename,
 so a rule cannot silently guard nothing. To add a boundary:

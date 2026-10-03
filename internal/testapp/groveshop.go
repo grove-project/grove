@@ -1,5 +1,8 @@
-// Package groveshop implements the deterministic Grove Shop reference
-// application as ordinary Go business services.
+// Package testapp is Grove's in-repository test application: a small,
+// deterministic version of the Grove Shop reference application (orders,
+// inventory, payment, shipping and a web ingress) written as ordinary Go
+// business services. Grove's real-process tests run it. The standalone
+// application lives in grove-project/groveshop.
 package testapp
 
 import (
