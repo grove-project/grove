@@ -45,7 +45,7 @@ func TestGrovletHostsComponentsInOneApplicationRuntime(t *testing.T) {
 	desired := systemnats.DesiredDeployment{
 		ApplicationID:  "grove-shop",
 		Version:        "current",
-		ArtifactDigest: grovletArtifactDigest,
+		ArtifactDigest: grovletArtifactDigest(t),
 	}
 	for _, serviceID := range all {
 		desired.Components = append(desired.Components, systemnats.DesiredComponent{ServiceID: serviceID, NodeID: nodeID})
@@ -57,7 +57,7 @@ func TestGrovletHostsComponentsInOneApplicationRuntime(t *testing.T) {
 	var placement []systemnats.PlacementRecord
 	for _, serviceID := range all {
 		placement = append(placement, systemnats.PlacementRecord{
-			ServiceID: serviceID, NodeID: nodeID, InvocationSubject: componentInvocationSubject(nodeSubject, serviceID), ArtifactDigest: grovletArtifactDigest,
+			ServiceID: serviceID, NodeID: nodeID, InvocationSubject: componentInvocationSubject(nodeSubject, serviceID), ArtifactDigest: grovletArtifactDigest(t),
 		})
 	}
 	if _, err := waitForGrovletPlacement(ctx, cluster, placement); err != nil {

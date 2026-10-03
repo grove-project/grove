@@ -26,7 +26,7 @@ func TestGroveShopArtifactDeploys(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
 
-	inspection, err := artifact.InspectFile(grovletPath)
+	inspection, err := artifact.InspectFile(grovletPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestGroveShopArtifactDeploys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	binary, err := os.ReadFile(grovletPath)
+	binary, err := os.ReadFile(grovletPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,9 +68,9 @@ func TestGroveShopArtifactDeploys(t *testing.T) {
 	}()
 
 	wantPlacement := []systemnats.PlacementRecord{
-		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: "_GROVE.system.artifact.node-1.service.1", ArtifactDigest: grovletArtifactDigest},
-		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: "_GROVE.system.artifact.node-2.service.2", ArtifactDigest: grovletArtifactDigest},
-		{ServiceID: groveshop.ServiceWeb, NodeID: "node-1", InvocationSubject: "_GROVE.system.artifact.node-1.service.5", ArtifactDigest: grovletArtifactDigest},
+		{ServiceID: groveshop.ServiceOrders, NodeID: "node-1", InvocationSubject: "_GROVE.system.artifact.node-1.service.1", ArtifactDigest: grovletArtifactDigest(t)},
+		{ServiceID: groveshop.ServiceInventory, NodeID: "node-2", InvocationSubject: "_GROVE.system.artifact.node-2.service.2", ArtifactDigest: grovletArtifactDigest(t)},
+		{ServiceID: groveshop.ServiceWeb, NodeID: "node-1", InvocationSubject: "_GROVE.system.artifact.node-1.service.5", ArtifactDigest: grovletArtifactDigest(t)},
 	}
 	if _, err := waitForGrovletPlacement(ctx, cluster, wantPlacement); err != nil {
 		t.Fatalf("wait for artifact placement: %v\n%s", err, clusterLogs(cluster.nodes))

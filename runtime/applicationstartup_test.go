@@ -78,7 +78,7 @@ func TestConfiguredArtifactBootstrapsThenJoinsOneCluster(t *testing.T) {
 		t.Fatal(err)
 	}
 	configuredPath := filepath.Join(directory, "groveshop")
-	inspection, err := artifact.EmbedFile(grovletPath, configuredPath, compilation)
+	inspection, err := artifact.EmbedFile(grovletPath(t), configuredPath, compilation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +358,7 @@ func TestConfiguredArtifactGracefulLeaveRetiresNodeAndRecoversServices(t *testin
 		t.Fatal(err)
 	}
 	configuredPath := filepath.Join(directory, "groveshop")
-	inspection, err := artifact.EmbedFile(grovletPath, configuredPath, compilation)
+	inspection, err := artifact.EmbedFile(grovletPath(t), configuredPath, compilation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -675,7 +675,7 @@ func TestJoinedNodeWithNeverSeenIDHostsRuntimeChosenComponents(t *testing.T) {
 		t.Fatal(err)
 	}
 	configuredPath := filepath.Join(directory, "groveshop")
-	inspection, err := artifact.EmbedFile(grovletPath, configuredPath, compilation)
+	inspection, err := artifact.EmbedFile(grovletPath(t), configuredPath, compilation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -743,7 +743,7 @@ func TestIngressMovesToSurvivorWhenServingNodeLeaves(t *testing.T) {
 		t.Fatal(err)
 	}
 	configuredPath := filepath.Join(directory, "groveshop")
-	inspection, err := artifact.EmbedFile(grovletPath, configuredPath, compilation)
+	inspection, err := artifact.EmbedFile(grovletPath(t), configuredPath, compilation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -796,7 +796,7 @@ func TestIngressMovesToSurvivorWhenServingNodeIsKilled(t *testing.T) {
 		t.Fatal(err)
 	}
 	configuredPath := filepath.Join(directory, "groveshop")
-	inspection, err := artifact.EmbedFile(grovletPath, configuredPath, compilation)
+	inspection, err := artifact.EmbedFile(grovletPath(t), configuredPath, compilation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1048,7 +1048,7 @@ func TestReplacementNodeJoinsAfterThirdNodeIsKilled(t *testing.T) {
 		t.Fatal(err)
 	}
 	configuredPath := filepath.Join(directory, "groveshop")
-	inspection, err := artifact.EmbedFile(grovletPath, configuredPath, compilation)
+	inspection, err := artifact.EmbedFile(grovletPath(t), configuredPath, compilation)
 	if err != nil {
 		t.Fatal(err)
 	}

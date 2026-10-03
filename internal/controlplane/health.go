@@ -3,6 +3,8 @@ package controlplane
 import (
 	"sort"
 	"time"
+
+	"github.com/grove-project/grove/internal/placement"
 )
 
 // HealthState is one node's derived liveness observation for a member.
@@ -88,4 +90,19 @@ func GateClusterView(view ClusterView, minNodes int, settled func(nodes int) err
 		}
 	}
 	return view
+}
+
+// Members is the cluster view as placement decides over it. A member is live
+// while healthy, and has failed once it was heard from and is unavailable
+// now; a member never heard from is still joining, not failed.
+func Members(view ClusterView) []placement.Member {
+	members := make([]placement.Member, 0, len(view.Nodes))
+	for _, node := range view.Nodes {
+		members = append(members, placement.Member{
+			ID:     node.NodeID,
+			Live:   node.Health == HealthHealthy,
+			Failed: node.Health == HealthUnavailable && node.LastSeen != "",
+		})
+	}
+	return members
 }

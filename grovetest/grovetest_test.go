@@ -10,14 +10,20 @@ import (
 	"time"
 
 	"github.com/grove-project/grove/grovetest"
+	"github.com/grove-project/grove/internal/testbin"
 )
 
-var grovletPath string
+var grovletBinary = testbin.New("test Grovlet", func(ctx context.Context, dir string) (string, error) {
+	return grovetest.BuildGrovlet(ctx, dir, "./internal/testapp/cmd/testapp")
+})
+
+// grovletPath builds the test Grovlet on first use and skips tb under -short.
+func grovletPath(tb testing.TB) string { return grovletBinary.Get(tb) }
 
 // A Node follows the same readiness and graceful-shutdown lifecycle as the
 // Grovlet executable used in production.
 func ExampleNode() {
-	node, err := grovetest.StartNode(grovletPath)
+	node, err := grovetest.StartNode(grovletBinary.ForExample())
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -46,11 +52,11 @@ func ExampleNode() {
 func TestNode(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
-	if _, err := grovetest.StartNode(grovletPath, "--runtime-dir=elsewhere"); !errors.Is(err, grovetest.ErrRuntimeDirArgument) {
+	if _, err := grovetest.StartNode(grovletPath(t), "--runtime-dir=elsewhere"); !errors.Is(err, grovetest.ErrRuntimeDirArgument) {
 		t.Errorf("StartNode() runtime argument error = %v; want %v", err, grovetest.ErrRuntimeDirArgument)
 	}
 
-	node, err := grovetest.StartNode(grovletPath)
+	node, err := grovetest.StartNode(grovletPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +131,7 @@ func TestNode(t *testing.T) {
 		t.Errorf("restart after cleanup = %v; want %v", err, grovetest.ErrNodeCleaned)
 	}
 
-	activeNode, err := grovetest.StartNode(grovletPath)
+	activeNode, err := grovetest.StartNode(grovletPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,24 +153,9 @@ func TestNode(t *testing.T) {
 }
 
 func TestMain(m *testing.M) {
-	buildDir, err := os.MkdirTemp("", "grovetest-build-")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	path, buildErr := grovetest.BuildGrovlet(ctx, buildDir, "./internal/testapp/cmd/testapp")
-	cancel()
-	if buildErr != nil {
-		fmt.Fprintln(os.Stderr, buildErr)
-		_ = os.RemoveAll(buildDir)
-		os.Exit(1)
-	}
-	grovletPath = path
-
+	testbin.SkipExamplesUnderShort("ExampleNode")
 	code := m.Run()
-	if err := os.RemoveAll(buildDir); err != nil && code == 0 {
+	if err := testbin.Cleanup(); err != nil && code == 0 {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}

@@ -2,6 +2,8 @@ Testing
 
 Status: Draft / evolving
 
+This page is about testing Grove applications. For how Grove itself is tested, see [../architecture/testing.md](../architecture/testing.md).
+
 Goal  
 Make realistic end-to-end testing a first-class Grove capability.
 

@@ -30,10 +30,10 @@ func TestConfiguredArtifactRolloutIdentityConverges(t *testing.T) {
 	candidatePath := directory + "/grove-shop-candidate"
 	writeConfigFile(t, currentConfig, "acme-r42", "cloud", 2)
 	writeConfigFile(t, candidateConfig, "acme-r43", "cloud", 3)
-	if output, err := runGroveCommand(ctx, "config", "embed", "--binary", grovletPath, "--config", currentConfig, "--output", currentPath); err != nil {
+	if output, err := runGroveCommand(t, ctx, "config", "embed", "--binary", grovletPath(t), "--config", currentConfig, "--output", currentPath); err != nil {
 		t.Fatalf("embed current artifact: %v; output=%q", err, output)
 	}
-	if output, err := runGroveCommand(ctx, "config", "embed", "--binary", grovletPath, "--config", candidateConfig, "--output", candidatePath); err != nil {
+	if output, err := runGroveCommand(t, ctx, "config", "embed", "--binary", grovletPath(t), "--config", candidateConfig, "--output", candidatePath); err != nil {
 		t.Fatalf("embed candidate artifact: %v; output=%q", err, output)
 	}
 	currentInspection, err := artifact.InspectFile(currentPath)

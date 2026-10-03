@@ -32,10 +32,10 @@ but claim nothing. Recovery moves a record only when its node fails.
 
 | Decision | Function | Production caller | Simulation caller |
 |---|---|---|---|
-| Nodes for each handler: every eligible node for automatic handlers, one stable owner for exclusive ones | `placement.Place` | `controlplane.PlanHandlerPlacements` | `grovetest.EverywherePolicy` |
+| Nodes for each handler: every eligible node for automatic handlers, one stable owner for exclusive ones | `placement.Place` | `controlplane.PlanHandlerPlacements` | `TestCluster` reconcile, with `grovetest.EverywherePolicy` by default |
 | Fencing epoch of an exclusive handler | `placement.FencedEpoch` (`NextEpoch`) | `controlplane.PlanHandlerPlacements` | `TestCluster` reconcile |
 | Which placement serves a call | `placement.Selector` | `systemnats` handler router | `TestCluster` node router |
-| Which nodes are live, and which have failed | `placement.LiveNodes` and `placement.Member` | `runtime.clusterMembers` from the health view | `TestCluster` node state |
+| Which nodes are live, and which have failed | `placement.LiveNodes` and `placement.Member` | `runtime.clusterMembers` through `controlplane.Members` | `TestCluster`, through the same `controlplane.Members` |
 | Where a failed node's services move | `placement.Recover` (the `Coordinator`) | `runtime.selectRecoveries` | not modeled (see below) |
 | Whether a node may claim an exclusive capability | `placement.DecideClaim` | `systemnats` `tryClaim` through `controlplane.DecideClaim` | `TestNode.AcquireExclusive` |
 | Whether a held lease may still act | `placement.LeaseHolds` | `systemnats` `holds` through `controlplane.LeaseHolds` | `testLease.Held` |
@@ -79,17 +79,26 @@ in `runtime/application.go` still names its candidate nodes itself (Goal 2).
 
 ## Simulation
 
-`grovetest.TestCluster` runs `Place`, `FencedEpoch`, `Selector`,
-`DecideClaim` and `LeaseHolds` from this package, so its handler placement,
-epochs and lease semantics are production's. It simulates only the store,
-failure detection and the clock. When production would block waiting out a
-previous holder's lease, the TestCluster advances its clock to that moment.
+`grovetest.TestCluster` runs production's rules and simulates only the
+store, the network, node processes and the clock:
+- failure detection through `controlplane.EvaluateHealth` and
+  `controlplane.Members`;
+- handler placement and epochs through
+  `controlplane.PlanHandlerPlacementsWith`, which calls `Place` and
+  `FencedEpoch`;
+- leases through `DecideClaim` and `LeaseHolds`, and routing through
+  `Selector`.
+
+When production would block waiting out failure detection or a previous
+holder's lease, the TestCluster advances its clock to that moment.
 
 `TestTestClusterMatchesProductionPlacement` (`grovetest/conformance_test.go`)
 replays one scenario through both the TestCluster and
 `controlplane.PlanHandlerPlacements`, and requires identical placements and
 epochs after every step. The scenario covers start, owner crash, takeover,
 restart, isolation, reconnect, and an exclusive handler deleted and recreated.
+`grovetest/reuse_test.go` fails if the TestCluster stops calling these
+functions. See [testing.md](testing.md) for the other test layers.
 
 The TestCluster does not model service placement records or recovery yet.
 

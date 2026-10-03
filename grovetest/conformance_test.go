@@ -82,8 +82,8 @@ func TestTestClusterMatchesProductionPlacement(t *testing.T) {
 		}
 		simEpochs := make(map[HandlerID]uint64)
 		for id := range cluster.store {
-			if cluster.exclusiveLocked(id) {
-				simEpochs[id] = cluster.epochs[id]
+			if cluster.records[id].Exclusive {
+				simEpochs[id] = cluster.records[id].Epoch
 			}
 		}
 		simPlaced, diagnostics := clonePlacements(cluster.store), cluster.diagnosticsLocked()

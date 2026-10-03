@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/internal/controlplane"
 	"github.com/grove-project/grove/internal/placement"
 )
 
@@ -156,8 +157,10 @@ type registration struct {
 
 // TestCluster runs several logical Grove nodes in one goroutine-free,
 // deterministic in-process cluster. Each node owns a real grove.Registry,
-// grove.Dispatcher, and routed grove.Client; only the network, node
-// processes, and clock are simulated. Methods are for use by one test
+// grove.Dispatcher, and routed grove.Client, and the cluster runs
+// production's control-plane rules: health evaluation, handler placement
+// reconciliation, and exclusive leasing. Only the store, the network, node
+// processes, and the clock are simulated. Methods are for use by one test
 // goroutine, though registered handlers may call back through node clients.
 type TestCluster struct {
 	tb          testing.TB
@@ -168,9 +171,9 @@ type TestCluster struct {
 
 	mu         sync.Mutex
 	nodes      []*TestNode
-	store      map[HandlerID][]string             // authoritative placements
-	epochs     map[HandlerID]uint64               // fencing epoch per exclusive handler
-	leases     map[string]placement.ObservedLease // stored lease per capability
+	records    map[HandlerID]controlplane.HandlerPlacement // authoritative placements
+	store      map[HandlerID][]string                      // node IDs of records
+	leases     map[string]placement.ObservedLease          // stored lease per capability
 	partitions map[[2]string]bool
 	calls      map[HandlerID]map[string]int
 	events     []string
@@ -187,7 +190,7 @@ func NewTestCluster(tb testing.TB, opts ...ClusterOption) *TestCluster {
 		policy:      EverywherePolicy{},
 		detectAfter: defaultFailureDetection,
 		store:       make(map[HandlerID][]string),
-		epochs:      make(map[HandlerID]uint64),
+		records:     make(map[HandlerID]controlplane.HandlerPlacement),
 		leases:      make(map[string]placement.ObservedLease),
 		partitions:  make(map[[2]string]bool),
 		calls:       make(map[HandlerID]map[string]int),
@@ -255,6 +258,8 @@ func (c *TestCluster) StopNode(n *TestNode) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n.state = NodeStopped
+	n.leaving = true
+	n.lastSeen = c.clock.Now()
 	n.observed = nil
 	c.logf("%s stopped gracefully", n.id)
 }
@@ -265,7 +270,7 @@ func (c *TestCluster) KillNode(n *TestNode) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n.state = NodeCrashed
-	n.crashedAt = c.clock.Now()
+	n.lastSeen = c.clock.Now()
 	n.detected = false
 	c.logf("%s crashed", n.id)
 }
@@ -287,7 +292,7 @@ func (c *TestCluster) Isolate(n *TestNode) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n.isolated = true
-	n.crashedAt = c.clock.Now()
+	n.lastSeen = c.clock.Now()
 	n.detected = false
 	c.logf("%s isolated", n.id)
 }
@@ -342,13 +347,42 @@ func (c *TestCluster) Converge() {
 	c.tb.Fatalf("cluster did not converge in %d rounds\n%s", maxConvergeRounds, c.diagnosticsLocked())
 }
 
-func (c *TestCluster) detectFailures() {
+// healthLocked is the cluster's health view as production derives it
+// (controlplane.EvaluateHealth): every started node is a member, a gracefully
+// stopped one is leaving, and a reachable running node heartbeats
+// continuously while a crashed or isolated one was last heard when it went
+// silent.
+func (c *TestCluster) healthLocked() controlplane.ClusterView {
+	now := c.clock.Now()
+	membership := controlplane.MembershipView{Ready: true}
+	lastSeen := make(map[string]time.Time, len(c.nodes))
 	for _, n := range c.nodes {
-		if !(n.state == NodeCrashed || n.isolated) || n.detected {
+		if n.state == NodeAdded {
 			continue
 		}
-		if wait := n.crashedAt.Add(c.detectAfter).Sub(c.clock.Now()); wait > 0 {
+		membership.Members = append(membership.Members, controlplane.MembershipRecord{NodeID: n.id, Leaving: n.leaving})
+		lastSeen[n.id] = n.lastSeen
+		if n.reachable() {
+			lastSeen[n.id] = now
+		}
+	}
+	return controlplane.EvaluateHealth(membership, lastSeen, now, c.detectAfter)
+}
+
+// detectFailures advances test time until health evaluation reports every
+// silent node unavailable, as production's failure detection would.
+func (c *TestCluster) detectFailures() {
+	for _, n := range c.nodes {
+		if n.state == NodeAdded || n.state == NodeStopped || n.reachable() || n.detected {
+			continue
+		}
+		if wait := n.lastSeen.Add(c.detectAfter + time.Nanosecond).Sub(c.clock.Now()); wait > 0 {
 			c.clock.Advance(wait)
+		}
+		for _, node := range c.healthLocked().Nodes {
+			if node.NodeID == n.id && node.Health == controlplane.HealthHealthy {
+				c.tb.Fatalf("%s still healthy after failure detection\n%s", n.id, c.diagnosticsLocked())
+			}
 		}
 		n.detected = true
 		n.observed = nil
@@ -356,37 +390,67 @@ func (c *TestCluster) detectFailures() {
 	}
 }
 
-// reconcileLocked reports whether it changed any published or observed state.
-func (c *TestCluster) reconcileLocked() bool {
-	topology := Topology{Current: clonePlacements(c.store)}
-	for _, n := range c.nodes {
-		if n.state != NodeRunning || n.isolated {
-			continue
-		}
-		info := NodeInfo{ID: n.id, Handlers: make(map[HandlerID]HandlerInfo, len(n.regs))}
-		for _, r := range n.regs {
-			info.Handlers[r.id] = r.info
+// place adapts the cluster's PlacementPolicy to production reconciliation.
+func (c *TestCluster) place(t placement.Topology) map[HandlerID][]string {
+	topology := Topology{Current: t.Current}
+	for _, pn := range t.Nodes {
+		info := NodeInfo{ID: pn.ID, Handlers: make(map[HandlerID]HandlerInfo, len(pn.Handlers))}
+		for _, n := range c.nodes {
+			if n.id != pn.ID {
+				continue
+			}
+			for _, r := range n.regs {
+				if _, ok := pn.Handlers[r.id]; ok {
+					info.Handlers[r.id] = r.info
+				}
+			}
 		}
 		topology.Nodes = append(topology.Nodes, info)
 	}
-	desired := c.policy.Place(topology)
-	changed := !equalPlacements(c.store, desired)
-	if changed {
-		for id, owners := range desired {
-			if c.exclusiveLocked(id) && !equalStrings(c.store[id], owners) {
-				stored, placed := c.epochs[id]
-				if _, exists := c.store[id]; !exists || !placed {
-					stored = 0
-				}
-				c.epochs[id] = placement.FencedEpoch(c.store[id], owners, stored, c.claimedEpochLocked(id))
-			}
+	return c.policy.Place(topology)
+}
+
+// reconcileLocked runs one production reconciliation step,
+// controlplane.PlanHandlerPlacementsWith over the live nodes healthLocked
+// reports, and publishes the result. It reports whether it changed any
+// published or observed state.
+func (c *TestCluster) reconcileLocked() bool {
+	nodes := make(map[string]controlplane.NodeHandlers)
+	for _, n := range c.nodes {
+		if n.state != NodeRunning {
+			continue
 		}
-		c.store = clonePlacements(desired)
+		record := controlplane.NodeHandlers{NodeID: n.id}
+		for _, r := range n.regs {
+			record.Handlers = append(record.Handlers, controlplane.HandlerRegistration{
+				Service: r.id.Service, Method: r.id.Method, Exclusive: r.info.Exclusive, Capability: capabilityName(r),
+			})
+		}
+		nodes[n.id] = record
+	}
+	leaseEpochs := make(map[string]uint64, len(c.leases))
+	for capability, l := range c.leases {
+		leaseEpochs[capability] = l.Lease.Epoch
+	}
+	live := placement.LiveNodes(controlplane.Members(c.healthLocked()))
+	plan := controlplane.PlanHandlerPlacementsWith(c.place, nodes, c.records, live, leaseEpochs)
+	changed := len(plan.Writes) != 0 || len(plan.Deletes) != 0
+	for _, write := range plan.Writes {
+		c.records[write.Placement.Handler()] = write.Placement
+	}
+	for _, id := range plan.Deletes {
+		delete(c.records, id)
+	}
+	if changed {
+		c.store = make(map[HandlerID][]string, len(c.records))
+		for id, record := range c.records {
+			c.store[id] = record.NodeIDs()
+		}
 		c.logf("placements published: %s", formatPlacements(c.store))
 	}
 	c.renewLeasesLocked()
 	for _, n := range c.nodes {
-		if n.state == NodeRunning && !n.isolated && !equalPlacements(n.observed, c.store) {
+		if n.reachable() && !equalPlacements(n.observed, c.store) {
 			n.observed = clonePlacements(c.store)
 			changed = true
 		}
@@ -536,41 +600,17 @@ func (c *TestCluster) deliver(ctx context.Context, from, to *TestNode, request g
 	return dispatcher.Dispatch(grove.WithExclusiveProvider(ctx, to), request), nil
 }
 
-func (c *TestCluster) exclusiveLocked(id HandlerID) bool {
-	for _, n := range c.nodes {
-		for _, r := range n.regs {
-			if r.id == id && r.info.Exclusive {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // Epoch returns the fencing epoch of an exclusive handler; it increases every
 // time ownership moves.
 func (c *TestCluster) Epoch(h HandlerID) uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.epochs[h]
-}
-
-// claimedEpochLocked is the highest epoch a lease on h's capability was
-// claimed at, which fences h even if its placement was deleted.
-func (c *TestCluster) claimedEpochLocked(h HandlerID) uint64 {
-	for _, n := range c.nodes {
-		for _, r := range n.regs {
-			if r.id == h && r.info.Exclusive {
-				return c.leases[capabilityName(r)].Lease.Epoch
-			}
-		}
-	}
-	return 0
+	return c.records[h].Epoch
 }
 
 // ownershipLocked is h's placement as the lease policy sees it.
 func (c *TestCluster) ownershipLocked(h HandlerID) placement.Ownership {
-	return placement.Ownership{Nodes: c.store[h], Epoch: c.epochs[h]}
+	return c.records[h].Ownership()
 }
 
 // renewLeasesLocked renews every active lease of a reachable running node, as
@@ -624,7 +664,7 @@ func (n *TestNode) AcquireExclusive(_ context.Context, capability string) (grove
 		request := placement.ClaimRequest{
 			NodeID:   n.id,
 			Owner:    c.ownershipLocked(owned.id),
-			Placed:   len(c.store[owned.id]) != 0,
+			Placed:   len(c.records[owned.id].Nodes) != 0,
 			Held:     n.held[capability],
 			Observed: observed,
 			Seen:     seen,
@@ -712,7 +752,8 @@ type TestNode struct {
 
 	state      NodeState
 	generation int
-	crashedAt  time.Time
+	lastSeen   time.Time // last heartbeat, once the node went silent
+	leaving    bool
 	detected   bool
 	isolated   bool
 	held       map[string]*placement.HeldLease // this process's claims by capability
@@ -765,6 +806,7 @@ func (n *TestNode) start() {
 	n.generation++
 	n.state = NodeRunning
 	n.detected = false
+	n.leaving = false
 	n.observed = nil
 	n.selector = placement.Selector{}
 	n.isolated = false
@@ -863,3 +905,6 @@ func formatPlacements(p map[HandlerID][]string) string {
 
 // LeaseTTL returns how long an exclusive lease outlives its last renewal.
 func (c *TestCluster) LeaseTTL() time.Duration { return c.leaseTTL }
+
+// reachable reports whether the node runs and can talk to the cluster.
+func (n *TestNode) reachable() bool { return n.state == NodeRunning && !n.isolated }

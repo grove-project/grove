@@ -182,7 +182,7 @@ func TestGroveShopBinaryRunsConsoleActionsAndNodeRuntime(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
 	statePath := filepath.Join(t.TempDir(), "console.json")
-	consoleCommand := exec.CommandContext(ctx, grovletPath)
+	consoleCommand := exec.CommandContext(ctx, grovletPath(t))
 	consoleCommand.Env = append(os.Environ(), consoleStateEnvironment+"="+statePath)
 	input, err := consoleCommand.StdinPipe()
 	if err != nil {
@@ -196,7 +196,7 @@ func TestGroveShopBinaryRunsConsoleActionsAndNodeRuntime(t *testing.T) {
 	}
 	waitForConsoleState(t, statePath)
 
-	actionCommand := exec.CommandContext(ctx, grovletPath, "action", groveshop.ActionVerifyOrders)
+	actionCommand := exec.CommandContext(ctx, grovletPath(t), "action", groveshop.ActionVerifyOrders)
 	actionCommand.Env = append(os.Environ(), consoleStateEnvironment+"="+statePath)
 	actionOutput, err := actionCommand.CombinedOutput()
 	if err != nil {
@@ -219,7 +219,7 @@ func TestGroveShopBinaryRunsConsoleActionsAndNodeRuntime(t *testing.T) {
 		t.Errorf("application console output = %q", consoleOutput.String())
 	}
 
-	node, err := grovetest.StartNode(grovletPath)
+	node, err := grovetest.StartNode(grovletPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func runGroveShopLifecycleDemo(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
 	defer cancel()
 	statePath := filepath.Join(t.TempDir(), "console.json")
-	consoleCommand := exec.CommandContext(ctx, grovletPath)
+	consoleCommand := exec.CommandContext(ctx, grovletPath(t))
 	consoleCommand.Env = append(os.Environ(), consoleStateEnvironment+"="+statePath)
 	input, err := consoleCommand.StdinPipe()
 	if err != nil {
@@ -413,7 +413,7 @@ func assertGroveShopWebArtifact(t *testing.T, ctx context.Context, active rollou
 
 func runGroveShopAction(t *testing.T, ctx context.Context, statePath string, args ...string) []byte {
 	t.Helper()
-	command := exec.CommandContext(ctx, grovletPath, append([]string{"action"}, args...)...)
+	command := exec.CommandContext(ctx, grovletPath(t), append([]string{"action"}, args...)...)
 	command.Env = append(os.Environ(), consoleStateEnvironment+"="+statePath)
 	output, err := command.CombinedOutput()
 	if err != nil {

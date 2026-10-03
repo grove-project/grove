@@ -21,10 +21,7 @@ func TestHandlerPlacementSurvivesNodeKill(t *testing.T) {
 	const victim = 1
 	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Second)
 	defer cancel()
-	binary, err := grovetest.BuildGrovlet(ctx, t.TempDir(), "./internal/testapp/cmd/handlerapp")
-	if err != nil {
-		t.Fatal(err)
-	}
+	binary := handlerGrovletPath(t)
 	nodeIDs := []string{"node-1", "node-2", "node-3"}
 	ports := reserveRoutePorts(t, len(nodeIDs))
 	nodes := make([]*grovetest.Node, len(nodeIDs))

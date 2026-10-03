@@ -48,7 +48,7 @@ func TestPlacementDecisionsHaveOneOwner(t *testing.T) {
 	required := map[string][]string{
 		"../controlplane": {"Place", "FencedEpoch", "DecideClaim", "LeaseHolds"},
 		"../../runtime":   {"Recover", "LiveNodes"},
-		"../../grovetest": {"Place", "FencedEpoch", "DecideClaim", "LeaseHolds", "Selector"},
+		"../../grovetest": {"Place", "LiveNodes", "DecideClaim", "LeaseHolds", "Selector"},
 	}
 	for dir, functions := range required {
 		used := placementUses(t, dir)

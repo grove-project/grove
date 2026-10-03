@@ -65,6 +65,13 @@ var importRules = []importRule{
 		Forbidden: []string{modulePath + "/internal/systemnats", "github.com/nats-io/..."},
 	},
 	{
+		// Test-binary builds serve tests only (internal/testbin).
+		Name:      "production does not depend on test binary builds",
+		From:      []string{modulePath + "/..."},
+		Except:    []string{modulePath + "/internal/testbin"},
+		Forbidden: []string{modulePath + "/internal/testbin"},
+	},
+	{
 		// Grove Shop is a standalone application that consumes Grove.
 		Name:      "Grove does not depend on Grove Shop",
 		From:      []string{modulePath + "/..."},

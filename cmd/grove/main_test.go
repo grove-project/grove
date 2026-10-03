@@ -22,14 +22,35 @@ import (
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/systemnats"
 	groveshop "github.com/grove-project/grove/internal/testapp"
+	"github.com/grove-project/grove/internal/testbin"
 )
 
 var (
-	grovePath        string
-	grovletPath      string
-	debugGrovletPath string
-	delvePath        string
+	groveBinary   = testbin.New("grove CLI", buildGrove)
+	grovletBinary = testbin.New("test Grovlet", func(ctx context.Context, dir string) (string, error) {
+		return grovetest.BuildGrovlet(ctx, dir, "./internal/testapp/cmd/testapp")
+	})
+	handlerGrovletBinary = testbin.New("handler-placement test Grovlet", func(ctx context.Context, dir string) (string, error) {
+		return grovetest.BuildGrovlet(ctx, dir, "./internal/testapp/cmd/handlerapp")
+	})
+	debugGrovletBinary = testbin.New("debug test Grovlet", func(ctx context.Context, dir string) (string, error) {
+		return grovetest.BuildDebugGrovlet(ctx, dir, "./internal/testapp/cmd/testapp")
+	})
+	delveTool = testbin.New("dlv", func(ctx context.Context, _ string) (string, error) {
+		output, err := exec.CommandContext(ctx, "go", "tool", "-n", "dlv").Output()
+		return strings.TrimSpace(string(output)), err
+	})
 )
+
+// The real-process artifacts are built on first use; each getter skips the
+// calling test under -short.
+func grovePath(tb testing.TB) string        { return groveBinary.Get(tb) }
+func grovletPath(tb testing.TB) string      { return grovletBinary.Get(tb) }
+func debugGrovletPath(tb testing.TB) string { return debugGrovletBinary.Get(tb) }
+func handlerGrovletPath(tb testing.TB) string {
+	return handlerGrovletBinary.Get(tb)
+}
+func delvePath(tb testing.TB) string { return delveTool.Get(tb) }
 
 func Example() {
 	parsed, err := parseInvocation([]string{
@@ -219,24 +240,24 @@ func TestGroveCLILifecycleAgainstGrovletCluster(t *testing.T) {
 	defer stopGrovlets(t, nodes)
 
 	wantStatus := "Cluster     healthy\nNodes       3 / 3 healthy\nComponents  2 / 2 healthy\n"
-	if err := waitForGroveOutput(ctx, systemNATSURL, "node-1", wantStatus, "status"); err != nil {
+	if err := waitForGroveOutput(t, ctx, systemNATSURL, "node-1", wantStatus, "status"); err != nil {
 		t.Fatalf("wait for Grove status: %v\n%s", err, grovletLogs(nodes))
 	}
 	wantNodes := "NODE    HEALTH   ENDPOINT\n" +
 		"node-1  healthy  nats-subject://system/node-1\n" +
 		"node-2  healthy  nats-subject://system/node-2\n" +
 		"node-3  healthy  nats-subject://system/node-3\n"
-	if err := waitForGroveOutput(ctx, systemNATSURL, "node-1", wantNodes, "nodes"); err != nil {
+	if err := waitForGroveOutput(t, ctx, systemNATSURL, "node-1", wantNodes, "nodes"); err != nil {
 		t.Fatalf("wait for Grove nodes: %v\n%s", err, grovletLogs(nodes))
 	}
 	wantComponents := "NODE    SERVICE  NAME       STATE    GENERATION  ERROR\n" +
 		"node-1  1        Orders     healthy  1           -\n" +
 		"node-2  2        Inventory  healthy  1           -\n"
-	if err := waitForGroveOutput(ctx, systemNATSURL, "node-1", wantComponents, "components"); err != nil {
+	if err := waitForGroveOutput(t, ctx, systemNATSURL, "node-1", wantComponents, "components"); err != nil {
 		t.Fatalf("wait for Grove components: %v\n%s", err, grovletLogs(nodes))
 	}
 
-	stopped, err := runGroveCLI(ctx, systemNATSURL, "node-2", "component", "stop", "--service-id", "2")
+	stopped, err := runGroveCLI(t, ctx, systemNATSURL, "node-2", "component", "stop", "--service-id", "2")
 	if err != nil {
 		t.Fatalf("stop Inventory through Grove CLI: %v; output=%q\n%s", err, stopped, grovletLogs(nodes))
 	}
@@ -248,7 +269,7 @@ func TestGroveCLILifecycleAgainstGrovletCluster(t *testing.T) {
 	wantStoppedComponents := "NODE    SERVICE  NAME       STATE    GENERATION  ERROR\n" +
 		"node-1  1        Orders     healthy  1           -\n" +
 		"node-2  2        Inventory  stopped  2           -\n"
-	if err := waitForGroveOutput(ctx, systemNATSURL, "node-1", wantStoppedComponents, "components"); err != nil {
+	if err := waitForGroveOutput(t, ctx, systemNATSURL, "node-1", wantStoppedComponents, "components"); err != nil {
 		t.Fatalf("wait for stopped Inventory placement: %v\n%s", err, grovletLogs(nodes))
 	}
 
@@ -280,7 +301,7 @@ func TestGroveCLILifecycleAgainstGrovletCluster(t *testing.T) {
 		t.Fatal("order succeeded while Inventory was stopped")
 	}
 
-	restarted, err := runGroveCLI(ctx, systemNATSURL, "node-2", "component", "start", "--service-id", "2")
+	restarted, err := runGroveCLI(t, ctx, systemNATSURL, "node-2", "component", "start", "--service-id", "2")
 	if err != nil {
 		t.Fatalf("start Inventory through Grove CLI: %v; output=%q\n%s", err, restarted, grovletLogs(nodes))
 	}
@@ -289,7 +310,7 @@ func TestGroveCLILifecycleAgainstGrovletCluster(t *testing.T) {
 	if restarted != wantRestarted {
 		t.Errorf("restarted Inventory output = %q; want %q", restarted, wantRestarted)
 	}
-	if err := waitForGroveOutput(ctx, systemNATSURL, "node-3", wantStatus, "status"); err != nil {
+	if err := waitForGroveOutput(t, ctx, systemNATSURL, "node-3", wantStatus, "status"); err != nil {
 		t.Fatalf("wait for recovered Grove status: %v\n%s", err, grovletLogs(nodes))
 	}
 	if err := waitForObservedServices(ctx, transport, "node-3", groveshop.ServiceOrders, groveshop.ServiceInventory); err != nil {
@@ -320,14 +341,14 @@ func TestGroveCLILifecycleAgainstGrovletCluster(t *testing.T) {
 	}
 }
 
-func waitForGroveOutput(ctx context.Context, systemNATSURL, nodeID, want string, args ...string) error {
+func waitForGroveOutput(t testing.TB, ctx context.Context, systemNATSURL, nodeID, want string, args ...string) error {
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	var lastOutput string
 	var lastErr error
 	for {
 		attemptCtx, attemptCancel := context.WithTimeout(ctx, time.Second)
-		lastOutput, lastErr = runGroveCLI(attemptCtx, systemNATSURL, nodeID, args...)
+		lastOutput, lastErr = runGroveCLI(t, attemptCtx, systemNATSURL, nodeID, args...)
 		attemptCancel()
 		if lastErr == nil && lastOutput == want {
 			return nil
@@ -340,20 +361,20 @@ func waitForGroveOutput(ctx context.Context, systemNATSURL, nodeID, want string,
 	}
 }
 
-func runGroveCLI(ctx context.Context, systemNATSURL, nodeID string, args ...string) (string, error) {
+func runGroveCLI(t testing.TB, ctx context.Context, systemNATSURL, nodeID string, args ...string) (string, error) {
 	commandArgs := append([]string(nil), args...)
 	commandArgs = append(commandArgs, "--system-nats-url", systemNATSURL, "--node-id", nodeID)
-	return runGroveCommand(ctx, commandArgs...)
+	return runGroveCommand(t, ctx, commandArgs...)
 }
 
-func runGroveCommand(ctx context.Context, args ...string) (string, error) {
-	command := exec.CommandContext(ctx, grovePath, args...)
+func runGroveCommand(t testing.TB, ctx context.Context, args ...string) (string, error) {
+	command := exec.CommandContext(ctx, grovePath(t), args...)
 	output, err := command.CombinedOutput()
 	return string(output), err
 }
 
 func startGrovlets(t *testing.T, ctx context.Context) ([]*grovetest.Node, string) {
-	return startGrovletsFromArtifact(t, ctx, grovletPath)
+	return startGrovletsFromArtifact(t, ctx, grovletPath(t))
 }
 
 func startGrovletsFromArtifact(t *testing.T, ctx context.Context, artifactPath string) ([]*grovetest.Node, string) {
@@ -476,30 +497,8 @@ func grovletLogs(nodes []*grovetest.Node) string {
 }
 
 func TestMain(m *testing.M) {
-	buildDir, err := os.MkdirTemp("", "grove-command-build-")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	grovlet, grovletErr := grovetest.BuildGrovlet(ctx, buildDir, "./internal/testapp/cmd/testapp")
-	debugGrovlet, debugGrovletErr := grovetest.BuildDebugGrovlet(ctx, buildDir, "./internal/testapp/cmd/testapp")
-	grove, groveErr := buildGrove(ctx, buildDir)
-	delveCommand := exec.CommandContext(ctx, "go", "tool", "-n", "dlv")
-	delveOutput, delveErr := delveCommand.Output()
-	cancel()
-	if err := errors.Join(grovletErr, debugGrovletErr, groveErr, delveErr); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		_ = os.RemoveAll(buildDir)
-		os.Exit(1)
-	}
-	grovletPath = grovlet
-	debugGrovletPath = debugGrovlet
-	grovePath = grove
-	delvePath = strings.TrimSpace(string(delveOutput))
-
 	code := m.Run()
-	if err := os.RemoveAll(buildDir); err != nil && code == 0 {
+	if err := testbin.Cleanup(); err != nil && code == 0 {
 		fmt.Fprintln(os.Stderr, err)
 		code = 1
 	}

@@ -23,9 +23,9 @@ func TestDebugDemoDeploysFiveDiscoverableWorkers(t *testing.T) {
 	}
 	configPath := filepath.Clean(filepath.Join(filepath.Dir(testFile), "../../configs/acme.yaml"))
 	command := exec.Command(
-		grovePath,
+		grovePath(t),
 		"deploy",
-		"--binary", debugGrovletPath,
+		"--binary", debugGrovletPath(t),
 		"--config", configPath,
 		"--debug-demo",
 	)
@@ -34,7 +34,7 @@ func TestDebugDemoDeploysFiveDiscoverableWorkers(t *testing.T) {
 	command.Stderr = &output
 	command.Env = append(os.Environ(),
 		localStateEnvironment+"="+statePath,
-		"PATH="+filepath.Dir(delvePath)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"PATH="+filepath.Dir(delvePath(t))+string(os.PathListSeparator)+os.Getenv("PATH"),
 	)
 	if err := command.Start(); err != nil {
 		t.Fatal(err)
@@ -56,11 +56,11 @@ func TestDebugDemoDeploysFiveDiscoverableWorkers(t *testing.T) {
 	if state.NodeID != "node-1" || state.SystemNATSURL == "" || state.WebURL == "" {
 		t.Errorf("local connection = %#v", state)
 	}
-	status, err := runDiscoveredGroveCommand(ctx, statePath, "status")
+	status, err := runDiscoveredGroveCommand(t, ctx, statePath, "status")
 	if err != nil || status != "Cluster     healthy\nNodes       5 / 5 healthy\nComponents  5 / 5 healthy\n" {
 		t.Fatalf("discovered status = %q, %v\n%s", status, err, output.String())
 	}
-	components, err := runDiscoveredGroveCommand(ctx, statePath, "components")
+	components, err := runDiscoveredGroveCommand(t, ctx, statePath, "components")
 	if err != nil {
 		t.Fatalf("discovered components: %v; output=%q", err, components)
 	}
@@ -130,8 +130,8 @@ func readLocalConnectionAt(path string) (localConnection, error) {
 	return readLocalConnection()
 }
 
-func runDiscoveredGroveCommand(ctx context.Context, statePath string, args ...string) (string, error) {
-	command := exec.CommandContext(ctx, grovePath, args...)
+func runDiscoveredGroveCommand(t testing.TB, ctx context.Context, statePath string, args ...string) (string, error) {
+	command := exec.CommandContext(ctx, grovePath(t), args...)
 	command.Env = append(os.Environ(), localStateEnvironment+"="+statePath)
 	output, err := command.CombinedOutput()
 	return string(output), err
