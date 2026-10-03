@@ -2,17 +2,15 @@ package systemnats
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/grove-project/grove/internal/controlplane"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -36,116 +34,11 @@ const (
 )
 
 var (
-	// ErrDeploymentArtifactInvalid is returned for incomplete or malformed
-	// immutable artifact metadata.
-	ErrDeploymentArtifactInvalid = errors.New("grove deployment artifact is invalid")
-	// ErrDeploymentArtifactChanged is returned when an existing artifact digest
-	// is associated with different metadata.
-	ErrDeploymentArtifactChanged = errors.New("grove deployment artifact metadata changed")
-	// ErrRolloutInvalid is returned for incomplete or inconsistent rollout
-	// state.
-	ErrRolloutInvalid = errors.New("grove rollout is invalid")
-	// ErrIngressInvalid is returned for an ingress address that is not host:port.
-	ErrIngressInvalid = errors.New("grove ingress address is invalid")
-	// ErrIngressChanged is returned when the cluster already has a different
-	// ingress address; the first claim wins for the life of the cluster.
-	ErrIngressChanged = errors.New("grove ingress address changed")
-	// ErrRolloutGeneration is returned when a write does not create the next
-	// rollout generation.
-	ErrRolloutGeneration = errors.New("grove rollout generation is not next")
-	// ErrRolloutChanged is returned when another writer changes a rollout before
-	// the requested generation is committed.
-	ErrRolloutChanged = errors.New("grove rollout changed")
 	// ErrDeploymentsRequired is returned when an operation has no deployment
 	// state view.
 	ErrDeploymentsRequired   = errors.New("grove deployment view is required")
 	errDeploymentWatchClosed = errors.New("grove deployment watch closed")
 )
-
-// RolloutPhase is the durable operator-facing phase of a rollout or node.
-type RolloutPhase string
-
-const (
-	// RolloutActive means the current artifact is authoritative with no pending
-	// successor.
-	RolloutActive RolloutPhase = "active"
-	// RolloutPending means a candidate is recorded but has not been launched or
-	// handed ownership.
-	RolloutPending RolloutPhase = "pending"
-	// RolloutCandidateHealthy means every candidate runtime reported readiness
-	// for the exact candidate artifact while the current artifact remains active.
-	RolloutCandidateHealthy RolloutPhase = "candidate-healthy"
-	// RolloutSwitching means candidate health passed and authoritative service
-	// placement is being moved to the candidate artifact.
-	RolloutSwitching RolloutPhase = "switching"
-	// RolloutCandidateFailed means the candidate failed validation or health and
-	// cannot take ownership.
-	RolloutCandidateFailed RolloutPhase = "candidate-failed"
-	// RolloutRollingBack means placement is being reconciled to the retained
-	// current artifact.
-	RolloutRollingBack RolloutPhase = "rolling-back"
-	// RolloutRolledBack means the rejected candidate remains recorded while the
-	// previous known-good artifact is authoritative.
-	RolloutRolledBack RolloutPhase = "rolled-back"
-)
-
-// DeploymentArtifact is immutable identity metadata for one configured Grove
-// application artifact. Configuration bytes remain embedded in the artifact.
-type DeploymentArtifact struct {
-	ApplicationID  string `json:"application_id"`
-	CodeVersion    string `json:"code_version"`
-	CodeDigest     string `json:"code_digest"`
-	ConfigRevision string `json:"config_revision"`
-	ConfigDigest   string `json:"config_digest"`
-	ArtifactDigest string `json:"artifact_digest"`
-	ClusterID      string `json:"cluster_id"`
-	NodeClass      string `json:"node_class,omitempty"`
-	NodeZone       string `json:"node_zone,omitempty"`
-}
-
-// RolloutNodeProgress records one node's immutable current/candidate identity
-// and progress. Later handoff tasks advance the phase and failure fields.
-type RolloutNodeProgress struct {
-	NodeID                  string       `json:"node_id"`
-	CurrentArtifactDigest   string       `json:"current_artifact_digest"`
-	CandidateArtifactDigest string       `json:"candidate_artifact_digest,omitempty"`
-	Phase                   RolloutPhase `json:"phase"`
-	Failure                 string       `json:"failure,omitempty"`
-}
-
-// RolloutFailure is a stable machine-readable candidate rejection reason for
-// CLI and status-UI consumers.
-type RolloutFailure struct {
-	Code      string `json:"code"`
-	Component string `json:"component,omitempty"`
-	Field     string `json:"field,omitempty"`
-	Message   string `json:"message"`
-}
-
-// Rollout records one durable generation for an application and cluster.
-type Rollout struct {
-	ApplicationID           string                `json:"application_id"`
-	ClusterID               string                `json:"cluster_id"`
-	RolloutID               string                `json:"rollout_id"`
-	Generation              uint64                `json:"generation"`
-	CurrentArtifactDigest   string                `json:"current_artifact_digest"`
-	CandidateArtifactDigest string                `json:"candidate_artifact_digest,omitempty"`
-	Phase                   RolloutPhase          `json:"phase"`
-	Nodes                   []RolloutNodeProgress `json:"nodes"`
-	Failure                 *RolloutFailure       `json:"failure,omitempty"`
-}
-
-// DeploymentView is one Grovlet's watcher-derived view of artifact and rollout
-// control state.
-type DeploymentView struct {
-	Ready     bool                 `json:"ready"`
-	Artifacts []DeploymentArtifact `json:"artifacts"`
-	Rollouts  []Rollout            `json:"rollouts"`
-	// Ingress is the cluster-wide address of HTTP ingress components, chosen
-	// when the first node starts; empty until then.
-	Ingress string `json:"ingress,omitempty"`
-	Error   string `json:"error,omitempty"`
-}
 
 // Deployments maintains one watcher-derived view of authoritative deployment
 // state.
@@ -161,7 +54,7 @@ func NewDeployments() *Deployments {
 
 // DeploymentArtifactKey returns the immutable KV key for artifactDigest.
 func DeploymentArtifactKey(artifactDigest string) (string, error) {
-	digest, err := sha256DigestSuffix(artifactDigest)
+	digest, err := controlplane.SHA256DigestSuffix(artifactDigest)
 	if err != nil {
 		return "", err
 	}
@@ -170,7 +63,7 @@ func DeploymentArtifactKey(artifactDigest string) (string, error) {
 
 // DeploymentRolloutKey returns the authoritative KV key for applicationID.
 func DeploymentRolloutKey(applicationID string) (string, error) {
-	if !validApplicationID(applicationID) {
+	if !controlplane.ValidApplicationID(applicationID) {
 		return "", ErrRolloutInvalid
 	}
 	return deploymentRolloutKeyPrefix + applicationID, nil
@@ -260,7 +153,7 @@ func applyDeploymentEntry(entry jetstream.KeyValueEntry, artifacts map[string]De
 	switch {
 	case strings.HasPrefix(key, deploymentArtifactKeyPrefix):
 		digest := "sha256:" + strings.TrimPrefix(key, deploymentArtifactKeyPrefix)
-		if _, err := sha256DigestSuffix(digest); err != nil {
+		if _, err := controlplane.SHA256DigestSuffix(digest); err != nil {
 			return fmt.Errorf("validate deployment artifact key %q: %w", key, err)
 		}
 		if deleted {
@@ -275,7 +168,7 @@ func applyDeploymentEntry(entry jetstream.KeyValueEntry, artifacts map[string]De
 		return nil
 	case strings.HasPrefix(key, deploymentRolloutKeyPrefix):
 		applicationID := strings.TrimPrefix(key, deploymentRolloutKeyPrefix)
-		if !validApplicationID(applicationID) {
+		if !controlplane.ValidApplicationID(applicationID) {
 			return fmt.Errorf("validate rollout key %q: %w", key, ErrRolloutInvalid)
 		}
 		if deleted {
@@ -296,7 +189,7 @@ func applyDeploymentEntry(entry jetstream.KeyValueEntry, artifacts map[string]De
 // PutArtifact creates immutable artifact metadata or accepts an identical
 // retry. An artifact digest can never be overwritten with different metadata.
 func (d *Deployments) PutArtifact(ctx context.Context, transport *Transport, artifact DeploymentArtifact) error {
-	if err := validateDeploymentArtifact(artifact); err != nil {
+	if err := controlplane.ValidateDeploymentArtifact(artifact); err != nil {
 		return &Error{Operation: "validate deployment artifact", Err: err}
 	}
 	encoded, err := json.Marshal(artifact)
@@ -337,7 +230,7 @@ const ingressWriteAttemptTimeout = 2 * time.Second
 // retry. The first address wins; a different one is ErrIngressChanged. Each
 // call is one bounded attempt; callers retry transient failures.
 func (d *Deployments) PutIngress(ctx context.Context, transport *Transport, address string) error {
-	if host, port, err := net.SplitHostPort(address); err != nil || host == "" || port == "" {
+	if !controlplane.ValidIngressAddress(address) {
 		return &Error{Operation: "validate ingress address", Err: ErrIngressInvalid}
 	}
 	ctx, cancel := context.WithTimeout(ctx, ingressWriteAttemptTimeout)
@@ -364,7 +257,7 @@ func (d *Deployments) PutIngress(ctx context.Context, transport *Transport, addr
 // PutRollout commits the first or next rollout generation after verifying all
 // referenced immutable artifacts.
 func (d *Deployments) PutRollout(ctx context.Context, transport *Transport, rollout Rollout) error {
-	rollout, err := validateRollout(rollout)
+	rollout, err := controlplane.ValidateRollout(rollout)
 	if err != nil {
 		return &Error{Operation: "validate rollout", Err: err}
 	}
@@ -381,10 +274,28 @@ func (d *Deployments) PutRollout(ctx context.Context, transport *Transport, roll
 	}
 	key, _ := DeploymentRolloutKey(rollout.ApplicationID)
 	entry, err := kv.Get(ctx, key)
-	if errors.Is(err, jetstream.ErrKeyNotFound) {
-		if rollout.Generation != 1 {
-			return &Error{Operation: "create rollout", Err: ErrRolloutGeneration}
+	exists := !errors.Is(err, jetstream.ErrKeyNotFound)
+	if err != nil && exists {
+		return &Error{Operation: "read rollout", Err: err}
+	}
+	var stored Rollout
+	if exists {
+		if stored, err = decodeRollout(key, entry.Value()); err != nil {
+			return &Error{Operation: "read rollout", Err: err}
 		}
+	}
+	write, err := controlplane.CheckRolloutCommit(stored, exists, rollout)
+	if err != nil {
+		operation := "advance rollout"
+		if !exists {
+			operation = "create rollout"
+		}
+		return &Error{Operation: operation, Err: err}
+	}
+	if !write {
+		return nil
+	}
+	if !exists {
 		if _, err := kv.Create(ctx, key, encoded); err != nil {
 			if errors.Is(err, jetstream.ErrKeyExists) {
 				return &Error{Operation: "create rollout", Err: ErrRolloutChanged}
@@ -393,22 +304,6 @@ func (d *Deployments) PutRollout(ctx context.Context, transport *Transport, roll
 		}
 		return nil
 	}
-	if err != nil {
-		return &Error{Operation: "read rollout", Err: err}
-	}
-	observed, err := decodeRollout(key, entry.Value())
-	if err != nil {
-		return &Error{Operation: "read rollout", Err: err}
-	}
-	if equalRollout(observed, rollout) {
-		return nil
-	}
-	if rollout.Generation != observed.Generation+1 {
-		return &Error{Operation: "advance rollout", Err: ErrRolloutGeneration}
-	}
-	if rollout.ClusterID != observed.ClusterID || rollout.RolloutID == observed.RolloutID || !validRolloutTransition(observed, rollout) {
-		return &Error{Operation: "advance rollout", Err: ErrRolloutInvalid}
-	}
 	if _, err := kv.Update(ctx, key, encoded, entry.Revision()); err != nil {
 		if errors.Is(err, jetstream.ErrKeyExists) {
 			return &Error{Operation: "advance rollout", Err: ErrRolloutChanged}
@@ -416,34 +311,6 @@ func (d *Deployments) PutRollout(ctx context.Context, transport *Transport, roll
 		return &Error{Operation: "advance rollout", Err: err}
 	}
 	return nil
-}
-
-func validRolloutTransition(current, next Rollout) bool {
-	sameArtifacts := next.CurrentArtifactDigest == current.CurrentArtifactDigest && next.CandidateArtifactDigest == current.CandidateArtifactDigest
-	sameTargets := slices.EqualFunc(current.Nodes, next.Nodes, func(a, b RolloutNodeProgress) bool {
-		return a.NodeID == b.NodeID
-	})
-	switch current.Phase {
-	case RolloutActive:
-		return next.Phase == RolloutPending && sameTargets && next.CurrentArtifactDigest == current.CurrentArtifactDigest && next.CandidateArtifactDigest != ""
-	case RolloutPending:
-		return (next.Phase == RolloutCandidateHealthy || next.Phase == RolloutCandidateFailed) && sameArtifacts && sameTargets
-	case RolloutCandidateHealthy:
-		return (next.Phase == RolloutSwitching || next.Phase == RolloutCandidateFailed) && sameArtifacts && sameTargets
-	case RolloutSwitching:
-		return (next.Phase == RolloutActive && sameTargets && next.CurrentArtifactDigest == current.CandidateArtifactDigest && next.CandidateArtifactDigest == "") ||
-			(next.Phase == RolloutCandidateFailed && sameArtifacts && sameTargets)
-	case RolloutCandidateFailed:
-		return next.Phase == RolloutRollingBack && sameArtifacts && sameTargets && equalRolloutFailure(current.Failure, next.Failure)
-	case RolloutRollingBack:
-		return next.Phase == RolloutRolledBack && sameArtifacts && sameTargets && equalRolloutFailure(current.Failure, next.Failure)
-	default:
-		return false
-	}
-}
-
-func validRolloutFailure(failure *RolloutFailure) bool {
-	return failure != nil && failure.Code != "" && failure.Message != ""
 }
 
 func deploymentKV(ctx context.Context, transport *Transport) (jetstream.KeyValue, error) {
@@ -459,20 +326,14 @@ func validateRolloutArtifacts(ctx context.Context, kv jetstream.KeyValue, rollou
 	if err != nil {
 		return err
 	}
-	if current.ApplicationID != rollout.ApplicationID || current.ClusterID != rollout.ClusterID {
-		return ErrRolloutInvalid
-	}
 	if rollout.CandidateArtifactDigest == "" {
-		return nil
+		return controlplane.CheckRolloutArtifacts(rollout, current, nil)
 	}
 	candidate, err := getDeploymentArtifact(ctx, kv, rollout.CandidateArtifactDigest)
 	if err != nil {
 		return err
 	}
-	if candidate.ApplicationID != rollout.ApplicationID || candidate.ClusterID != rollout.ClusterID {
-		return ErrRolloutInvalid
-	}
-	return nil
+	return controlplane.CheckRolloutArtifacts(rollout, current, &candidate)
 }
 
 func getDeploymentArtifact(ctx context.Context, kv jetstream.KeyValue, digest string) (DeploymentArtifact, error) {
@@ -487,92 +348,12 @@ func getDeploymentArtifact(ctx context.Context, kv jetstream.KeyValue, digest st
 	return decodeDeploymentArtifact(key, entry.Value())
 }
 
-func validateDeploymentArtifact(artifact DeploymentArtifact) error {
-	if !validApplicationID(artifact.ApplicationID) || artifact.CodeVersion == "" || artifact.ConfigRevision == "" || artifact.ClusterID == "" {
-		return ErrDeploymentArtifactInvalid
-	}
-	for _, digest := range []string{artifact.CodeDigest, artifact.ConfigDigest, artifact.ArtifactDigest} {
-		if _, err := sha256DigestSuffix(digest); err != nil {
-			return ErrDeploymentArtifactInvalid
-		}
-	}
-	return nil
-}
-
-func validateRollout(rollout Rollout) (Rollout, error) {
-	if !validApplicationID(rollout.ApplicationID) || rollout.ClusterID == "" || rollout.RolloutID == "" || rollout.Generation == 0 || rollout.Phase == "" || len(rollout.Nodes) == 0 {
-		return Rollout{}, ErrRolloutInvalid
-	}
-	if _, err := sha256DigestSuffix(rollout.CurrentArtifactDigest); err != nil {
-		return Rollout{}, ErrRolloutInvalid
-	}
-	if rollout.CandidateArtifactDigest != "" {
-		if _, err := sha256DigestSuffix(rollout.CandidateArtifactDigest); err != nil || rollout.CandidateArtifactDigest == rollout.CurrentArtifactDigest {
-			return Rollout{}, ErrRolloutInvalid
-		}
-	}
-	switch rollout.Phase {
-	case RolloutActive:
-		if rollout.CandidateArtifactDigest != "" || rollout.Failure != nil {
-			return Rollout{}, ErrRolloutInvalid
-		}
-	case RolloutPending, RolloutCandidateHealthy, RolloutSwitching:
-		if rollout.CandidateArtifactDigest == "" || rollout.Failure != nil {
-			return Rollout{}, ErrRolloutInvalid
-		}
-	case RolloutCandidateFailed, RolloutRollingBack, RolloutRolledBack:
-		if rollout.CandidateArtifactDigest == "" || !validRolloutFailure(rollout.Failure) {
-			return Rollout{}, ErrRolloutInvalid
-		}
-	default:
-		return Rollout{}, ErrRolloutInvalid
-	}
-	nodes := append([]RolloutNodeProgress(nil), rollout.Nodes...)
-	seen := make(map[string]struct{}, len(nodes))
-	for _, node := range nodes {
-		if node.NodeID == "" || node.CurrentArtifactDigest != rollout.CurrentArtifactDigest || node.CandidateArtifactDigest != rollout.CandidateArtifactDigest || node.Phase != rollout.Phase {
-			return Rollout{}, ErrRolloutInvalid
-		}
-		if _, exists := seen[node.NodeID]; exists {
-			return Rollout{}, ErrRolloutInvalid
-		}
-		seen[node.NodeID] = struct{}{}
-	}
-	sort.Slice(nodes, func(i, j int) bool { return nodes[i].NodeID < nodes[j].NodeID })
-	rollout.Nodes = nodes
-	return rollout, nil
-}
-
-func validApplicationID(applicationID string) bool {
-	return applicationID != "" && !strings.Contains(applicationID, ".")
-}
-
-func sha256DigestSuffix(digest string) (string, error) {
-	const prefix = "sha256:"
-	if !strings.HasPrefix(digest, prefix) || len(digest) != len(prefix)+64 {
-		return "", ErrDeploymentArtifactInvalid
-	}
-	suffix := strings.TrimPrefix(digest, prefix)
-	if suffix != strings.ToLower(suffix) {
-		return "", ErrDeploymentArtifactInvalid
-	}
-	if _, err := hex.DecodeString(suffix); err != nil {
-		return "", ErrDeploymentArtifactInvalid
-	}
-	return suffix, nil
-}
-
-func validSHA256Digest(digest string) bool {
-	_, err := sha256DigestSuffix(digest)
-	return err == nil
-}
-
 func decodeDeploymentArtifact(key string, value []byte) (DeploymentArtifact, error) {
 	var artifact DeploymentArtifact
 	if err := json.Unmarshal(value, &artifact); err != nil {
 		return DeploymentArtifact{}, fmt.Errorf("decode deployment artifact %q: %w", key, err)
 	}
-	if err := validateDeploymentArtifact(artifact); err != nil {
+	if err := controlplane.ValidateDeploymentArtifact(artifact); err != nil {
 		return DeploymentArtifact{}, fmt.Errorf("validate deployment artifact %q: %w", key, err)
 	}
 	want, _ := DeploymentArtifactKey(artifact.ArtifactDigest)
@@ -587,7 +368,7 @@ func decodeRollout(key string, value []byte) (Rollout, error) {
 	if err := json.Unmarshal(value, &rollout); err != nil {
 		return Rollout{}, fmt.Errorf("decode rollout %q: %w", key, err)
 	}
-	rollout, err := validateRollout(rollout)
+	rollout, err := controlplane.ValidateRollout(rollout)
 	if err != nil {
 		return Rollout{}, fmt.Errorf("validate rollout %q: %w", key, err)
 	}
@@ -598,25 +379,6 @@ func decodeRollout(key string, value []byte) (Rollout, error) {
 	return rollout, nil
 }
 
-func equalRollout(a, b Rollout) bool {
-	return a.ApplicationID == b.ApplicationID && a.ClusterID == b.ClusterID && a.RolloutID == b.RolloutID && a.Generation == b.Generation && a.CurrentArtifactDigest == b.CurrentArtifactDigest && a.CandidateArtifactDigest == b.CandidateArtifactDigest && a.Phase == b.Phase && slices.Equal(a.Nodes, b.Nodes) && equalRolloutFailure(a.Failure, b.Failure)
-}
-
-func equalRolloutFailure(a, b *RolloutFailure) bool {
-	if a == nil || b == nil {
-		return a == b
-	}
-	return *a == *b
-}
-
-func cloneRolloutFailure(failure *RolloutFailure) *RolloutFailure {
-	if failure == nil {
-		return nil
-	}
-	cloned := *failure
-	return &cloned
-}
-
 // Snapshot returns an isolated, deterministically ordered deployment view.
 func (d *Deployments) Snapshot() DeploymentView {
 	d.mu.RLock()
@@ -625,9 +387,7 @@ func (d *Deployments) Snapshot() DeploymentView {
 	copy(artifacts, d.view.Artifacts)
 	rollouts := make([]Rollout, len(d.view.Rollouts))
 	for i, rollout := range d.view.Rollouts {
-		rollouts[i] = rollout
-		rollouts[i].Nodes = append([]RolloutNodeProgress(nil), rollout.Nodes...)
-		rollouts[i].Failure = cloneRolloutFailure(rollout.Failure)
+		rollouts[i] = controlplane.CloneRollout(rollout)
 	}
 	return DeploymentView{Ready: d.view.Ready, Artifacts: artifacts, Rollouts: rollouts, Ingress: d.view.Ingress, Error: d.view.Error}
 }
@@ -643,9 +403,7 @@ func (d *Deployments) setReady(artifacts map[string]DeploymentArtifact, rollouts
 		view.Artifacts = append(view.Artifacts, artifact)
 	}
 	for _, rollout := range rollouts {
-		rollout.Nodes = append([]RolloutNodeProgress(nil), rollout.Nodes...)
-		rollout.Failure = cloneRolloutFailure(rollout.Failure)
-		view.Rollouts = append(view.Rollouts, rollout)
+		view.Rollouts = append(view.Rollouts, controlplane.CloneRollout(rollout))
 	}
 	sort.Slice(view.Artifacts, func(i, j int) bool { return view.Artifacts[i].ArtifactDigest < view.Artifacts[j].ArtifactDigest })
 	sort.Slice(view.Rollouts, func(i, j int) bool { return view.Rollouts[i].ApplicationID < view.Rollouts[j].ApplicationID })

@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/internal/controlplane"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -31,43 +31,10 @@ const (
 )
 
 var (
-	// ErrDesiredDeploymentInvalid is returned for incomplete or ambiguous
-	// desired deployment records.
-	ErrDesiredDeploymentInvalid = errors.New("grove desired deployment is invalid")
 	// ErrDesiredRequired is returned when an operation has no desired view.
 	ErrDesiredRequired    = errors.New("grove desired deployment view is required")
 	errDesiredWatchClosed = errors.New("grove desired deployment watch closed")
 )
-
-// DesiredComponent assigns one application service to a logical Grovlet.
-type DesiredComponent struct {
-	// ServiceID is the stable application-owned service identifier.
-	ServiceID grove.ServiceID `json:"service_id"`
-	// NodeID is the logical Grovlet intended to run the service.
-	NodeID string `json:"node_id"`
-}
-
-// DesiredDeployment is the minimum current intent for one Grove application.
-type DesiredDeployment struct {
-	// ApplicationID is the stable application-owned deployment identifier.
-	ApplicationID string `json:"application_id"`
-	// Version labels the single current version represented by this MVP record.
-	Version string `json:"version"`
-	// ArtifactDigest identifies the exact immutable artifact intended to run.
-	ArtifactDigest string `json:"artifact_digest"`
-	// Components contains the intended service assignments.
-	Components []DesiredComponent `json:"components"`
-}
-
-// DesiredView is one Grovlet's watcher-derived desired deployment state.
-type DesiredView struct {
-	// Ready reports whether the initial JetStream/KV watch snapshot completed.
-	Ready bool `json:"ready"`
-	// Deployments contains records sorted by application ID.
-	Deployments []DesiredDeployment `json:"deployments"`
-	// Error describes the latest transient initialization or watch failure.
-	Error string `json:"error,omitempty"`
-}
 
 // Desired maintains one watcher-derived view of authoritative deployment intent.
 type Desired struct {
@@ -162,7 +129,7 @@ func (d *Desired) watch(ctx context.Context, transport *Transport) error {
 				if err := json.Unmarshal(entry.Value(), &deployment); err != nil {
 					return fmt.Errorf("decode desired deployment %q: %w", entry.Key(), err)
 				}
-				deployment, err = validateDesiredDeployment(deployment)
+				deployment, err = controlplane.ValidateDesiredDeployment(deployment)
 				if err != nil || deployment.ApplicationID != applicationID {
 					return fmt.Errorf("validate desired deployment %q: %w", entry.Key(), errors.Join(ErrDesiredDeploymentInvalid, err))
 				}
@@ -246,7 +213,7 @@ func refreshDesiredRecords(
 		if err := json.Unmarshal(entry.Value(), &deployment); err != nil {
 			return nil, fmt.Errorf("decode desired deployment %q: %w", key, err)
 		}
-		deployment, err = validateDesiredDeployment(deployment)
+		deployment, err = controlplane.ValidateDesiredDeployment(deployment)
 		if err != nil || deployment.ApplicationID != applicationID {
 			return nil, fmt.Errorf("validate desired deployment %q: %w", key, errors.Join(ErrDesiredDeploymentInvalid, err))
 		}
@@ -257,7 +224,7 @@ func refreshDesiredRecords(
 
 // Put validates and writes deployment to authoritative JetStream/KV state.
 func (d *Desired) Put(ctx context.Context, transport *Transport, deployment DesiredDeployment) error {
-	deployment, err := validateDesiredDeployment(deployment)
+	deployment, err := controlplane.ValidateDesiredDeployment(deployment)
 	if err != nil {
 		return &Error{Operation: "validate desired deployment", Err: err}
 	}
@@ -295,26 +262,6 @@ func (d *Desired) Put(ctx context.Context, transport *Transport, deployment Desi
 			return &Error{Operation: "write desired deployment", Err: errors.Join(lastErr, writeCtx.Err())}
 		}
 	}
-}
-
-func validateDesiredDeployment(deployment DesiredDeployment) (DesiredDeployment, error) {
-	if deployment.ApplicationID == "" || strings.Contains(deployment.ApplicationID, ".") || deployment.Version == "" || !validSHA256Digest(deployment.ArtifactDigest) || len(deployment.Components) == 0 {
-		return DesiredDeployment{}, ErrDesiredDeploymentInvalid
-	}
-	components := append([]DesiredComponent(nil), deployment.Components...)
-	seen := make(map[grove.ServiceID]struct{}, len(components))
-	for _, component := range components {
-		if component.ServiceID == 0 || component.NodeID == "" {
-			return DesiredDeployment{}, ErrDesiredDeploymentInvalid
-		}
-		if _, exists := seen[component.ServiceID]; exists {
-			return DesiredDeployment{}, ErrDesiredDeploymentInvalid
-		}
-		seen[component.ServiceID] = struct{}{}
-	}
-	sort.Slice(components, func(i, j int) bool { return components[i].ServiceID < components[j].ServiceID })
-	deployment.Components = components
-	return deployment, nil
 }
 
 func applicationIDFromDesiredKey(key string) (string, error) {

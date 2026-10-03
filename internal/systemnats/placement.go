@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/internal/controlplane"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 )
@@ -33,46 +34,10 @@ const (
 )
 
 var (
-	// ErrPlacementRecordInvalid is returned when a placement record lacks a
-	// service, selected node, or invocation subject.
-	ErrPlacementRecordInvalid = errors.New("grove placement record is invalid")
 	// ErrPlacementRequired is returned when an operation has no placement view.
-	ErrPlacementRequired = errors.New("grove placement view is required")
-	// ErrPlacementUnavailable is returned before the authoritative placement
-	// view has initialized.
-	ErrPlacementUnavailable = errors.New("grove placement is unavailable")
-	// ErrServiceNotPlaced is returned when no authoritative placement exists for
-	// a requested service.
-	ErrServiceNotPlaced = errors.New("grove service is not placed")
-	// ErrPlacementChanged is returned when a placement no longer matches the
-	// record a caller intended to replace.
-	ErrPlacementChanged     = errors.New("grove placement changed")
+	ErrPlacementRequired    = errors.New("grove placement view is required")
 	errPlacementWatchClosed = errors.New("grove placement watch closed")
 )
-
-// PlacementRecord selects the Grovlet and invocation subject for one service.
-type PlacementRecord struct {
-	// ServiceID is the stable application-owned service identifier.
-	ServiceID grove.ServiceID `json:"service_id"`
-	// NodeID is the selected Grovlet's stable logical identity.
-	NodeID string `json:"node_id"`
-	// InvocationSubject is the selected Grovlet's System NATS call endpoint.
-	InvocationSubject string `json:"invocation_subject"`
-	// ArtifactDigest identifies the exact immutable artifact hosting the
-	// service.
-	ArtifactDigest string `json:"artifact_digest"`
-}
-
-// PlacementView is one Grovlet's current observation of authoritative service
-// placement.
-type PlacementView struct {
-	// Ready reports whether the initial JetStream/KV watch snapshot completed.
-	Ready bool `json:"ready"`
-	// Placements contains observed records sorted by service ID.
-	Placements []PlacementRecord `json:"placements"`
-	// Error describes the latest transient initialization or watch failure.
-	Error string `json:"error,omitempty"`
-}
 
 // Placement maintains one watcher-derived local view of the authoritative
 // JetStream/KV placement bucket.
@@ -94,18 +59,10 @@ func (p *Placement) SetGate(gate func() error) {
 // NewPlacement creates a placement observer and any explicit assignments it
 // should write. An empty record set creates an observation-only view.
 func NewPlacement(records []PlacementRecord) (*Placement, error) {
-	seen := make(map[grove.ServiceID]struct{}, len(records))
-	owned := make([]PlacementRecord, len(records))
-	for i, record := range records {
-		if !validPlacementRecord(record) {
-			return nil, &Error{Operation: "configure Grove placement", Err: ErrPlacementRecordInvalid}
-		}
-		if _, exists := seen[record.ServiceID]; exists {
-			return nil, &Error{Operation: "configure Grove placement", Err: ErrPlacementRecordInvalid}
-		}
-		seen[record.ServiceID] = struct{}{}
-		owned[i] = record
+	if err := controlplane.ValidatePlacementRecords(records); err != nil {
+		return nil, &Error{Operation: "configure Grove placement", Err: err}
 	}
+	owned := append([]PlacementRecord(nil), records...)
 	return &Placement{
 		records: owned,
 		view:    PlacementView{Placements: []PlacementRecord{}},
@@ -352,16 +309,11 @@ func (p *Placement) Snapshot() PlacementView {
 // Lookup returns the authoritative destination for serviceID from the current
 // watched view.
 func (p *Placement) Lookup(serviceID grove.ServiceID) (PlacementRecord, error) {
-	view := p.Snapshot()
-	if !view.Ready {
-		return PlacementRecord{}, &Error{Operation: "resolve Grove placement", Err: ErrPlacementUnavailable}
+	record, err := controlplane.FindPlacement(p.Snapshot(), serviceID)
+	if err != nil {
+		return PlacementRecord{}, &Error{Operation: "resolve Grove placement", Err: err}
 	}
-	for _, record := range view.Placements {
-		if record.ServiceID == serviceID {
-			return record, nil
-		}
-	}
-	return PlacementRecord{}, &Error{Operation: "resolve Grove placement", Err: ErrServiceNotPlaced}
+	return record, nil
 }
 
 // Replace atomically changes current to replacement in the authoritative
@@ -373,8 +325,8 @@ func (p *Placement) Replace(
 	current PlacementRecord,
 	replacement PlacementRecord,
 ) (PlacementRecord, error) {
-	if !validPlacementRecord(current) || !validPlacementRecord(replacement) || current.ServiceID != replacement.ServiceID {
-		return PlacementRecord{}, &Error{Operation: "replace Grove placement", Err: ErrPlacementRecordInvalid}
+	if _, err := controlplane.CheckPlacementReplacement(current, current, replacement); err != nil {
+		return PlacementRecord{}, &Error{Operation: "replace Grove placement", Err: err}
 	}
 	js, err := jetstream.New(transport.connection)
 	if err != nil {
@@ -393,11 +345,10 @@ func (p *Placement) Replace(
 	if err != nil {
 		return PlacementRecord{}, &Error{Operation: "read Grove placement for replacement", Err: err}
 	}
-	if observed == replacement {
+	if write, err := controlplane.CheckPlacementReplacement(observed, current, replacement); err != nil {
+		return observed, &Error{Operation: "compare Grove placement for replacement", Err: err}
+	} else if !write {
 		return observed, nil
-	}
-	if observed != current {
-		return observed, &Error{Operation: "compare Grove placement for replacement", Err: ErrPlacementChanged}
 	}
 	encoded, err := json.Marshal(replacement)
 	if err != nil {
@@ -420,10 +371,6 @@ func (p *Placement) Replace(
 	return replacement, nil
 }
 
-func validPlacementRecord(record PlacementRecord) bool {
-	return record.ServiceID != 0 && record.NodeID != "" && record.InvocationSubject != "" && validSHA256Digest(record.ArtifactDigest)
-}
-
 func decodePlacementRecord(key string, value []byte) (PlacementRecord, error) {
 	serviceID, err := serviceIDFromPlacementKey(key)
 	if err != nil {
@@ -433,7 +380,7 @@ func decodePlacementRecord(key string, value []byte) (PlacementRecord, error) {
 	if err := json.Unmarshal(value, &record); err != nil {
 		return PlacementRecord{}, fmt.Errorf("decode placement record %q: %w", key, err)
 	}
-	if record.ServiceID != serviceID || !validPlacementRecord(record) {
+	if record.ServiceID != serviceID || !controlplane.ValidPlacementRecord(record) {
 		return PlacementRecord{}, fmt.Errorf("validate placement record %q: %w", key, ErrPlacementRecordInvalid)
 	}
 	return record, nil
@@ -560,17 +507,13 @@ func (r observedPlacementRouter) Route(
 	if err != nil {
 		return grove.ResponseEnvelope{}, err
 	}
-	if !view.Ready {
-		return grove.ResponseEnvelope{}, &Error{Operation: "resolve Grove placement", Err: ErrPlacementUnavailable}
+	record, err := controlplane.FindPlacement(view, request.ServiceID)
+	if err != nil {
+		return grove.ResponseEnvelope{}, &Error{Operation: "resolve Grove placement", Err: err}
 	}
-	for _, record := range view.Placements {
-		if record.ServiceID == request.ServiceID {
-			response, err := r.transport.Request(ctx, record.InvocationSubject, request)
-			if err != nil {
-				return grove.ResponseEnvelope{}, fmt.Errorf("request: %w: %w", grove.ErrTransportFailure, err)
-			}
-			return response, nil
-		}
+	response, err := r.transport.Request(ctx, record.InvocationSubject, request)
+	if err != nil {
+		return grove.ResponseEnvelope{}, fmt.Errorf("request: %w: %w", grove.ErrTransportFailure, err)
 	}
-	return grove.ResponseEnvelope{}, &Error{Operation: "resolve Grove placement", Err: ErrServiceNotPlaced}
+	return response, nil
 }
