@@ -1,5 +1,8 @@
 // Package systemnats hides Grove's System NATS server and request/reply
-// transport from application-facing packages.
+// transport from application-facing packages. It is the NATS adapter for the
+// control-plane domain in internal/controlplane: it stores those records in
+// JetStream/KV, watches and serves them, and applies the domain's rules before
+// each compare-and-set write. What the records mean is defined there, not here.
 package systemnats
 
 import (
@@ -64,33 +67,6 @@ func (e *Error) Error() string {
 
 func (e *Error) Unwrap() error {
 	return e.Err
-}
-
-// MinClusterNodes is the number of logical nodes a Grove cluster needs before
-// it serves. With one control-plane voter per node, three nodes keep a quorum
-// (and so a metadata leader) through the loss of any single node.
-const MinClusterNodes = 3
-
-// ErrClusterForming is returned while the cluster has fewer than
-// MinClusterNodes registered nodes.
-var ErrClusterForming = errors.New("grove cluster is forming")
-
-// ClusterFormingError describes a cluster that has joined nodes of needed.
-func ClusterFormingError(joined, needed int) error {
-	return fmt.Errorf("%w: %d of %d nodes joined", ErrClusterForming, joined, needed)
-}
-
-// ErrControlPlaneUnavailable is returned when the replicated control state has
-// no leader, so placement and cluster operations cannot be confirmed.
-var ErrControlPlaneUnavailable = errors.New("grove control plane has no leader")
-
-// ErrClusterSettling is returned while the bootstrap metadata witness has not
-// been released yet, so the control plane still has more voters than nodes.
-var ErrClusterSettling = errors.New("grove cluster is settling")
-
-// ClusterSettlingError describes a control plane with more voters than nodes.
-func ClusterSettlingError(voters, nodes int) error {
-	return fmt.Errorf("%w: %d control-plane voters for %d nodes (bootstrap witness not yet released)", ErrClusterSettling, voters, nodes)
 }
 
 // Server is an embedded System NATS server.

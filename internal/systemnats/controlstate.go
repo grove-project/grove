@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/grove-project/grove/internal/controlplane"
 	"github.com/nats-io/nats.go/jetstream"
 )
 
 const (
-	controlStateBootstrapReplicas = 1
+	controlStateBootstrapReplicas = controlplane.MinControlStateReplicas
 	controlStateOperationTimeout  = time.Second
 )
 
@@ -93,22 +94,6 @@ func openOrCreateKeyValue(
 	return nil, err
 }
 
-func controlStateReplicaCount(records map[string]MembershipRecord) int {
-	active := 0
-	for _, record := range records {
-		if !record.Leaving {
-			active++
-		}
-	}
-	if active < controlStateBootstrapReplicas {
-		return controlStateBootstrapReplicas
-	}
-	if active > MembershipReplicas {
-		return MembershipReplicas
-	}
-	return active
-}
-
 // reconcileControlStateReplicas resizes every control-state bucket to the
 // replica count records calls for. It reports changed=true when some bucket's
 // configured replica count was not already at that target (whether this call
@@ -120,7 +105,7 @@ func reconcileControlStateReplicas(
 	records map[string]MembershipRecord,
 	allowShrink bool,
 ) (changed bool, err error) {
-	replicas := controlStateReplicaCount(records)
+	replicas := controlplane.ControlStateReplicas(records)
 	for _, bucket := range controlStateBuckets {
 		operationCtx, cancel := context.WithTimeout(ctx, controlStateOperationTimeout)
 		kv, err := js.KeyValue(operationCtx, bucket)

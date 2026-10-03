@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/internal/controlplane"
 	"github.com/grove-project/grove/internal/placement"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -40,106 +41,6 @@ const (
 	defaultRequestAttemptTimeout = 5 * time.Second
 )
 
-var (
-	// ErrHandlerNotPlaced is returned when a handler has no live placement.
-	ErrHandlerNotPlaced = errors.New("grove handler is not placed")
-	// ErrHandlerPlacementUnavailable is returned before the handler-placement
-	// view or the live-node view has initialized.
-	ErrHandlerPlacementUnavailable = errors.New("grove handler placement is unavailable")
-	// ErrHandlerPlacementInvalid is returned for an invalid registration.
-	ErrHandlerPlacementInvalid = errors.New("grove handler placement configuration is invalid")
-)
-
-// HandlerRegistration declares one handler a node can run.
-type HandlerRegistration struct {
-	Service grove.ServiceID `json:"service"`
-	Method  grove.MethodID  `json:"method"`
-	// Exclusive requests exactly one active owner cluster-wide.
-	Exclusive bool `json:"exclusive,omitempty"`
-	// Capability names the exclusive capability the handler's workload claims
-	// with grove.Exclusive. It is required when Exclusive is set.
-	Capability string `json:"capability,omitempty"`
-	// InvocationSubject overrides the node's default subject for this handler,
-	// for nodes that host different services behind different endpoints.
-	InvocationSubject string `json:"invocation_subject,omitempty"`
-}
-
-func (r HandlerRegistration) id() placement.Handler {
-	return placement.Handler{Service: r.Service, Method: r.Method}
-}
-
-// NodeHandlers is one node's published registrations.
-type NodeHandlers struct {
-	NodeID            string                `json:"node_id"`
-	InvocationSubject string                `json:"invocation_subject"`
-	Handlers          []HandlerRegistration `json:"handlers"`
-}
-
-// HandlerNode is one concrete placement of a handler.
-type HandlerNode struct {
-	NodeID            string `json:"node_id"`
-	InvocationSubject string `json:"invocation_subject"`
-}
-
-// HandlerPlacement is the authoritative placement of one handler.
-type HandlerPlacement struct {
-	Service    grove.ServiceID `json:"service"`
-	Method     grove.MethodID  `json:"method"`
-	Exclusive  bool            `json:"exclusive,omitempty"`
-	Capability string          `json:"capability,omitempty"`
-	// Epoch fences exclusive ownership; it increases whenever the owner moves.
-	Epoch uint64        `json:"epoch"`
-	Nodes []HandlerNode `json:"nodes"`
-}
-
-func (p HandlerPlacement) id() placement.Handler {
-	return placement.Handler{Service: p.Service, Method: p.Method}
-}
-
-func (p HandlerPlacement) nodeIDs() []string {
-	ids := make([]string, len(p.Nodes))
-	for i, n := range p.Nodes {
-		ids[i] = n.NodeID
-	}
-	return ids
-}
-
-// capabilityLease is the stored claim on an exclusive capability. Beat changes
-// on every renewal so observers can tell a live owner from a silent one.
-type capabilityLease struct {
-	Holder   string `json:"holder"`
-	Epoch    uint64 `json:"epoch"`
-	Beat     uint64 `json:"beat"`
-	Released bool   `json:"released,omitempty"`
-}
-
-// LeaseView is one observed exclusive capability lease.
-type LeaseView struct {
-	Capability string `json:"capability"`
-	Holder     string `json:"holder"`
-	Epoch      uint64 `json:"epoch"`
-}
-
-// HandlerPlacementView is one node's observation of handler placement.
-type HandlerPlacementView struct {
-	Ready      bool               `json:"ready"`
-	Nodes      []NodeHandlers     `json:"nodes"`
-	Placements []HandlerPlacement `json:"placements"`
-	Leases     []LeaseView        `json:"leases"`
-	// Lost lists placements whose node is no longer live. Resolved views drop
-	// them from Placements and report them here so recovery stays visible.
-	Lost  []LostPlacement `json:"lost,omitempty"`
-	Error string          `json:"error,omitempty"`
-}
-
-// LostPlacement is a placement removed from routing because its node is not
-// live; it stays visible until reconciliation replaces it.
-type LostPlacement struct {
-	Service grove.ServiceID `json:"service"`
-	Method  grove.MethodID  `json:"method"`
-	NodeID  string          `json:"node_id"`
-}
-
 // HandlerPlacementConfig configures HandlerPlacements. Zero timing fields use
 // defaults.
 type HandlerPlacementConfig struct {
@@ -160,21 +61,16 @@ type HandlerPlacementConfig struct {
 	Now func() time.Time
 }
 
+// observedLease and heldLease pair the domain lease state with the KV
+// revision used as the compare-and-set precondition for the next write.
 type observedLease struct {
-	record    capabilityLease
-	revision  uint64
-	firstSeen time.Time
+	controlplane.ObservedLease
+	revision uint64
 }
 
 type heldLease struct {
-	capability string
-	handler    placement.Handler
-	epoch      uint64
-	beat       uint64
-	revision   uint64
-	renewedAt  time.Time
-	lost       bool
-	released   bool
+	controlplane.HeldLease
+	revision uint64
 }
 
 // HandlerPlacements runs Option-A reconciliation: every node watches the same
@@ -223,12 +119,8 @@ func NewHandlerPlacements(cfg HandlerPlacementConfig) (*HandlerPlacements, error
 }
 
 func validateRegistrations(handlers []HandlerRegistration) error {
-	seen := make(map[placement.Handler]bool)
-	for _, r := range handlers {
-		if r.Service == 0 || seen[r.id()] || (r.Exclusive && !validCapabilityName(r.Capability)) {
-			return &Error{Operation: "configure Grove handler placement", Err: ErrHandlerPlacementInvalid}
-		}
-		seen[r.id()] = true
+	if err := controlplane.ValidateRegistrations(handlers); err != nil {
+		return &Error{Operation: "configure Grove handler placement", Err: err}
 	}
 	return nil
 }
@@ -247,18 +139,6 @@ func (h *HandlerPlacements) SetHandlers(handlers []HandlerRegistration) error {
 	h.cfg.Handlers = append([]HandlerRegistration(nil), handlers...)
 	h.dirty = true
 	return nil
-}
-
-func validCapabilityName(name string) bool {
-	if name == "" {
-		return false
-	}
-	for _, r := range name {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-_/=", r)) {
-			return false
-		}
-	}
-	return true
 }
 
 // HandlerPlacementKey returns the KV key for one handler's placement.
@@ -529,7 +409,7 @@ func (h *HandlerPlacements) apply(
 			return nil
 		}
 		var record HandlerPlacement
-		if err := json.Unmarshal(entry.Value(), &record); err != nil || record.id() != id {
+		if err := json.Unmarshal(entry.Value(), &record); err != nil || record.Handler() != id {
 			return fmt.Errorf("decode handler placement %q: %w", key, errors.Join(ErrHandlerPlacementInvalid, err))
 		}
 		placements[id] = record
@@ -541,21 +421,24 @@ func (h *HandlerPlacements) apply(
 			delete(h.leases, capability)
 			return nil
 		}
-		var record capabilityLease
+		var record controlplane.CapabilityLease
 		if err := json.Unmarshal(entry.Value(), &record); err != nil {
 			return fmt.Errorf("decode capability lease %q: %w", key, err)
 		}
 		// Staleness is measured from when this observer first saw a revision,
 		// on its own clock, so no clocks need to agree across nodes.
 		if prev, ok := h.leases[capability]; !ok || prev.revision != entry.Revision() {
-			h.leases[capability] = observedLease{record: record, revision: entry.Revision(), firstSeen: h.cfg.Now()}
+			h.leases[capability] = observedLease{
+				ObservedLease: controlplane.ObservedLease{Lease: record, FirstSeen: h.cfg.Now()},
+				revision:      entry.Revision(),
+			}
 		}
 	}
 	return nil
 }
 
-// reconcile computes the deterministic desired placement from live nodes and
-// CAS-writes any difference. Losing a race is fine: the winner's result is
+// reconcile applies one controlplane.PlanHandlerPlacements step to the bucket
+// with compare-and-set writes. Losing a race is fine: the winner's result is
 // what this node would have written.
 func (h *HandlerPlacements) reconcile(
 	ctx context.Context,
@@ -567,75 +450,24 @@ func (h *HandlerPlacements) reconcile(
 	if !ready {
 		return
 	}
-	liveSet := make(map[string]bool, len(live))
-	for _, id := range live {
-		liveSet[id] = true
+	h.mu.RLock()
+	leaseEpochs := make(map[string]uint64, len(h.leases))
+	for capability, lease := range h.leases {
+		leaseEpochs[capability] = lease.Lease.Epoch
 	}
-	topology := placement.Topology{Current: make(map[placement.Handler][]string, len(placements))}
-	subjects := make(map[string]map[placement.Handler]string)
-	meta := make(map[placement.Handler]HandlerRegistration)
-	ids := make([]string, 0, len(nodes))
-	for id := range nodes {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		if !liveSet[id] {
-			continue
-		}
-		record := nodes[id]
-		subjects[id] = make(map[placement.Handler]string, len(record.Handlers))
-		node := placement.Node{ID: id, Handlers: make(map[placement.Handler]placement.Scaling, len(record.Handlers))}
-		for _, r := range record.Handlers {
-			scaling := placement.Automatic
-			if r.Exclusive {
-				scaling = placement.Exclusive
-			}
-			node.Handlers[r.id()] = scaling
-			subjects[id][r.id()] = cmpSubject(r.InvocationSubject, record.InvocationSubject)
-			meta[r.id()] = r
-		}
-		topology.Nodes = append(topology.Nodes, node)
-	}
-	for id, record := range placements {
-		topology.Current[id] = record.nodeIDs()
-	}
-	desired := placement.Place(topology)
+	h.mu.RUnlock()
+	plan := controlplane.PlanHandlerPlacements(nodes, placements, live, leaseEpochs)
 
 	opCtx, cancel := operationContext(ctx)
 	defer cancel()
-	for id, target := range desired {
-		current, exists := placements[id]
-		if exists && equalStrings(current.nodeIDs(), target) {
-			continue
-		}
-		next := HandlerPlacement{
-			Service: id.Service, Method: id.Method,
-			Exclusive: meta[id].Exclusive, Capability: meta[id].Capability, Epoch: current.Epoch,
-		}
-		if next.Exclusive {
-			// Epochs only grow, even if the placement key was deleted and
-			// recreated: the lease remembers the highest epoch ever claimed.
-			floor := current.Epoch
-			h.mu.RLock()
-			if lease, ok := h.leases[next.Capability]; ok && lease.record.Epoch > floor {
-				floor = lease.record.Epoch
-			}
-			h.mu.RUnlock()
-			next.Epoch = placement.NextEpoch(current.nodeIDs(), target, floor)
-		}
-		for _, nodeID := range target {
-			next.Nodes = append(next.Nodes, HandlerNode{NodeID: nodeID, InvocationSubject: subjects[nodeID][id]})
-		}
-		h.writePlacement(opCtx, kv, id, next, exists)
+	for _, write := range plan.Writes {
+		h.writePlacement(opCtx, kv, write.Placement.Handler(), write.Placement, !write.Create)
 	}
-	for id := range placements {
-		if _, wanted := desired[id]; !wanted {
-			h.mu.RLock()
-			revision := h.revisions[HandlerPlacementKey(id.Service, id.Method)]
-			h.mu.RUnlock()
-			_ = kv.Delete(opCtx, HandlerPlacementKey(id.Service, id.Method), jetstream.LastRevision(revision))
-		}
+	for _, id := range plan.Deletes {
+		h.mu.RLock()
+		revision := h.revisions[HandlerPlacementKey(id.Service, id.Method)]
+		h.mu.RUnlock()
+		_ = kv.Delete(opCtx, HandlerPlacementKey(id.Service, id.Method), jetstream.LastRevision(revision))
 	}
 }
 
@@ -667,7 +499,7 @@ func (h *HandlerPlacements) renew(ctx context.Context, kv jetstream.KeyValue) {
 	h.mu.Lock()
 	held := make([]*heldLease, 0, len(h.held))
 	for _, lease := range h.held {
-		if !lease.lost && !lease.released {
+		if lease.Active() {
 			held = append(held, lease)
 		}
 	}
@@ -676,24 +508,26 @@ func (h *HandlerPlacements) renew(ctx context.Context, kv jetstream.KeyValue) {
 		if !h.ownsPlacement(lease) {
 			// Placement moved on: stop renewing so the successor can claim.
 			h.mu.Lock()
-			lease.lost = true
+			lease.Lost = true
 			h.mu.Unlock()
 			continue
 		}
-		record := capabilityLease{Holder: h.cfg.NodeID, Epoch: lease.epoch, Beat: lease.beat + 1}
+		h.mu.RLock()
+		record := lease.Renewal(h.cfg.NodeID)
+		h.mu.RUnlock()
 		encoded, _ := json.Marshal(record)
 		// Stamp before sending so the local expiry is never later than the
 		// moment observers first see the new revision.
 		sentAt := h.cfg.Now()
 		opCtx, cancel := operationContext(ctx)
-		revision, err := kv.Update(opCtx, handlerLeaseKeyPrefix+lease.capability, encoded, lease.revision)
+		revision, err := kv.Update(opCtx, handlerLeaseKeyPrefix+lease.Capability, encoded, lease.revision)
 		cancel()
 		h.mu.Lock()
 		switch {
 		case err == nil:
-			lease.beat, lease.revision, lease.renewedAt = record.Beat, revision, sentAt
+			lease.Beat, lease.revision, lease.RenewedAt = record.Beat, revision, sentAt
 		case errors.Is(err, jetstream.ErrKeyExists):
-			lease.lost = true
+			lease.Lost = true
 		}
 		h.mu.Unlock()
 	}
@@ -719,30 +553,11 @@ func (h *HandlerPlacements) publish(nodes map[string]NodeHandlers, placements ma
 	})
 	h.mu.Lock()
 	for capability, l := range h.leases {
-		view.Leases = append(view.Leases, LeaseView{Capability: capability, Holder: l.record.Holder, Epoch: l.record.Epoch})
+		view.Leases = append(view.Leases, LeaseView{Capability: capability, Holder: l.Lease.Holder, Epoch: l.Lease.Epoch})
 	}
 	sort.Slice(view.Leases, func(i, j int) bool { return view.Leases[i].Capability < view.Leases[j].Capability })
 	h.view = view
 	h.mu.Unlock()
-}
-
-func cmpSubject(specific, fallback string) string {
-	if specific != "" {
-		return specific
-	}
-	return fallback
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // Snapshot returns a copy of the current observed view.
@@ -762,27 +577,11 @@ func (h *HandlerPlacements) Lookup(service grove.ServiceID, method grove.MethodI
 	if !view.Ready || !ready {
 		return HandlerPlacement{}, &Error{Operation: "resolve Grove handler placement", Err: ErrHandlerPlacementUnavailable}
 	}
-	liveSet := make(map[string]bool, len(live))
-	for _, id := range live {
-		liveSet[id] = true
+	found, err := controlplane.LiveHandlerPlacement(view, live, service, method)
+	if err != nil {
+		return HandlerPlacement{}, &Error{Operation: "resolve Grove handler placement", Err: err}
 	}
-	for _, p := range view.Placements {
-		if p.Service != service || p.Method != method {
-			continue
-		}
-		healthy := p.Nodes[:0:0]
-		for _, n := range p.Nodes {
-			if liveSet[n.NodeID] {
-				healthy = append(healthy, n)
-			}
-		}
-		if len(healthy) == 0 {
-			break
-		}
-		p.Nodes = healthy
-		return p, nil
-	}
-	return HandlerPlacement{}, &Error{Operation: "resolve Grove handler placement", Err: ErrHandlerNotPlaced}
+	return found, nil
 }
 
 // AcquireExclusive implements grove.ExclusiveProvider. It waits for a previous
@@ -812,7 +611,7 @@ type claimHandle struct {
 func (c claimHandle) Held() bool { return c.owner.holds(c.lease) }
 func (c claimHandle) Release() {
 	c.owner.mu.Lock()
-	c.lease.released = true
+	c.lease.Released = true
 	c.owner.mu.Unlock()
 }
 
@@ -821,32 +620,20 @@ type deniedHandle struct{}
 func (deniedHandle) Held() bool { return false }
 func (deniedHandle) Release()   {}
 
-// holds reports whether the lease may still act: renewed within the TTL, not
-// superseded, and still the placement's owner at the same epoch.
 // ownsPlacement reports whether the observed placement still names this node
 // as the owner at the lease's epoch.
 func (h *HandlerPlacements) ownsPlacement(lease *heldLease) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	return h.ownsPlacementLocked(lease)
+	return controlplane.OwnsPlacement(h.view.Placements, lease.Handler, lease.Epoch, h.cfg.NodeID)
 }
 
-func (h *HandlerPlacements) ownsPlacementLocked(lease *heldLease) bool {
-	for _, p := range h.view.Placements {
-		if p.id() == lease.handler {
-			return p.Epoch == lease.epoch && len(p.Nodes) == 1 && p.Nodes[0].NodeID == h.cfg.NodeID
-		}
-	}
-	return false
-}
-
+// holds reports whether the lease may still act: renewed within the TTL, not
+// superseded, and still the placement's owner at the same epoch.
 func (h *HandlerPlacements) holds(lease *heldLease) bool {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	if lease.lost || lease.released || h.cfg.Now().Sub(lease.renewedAt) >= h.cfg.LeaseTTL {
-		return false
-	}
-	return h.ownsPlacementLocked(lease)
+	return controlplane.LeaseHolds(lease.HeldLease, h.view.Placements, h.cfg.NodeID, h.cfg.Now(), h.cfg.LeaseTTL)
 }
 
 // TryAcquireExclusive makes one non-blocking claim attempt. It reports
@@ -856,38 +643,36 @@ func (h *HandlerPlacements) TryAcquireExclusive(ctx context.Context, capability 
 	return h.tryClaim(ctx, capability)
 }
 
-// tryClaim reports done=true with a lease (held or denied) once the outcome is
-// decided, and done=false while a previous owner's lease is still running out.
+// tryClaim applies controlplane.DecideClaim to this node's observed state and,
+// when it says to claim, stores the lease with a compare-and-set write.
 func (h *HandlerPlacements) tryClaim(ctx context.Context, capability string) (grove.Lease, bool, error) {
 	h.mu.Lock()
-	var owned HandlerPlacement
-	found := false
-	for _, p := range h.view.Placements {
-		if p.Exclusive && p.Capability == capability {
-			owned, found = p, true
-		}
+	request := controlplane.ClaimRequest{
+		NodeID:     h.cfg.NodeID,
+		Capability: capability,
+		Placements: h.view.Placements,
+		Now:        h.cfg.Now(),
+		TTL:        h.cfg.LeaseTTL,
 	}
-	if !found || len(owned.Nodes) != 1 || owned.Nodes[0].NodeID != h.cfg.NodeID {
-		h.mu.Unlock()
-		return deniedHandle{}, true, nil
-	}
-	if existing := h.held[capability]; existing != nil && !existing.lost && !existing.released && existing.epoch == owned.Epoch {
-		h.mu.Unlock()
-		return claimHandle{owner: h, lease: existing}, true, nil
+	existing := h.held[capability]
+	if existing != nil {
+		request.Held = &existing.HeldLease
 	}
 	observed, seen := h.leases[capability]
-	now := h.cfg.Now()
-	switch {
-	case seen && observed.record.Holder != h.cfg.NodeID && !observed.record.Released &&
-		now.Sub(observed.firstSeen) < h.cfg.LeaseTTL:
+	request.Observed, request.Seen = observed.ObservedLease, seen
+	claim := controlplane.DecideClaim(request)
+	h.mu.Unlock()
+	switch claim.Decision {
+	case controlplane.ClaimDenied:
+		return deniedHandle{}, true, nil
+	case controlplane.ClaimHeld:
+		return claimHandle{owner: h, lease: existing}, true, nil
+	case controlplane.ClaimWait:
 		// The previous owner may still be acting until its own TTL runs out.
-		h.mu.Unlock()
 		return nil, false, nil
 	}
-	h.mu.Unlock()
 
-	record := capabilityLease{Holder: h.cfg.NodeID, Epoch: owned.Epoch, Beat: 1}
-	encoded, _ := json.Marshal(record)
+	encoded, _ := json.Marshal(claim.Lease)
 	key := handlerLeaseKeyPrefix + capability
 	stamp := h.cfg.Now()
 	opCtx, cancel := operationContext(ctx)
@@ -906,8 +691,11 @@ func (h *HandlerPlacements) tryClaim(ctx context.Context, capability string) (gr
 		return nil, false, err
 	}
 	lease := &heldLease{
-		capability: capability, handler: owned.id(), epoch: owned.Epoch,
-		beat: record.Beat, revision: revision, renewedAt: stamp,
+		HeldLease: controlplane.HeldLease{
+			Capability: capability, Handler: claim.Owned.Handler(), Epoch: claim.Owned.Epoch,
+			Beat: claim.Lease.Beat, RenewedAt: stamp,
+		},
+		revision: revision,
 	}
 	h.mu.Lock()
 	h.held[capability] = lease
@@ -988,7 +776,7 @@ func requestPlaced(
 		for i, n := range remaining {
 			ids[i] = n.NodeID
 		}
-		target, _ := selector.Pick(p.id(), ids)
+		target, _ := selector.Pick(p.Handler(), ids)
 		for i, n := range remaining {
 			if n.NodeID != target {
 				continue
