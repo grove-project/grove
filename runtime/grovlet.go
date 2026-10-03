@@ -31,6 +31,9 @@ type grovlet struct {
 	placement  *systemnats.Placement
 	handlers   *systemnats.HandlerPlacements
 	components *componentManager
+	// candidate is the isolated worker running a standalone candidate's one
+	// component; nil on a clustered node.
+	candidate *workerProcess
 	// metadataVoters is the JetStream metadata group size last observed by
 	// this node's server; zero while unknown.
 	metadataVoters atomic.Int32
@@ -79,8 +82,9 @@ type controlState struct {
 }
 
 // startGrovlet starts the node in phases: System NATS, the control plane
-// when the node is clustered, the supervision of its components, and its
-// endpoint. Any failure stops what already started.
+// when the node is clustered, the supervision of its components (or a
+// standalone candidate's one component), and its endpoint. Any failure stops
+// what already started.
 func startGrovlet(ctx context.Context, cfg config) (_ *grovlet, err error) {
 	g := &grovlet{}
 	defer func() {
@@ -100,6 +104,10 @@ func startGrovlet(ctx context.Context, cfg config) (_ *grovlet, err error) {
 			return nil, err
 		}
 		if err := g.superviseComponents(ctx, cfg, state); err != nil {
+			return nil, err
+		}
+	} else if len(cfg.componentKinds) != 0 {
+		if err := g.hostCandidate(ctx, cfg); err != nil {
 			return nil, err
 		}
 	}
@@ -300,11 +308,35 @@ func (g *grovlet) superviseComponents(ctx context.Context, cfg config, state con
 	return nil
 }
 
+// hostCandidate runs a standalone candidate's one component in an isolated
+// worker that serves the node's endpoint subject. A candidate joins System
+// NATS beside the current cluster without membership, so it is addressed by
+// its subject rather than by placement, and its component's calls go to the
+// configured route subject (ADR-005 side-by-side versions).
+func (g *grovlet) hostCandidate(ctx context.Context, cfg config) error {
+	kind := cfg.componentKinds[0]
+	component, _ := activeApplication.componentByKind(kind)
+	worker, err := startWorkerProcess(ctx, g.url, cfg.nodeID, componentSpec{
+		serviceID:    component.ServiceID,
+		name:         component.Name,
+		kind:         kind,
+		subject:      cfg.systemNATSSubject,
+		options:      configuredOptions(cfg.componentOptions, kind),
+		mode:         systemnats.ExecutionIsolatedProcess,
+		routeSubject: cfg.routeSubject,
+	})
+	if err != nil {
+		return fmt.Errorf("start candidate component %s: %w", component.Name, err)
+	}
+	g.candidate = worker
+	return nil
+}
+
 // serveEndpoint answers the node's transport endpoint subject and reports
-// the node's bootstrap readiness. The endpoint echoes requests; it hosts no
-// application code.
+// the node's bootstrap readiness. Unless a candidate component serves the
+// subject, the endpoint echoes requests; it hosts no application code.
 func (g *grovlet) serveEndpoint(ctx context.Context, cfg config) error {
-	if cfg.systemNATSSubject != "" {
+	if cfg.systemNATSSubject != "" && g.candidate == nil {
 		echo := systemnats.Handler(func(_ context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
 			return grove.ResponseEnvelope{Payload: request.Payload}
 		})
@@ -474,6 +506,12 @@ func (g *grovlet) stop() {
 		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = g.components.stopAll(stopCtx)
 		cancel()
+	}
+	if g.candidate != nil {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = g.candidate.Stop(stopCtx)
+		cancel()
+		g.candidate = nil
 	}
 	for _, loop := range []*background{g.handlersLoop, g.healthLoop, g.placementLoop, g.desiredLoop, g.deploymentsLoop, g.membershipLoop} {
 		loop.stop()

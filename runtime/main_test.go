@@ -177,25 +177,36 @@ func TestParseConfig(t *testing.T) {
 	}, io.Discard); !errors.Is(err, errSystemNATSRequired) {
 		t.Errorf("endpoint without connection error = %v; want %v", err, errSystemNATSRequired)
 	}
-	// The Grovlet never runs application code: components need the
-	// clustered control plane that supervises them in the application
-	// runtime or isolated workers.
-	for _, components := range [][]string{{"--component", "orders"}, {"--component", "orders", "--component", "inventory"}} {
-		if _, err := parseConfig(append([]string{
+	// Without membership a node is a standalone candidate: it hosts one
+	// component, in an isolated worker, and only it may set a route subject.
+	standalone := []string{
+		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+		"--advertise-endpoint", "nats-subject://system/node-a",
+		"--system-nats-url", "nats://127.0.0.1:4222",
+		"--system-nats-subject", "_GROVE.system.invoke.node-a",
+	}
+	candidate, err := parseConfig(append(slices.Clone(standalone),
+		"--component", "orders", "--route-subject", "_GROVE.system.invoke.node-b"), io.Discard)
+	if err != nil || candidate.routeSubject != "_GROVE.system.invoke.node-b" || !slices.Equal(candidate.componentKinds, []string{"orders"}) {
+		t.Errorf("standalone candidate = %#v, %v", candidate, err)
+	}
+	for _, rejected := range []struct {
+		args []string
+		want error
+	}{
+		{append(slices.Clone(standalone), "--component", "orders", "--component", "inventory"), errApplicationPlacementCluster},
+		{append(slices.Clone(standalone), "--route-subject", "_GROVE.system.invoke.node-b"), errRouteSubjectCandidate},
+		{[]string{
 			"--runtime-dir", runtimeDir,
 			"--system-nats-url", "nats://127.0.0.1:4222",
 			"--system-nats-subject", "_GROVE.system.invoke.node-a",
-		}, components...), io.Discard); !errors.Is(err, errApplicationPlacementCluster) {
-			t.Errorf("%v without membership error = %v; want %v", components, err, errApplicationPlacementCluster)
+			"--component", "orders",
+		}, errCandidateComponent},
+	} {
+		if _, err := parseConfig(rejected.args, io.Discard); !errors.Is(err, rejected.want) {
+			t.Errorf("parseConfig(%q) error = %v; want %v", rejected.args, err, rejected.want)
 		}
-	}
-	if _, err := parseConfig([]string{
-		"--runtime-dir", runtimeDir,
-		"--system-nats-url", "nats://127.0.0.1:4222",
-		"--system-nats-subject", "_GROVE.system.invoke.node-a",
-		"--route-subject", "_GROVE.system.invoke.node-b",
-	}, io.Discard); err == nil {
-		t.Error("--route-subject was accepted; the in-Grovlet hosting path it served is gone")
 	}
 	if _, err := parseConfig([]string{
 		"--runtime-dir", runtimeDir,

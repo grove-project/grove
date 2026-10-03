@@ -35,7 +35,9 @@ var (
 	errSystemNATSMembershipCluster   = errors.New("system NATS membership requires a route listener")
 	errSystemNATSRecoveryCluster     = errors.New("system NATS recovery requires membership")
 	errApplicationEndpoint           = errors.New("application component placement requires a System NATS endpoint")
-	errApplicationPlacementCluster   = errors.New("hosted application components require System NATS membership")
+	errApplicationPlacementCluster   = errors.New("a node without System NATS membership hosts at most one candidate component")
+	errCandidateComponent            = errors.New("a standalone candidate component requires node identity and no HTTP listener")
+	errRouteSubjectCandidate         = errors.New("route subject applies only to a standalone candidate component")
 	errApplicationListenRequired     = errors.New("HTTP application component requires a listen address")
 	errNodeIdentityPair              = errors.New("node ID and advertised endpoint must be configured together")
 	errNodeIDInvalid                 = errors.New("node ID is invalid")
@@ -54,8 +56,11 @@ type config struct {
 	systemNATSURL          string
 	systemNATSSubject      string
 	componentKinds         stringValues
-	componentListeners     stringValues
-	componentOptions       stringValues
+	// routeSubject is where a standalone candidate's component sends its
+	// Grove calls; see grovlet.hostCandidate.
+	routeSubject       string
+	componentListeners stringValues
+	componentOptions   stringValues
 	// isolatedComponents run in dedicated worker processes; every other
 	// component shares the node's application runtime process.
 	isolatedComponents stringValues
@@ -250,6 +255,7 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.StringVar(&cfg.systemNATSURL, "system-nats-url", "", "System NATS server URL")
 	flags.StringVar(&cfg.systemNATSSubject, "system-nats-subject", "", "System NATS transport endpoint subject")
 	flags.Var(&cfg.componentKinds, "component", "application component kind to host (repeatable)")
+	flags.StringVar(&cfg.routeSubject, "route-subject", "", "Grove invocation subject that a standalone candidate's component calls")
 	flags.Var(&cfg.componentListeners, "component-listen", "component HTTP listener as kind=address (repeatable)")
 	flags.Var(&cfg.componentOptions, "component-option", "application-owned worker option as kind=value (repeatable)")
 	flags.Var(&cfg.isolatedComponents, "component-isolate", "component kind to run in a dedicated worker process instead of the shared application runtime (repeatable)")
@@ -299,11 +305,21 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	if (len(cfg.componentKinds) != 0 || cfg.systemNATSRecovery) && cfg.systemNATSSubject == "" {
 		return config{}, errApplicationEndpoint
 	}
-	// Components run in the node's application runtime or isolated workers,
-	// which the Grovlet supervises through the clustered control plane; the
-	// Grovlet never hosts application code itself.
-	if len(cfg.componentKinds) != 0 && !cfg.systemNATSMembership {
+	// Components run in the node's application runtime or isolated workers;
+	// the Grovlet never hosts application code itself. Without membership a
+	// node is a standalone candidate whose one component runs in a worker.
+	standaloneCandidate := len(cfg.componentKinds) != 0 && !cfg.systemNATSMembership
+	if standaloneCandidate && len(cfg.componentKinds) != 1 {
 		return config{}, errApplicationPlacementCluster
+	}
+	if cfg.routeSubject != "" && !standaloneCandidate {
+		return config{}, errRouteSubjectCandidate
+	}
+	if standaloneCandidate {
+		component, ok := activeApplication.componentByKind(cfg.componentKinds[0])
+		if cfg.nodeID == "" || (ok && component.HTTPHandler != nil) {
+			return config{}, errCandidateComponent
+		}
 	}
 	if cfg.ingressAddress != "" && !cfg.systemNATSRecovery {
 		return config{}, errSystemNATSRecoveryCluster
