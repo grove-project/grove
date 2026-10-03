@@ -174,21 +174,21 @@ func startDebugCluster(t *testing.T, ctx context.Context) debugCluster {
 		}
 		node, err := grovetest.StartNode(debugGrovletPath, append(args, extras[i]...)...)
 		if err != nil {
-			_ = cleanupCommandTestNodes(cluster.nodes)
+			cleanupGrovetestNodes(cluster.nodes)
 			t.Fatalf("start %s: %v", nodeID, err)
 		}
 		cluster.nodes = append(cluster.nodes, node)
 	}
 	for _, node := range cluster.nodes {
 		if err := node.WaitReady(ctx); err != nil {
-			_ = cleanupCommandTestNodes(cluster.nodes)
+			cleanupGrovetestNodes(cluster.nodes)
 			t.Fatalf("wait for debug Grovlets: %v\n%s", err, grovletLogs(cluster.nodes))
 		}
 	}
 	var err error
 	cluster.systemNATSURL, err = commandTestSystemNATSURL(cluster.nodes[0].Logs())
 	if err != nil {
-		_ = cleanupCommandTestNodes(cluster.nodes)
+		cleanupGrovetestNodes(cluster.nodes)
 		t.Fatalf("read debug System NATS URL: %v\n%s", err, grovletLogs(cluster.nodes))
 	}
 	return cluster

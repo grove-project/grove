@@ -80,7 +80,7 @@ func NewCluster(binaryPath string, nodeCount int) (*Cluster, error) {
 		}
 		cluster.reservations = append(cluster.reservations, reservation)
 
-		node, err := newNode(binaryPath, nil)
+		node, err := newNode(binaryPath)
 		if err != nil {
 			clusterErr := cluster.failure("create node", nodeID, err)
 			_ = cluster.Cleanup()
@@ -115,7 +115,7 @@ func (c *Cluster) Start() error {
 	}
 
 	for _, node := range c.nodes {
-		if err := node.start(); err != nil {
+		if err := node.process.Start(); err != nil {
 			clusterErr := c.failure("start cluster", node.id, err)
 			_ = c.Cleanup()
 			return clusterErr
@@ -154,7 +154,7 @@ func (c *Cluster) Stop(ctx context.Context) error {
 
 	var stopErrors []error
 	for _, node := range c.nodes {
-		if node.process == nil || !node.process.running() {
+		if !node.process.Running() {
 			continue
 		}
 		if err := node.Stop(ctx); err != nil {
@@ -179,8 +179,8 @@ func (c *Cluster) DumpDiagnostics() string {
 			"node=%s port=%d state=%s runtime_dir=%q\n",
 			node.id,
 			node.port,
-			node.state(),
-			node.tempDir,
+			node.process.State(),
+			node.TempDir(),
 		)
 		if logs := node.Logs(); logs != "" {
 			diagnostics.WriteString("logs:\n")
@@ -226,20 +226,4 @@ func (c *Cluster) failure(operation, nodeID string, err error) error {
 		Err:         err,
 		Diagnostics: c.DumpDiagnostics(),
 	}
-}
-
-func (n *Node) state() string {
-	if n.cleaned {
-		return "cleaned"
-	}
-	if n.process == nil {
-		return "not started"
-	}
-	if n.process.running() {
-		return "running"
-	}
-	if n.process.err != nil {
-		return "exited with error"
-	}
-	return "stopped"
 }

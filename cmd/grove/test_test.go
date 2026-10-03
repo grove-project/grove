@@ -14,7 +14,7 @@ func TestGroveTestCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grove test: %v; output=%q", err, output)
 	}
-	want := "Grove Shop E2E\n✓ cluster ready\n✓ order completed\nPASS\n"
+	want := "Grove Test App E2E\n✓ cluster ready\n✓ order completed\nPASS\n"
 	if output != want {
 		t.Errorf("grove test output = %q; want %q", output, want)
 	}
@@ -39,7 +39,7 @@ func TestGroveTestResilienceCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("grove test --resilience: %v; output=%q", err, output)
 	}
-	want := "Grove Shop E2E\n" +
+	want := "Grove Test App E2E\n" +
 		"✓ baseline\n" +
 		"Killed service 2 host node-2\n" +
 		"✓ failure detected\n" +

@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/artifact"
+	"github.com/grove-project/grove/internal/nodeproc"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
@@ -124,7 +123,7 @@ func (c *applicationController) startDiscoveredApplicationCluster(ctx context.Co
 	}
 	c.mu.Lock()
 	c.cluster = &applicationCluster{
-		nodes: []*grovetest.Node{node}, systemNATSURL: ready.SystemNATSURL,
+		nodes: []*nodeproc.Process{node}, systemNATSURL: ready.SystemNATSURL,
 		webAddress: webAddress, artifact: inspection,
 	}
 	c.startAvailable = false
@@ -297,7 +296,7 @@ func (c *applicationController) startDiscoveredApplicationNode(
 	nodeID string,
 	seedRoute string,
 	webAddress string,
-) (*grovetest.Node, lifecycleEvent, error) {
+) (*nodeproc.Process, lifecycleEvent, error) {
 	args := []string{
 		"--node-id", nodeID,
 		"--advertise-endpoint", "nats-subject://system/" + nodeID,
@@ -316,7 +315,7 @@ func (c *applicationController) startDiscoveredApplicationNode(
 	if seedRoute == "" {
 		args = append(args, "--ingress-address", webAddress)
 	}
-	node, err := grovetest.StartNode(c.binaryPath, args...)
+	node, err := nodeproc.Start(c.binaryPath, args...)
 	if err != nil {
 		return nil, lifecycleEvent{}, err
 	}
@@ -333,17 +332,12 @@ func (c *applicationController) startDiscoveredApplicationNode(
 }
 
 func applicationReadyEvent(logs string) (lifecycleEvent, error) {
-	decoder := json.NewDecoder(strings.NewReader(logs))
-	for {
-		var event lifecycleEvent
-		if err := decoder.Decode(&event); err != nil {
-			if errors.Is(err, io.EOF) {
-				return lifecycleEvent{}, errors.New("ready lifecycle event is missing")
-			}
-			return lifecycleEvent{}, err
-		}
-		if event.Event == "ready" && event.SystemNATSURL != "" && event.SystemNATSRouteURL != "" {
-			return event, nil
-		}
+	event, err := nodeproc.ReadyEvent(logs)
+	if err != nil {
+		return lifecycleEvent{}, err
 	}
+	if event.SystemNATSRouteURL == "" {
+		return lifecycleEvent{}, errors.New("ready lifecycle event has no System NATS route URL")
+	}
+	return event, nil
 }

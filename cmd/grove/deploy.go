@@ -15,14 +15,15 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
-	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/artifact"
+	"github.com/grove-project/grove/internal/nodeproc"
+	"github.com/grove-project/grove/internal/scenario"
 	"github.com/grove-project/grove/internal/systemnats"
-	groveshop "github.com/grove-project/grove/internal/testapp"
 )
 
+var errDebugDemoTopology = errors.New("application declares no debug demo topology")
+
 const (
-	debugDemoNodeCount         = 5
 	debugDemoConditionInterval = 25 * time.Millisecond
 	localStateEnvironment      = "GROVE_LOCAL_STATE"
 )
@@ -38,12 +39,19 @@ func executeDeploy(ctx context.Context, parsed invocation, output io.Writer) err
 	if err != nil {
 		return fmt.Errorf("locate Delve (install dlv before using --debug-demo): %w", err)
 	}
+	description, err := describeApplicationScenario(ctx, parsed.binaryPath)
+	if err != nil {
+		return fmt.Errorf("describe debug demo application: %w", err)
+	}
+	if description.DebugNodeCount < 1 || len(description.DebugPlacements) == 0 {
+		return fmt.Errorf("debug demo application %q: %w", description.ApplicationID, errDebugDemoTopology)
+	}
 	temporaryDir, err := os.MkdirTemp("", "grove-debug-demo-")
 	if err != nil {
 		return fmt.Errorf("create debug demo directory: %w", err)
 	}
 	defer os.RemoveAll(temporaryDir)
-	configuredArtifact := filepath.Join(temporaryDir, "grove-shop")
+	configuredArtifact := filepath.Join(temporaryDir, filepath.Base(parsed.binaryPath))
 	compilation, err := compileConfigFile(ctx, parsed.binaryPath, parsed.configPath, compileWithTarget)
 	if err != nil {
 		return fmt.Errorf("compile debug demo configuration: %w", err)
@@ -52,7 +60,7 @@ func executeDeploy(ctx context.Context, parsed invocation, output io.Writer) err
 	if err != nil {
 		return fmt.Errorf("build configured debug demo artifact: %w", err)
 	}
-	routePorts, err := reserveLocalPorts(debugDemoNodeCount)
+	routePorts, err := reserveLocalPorts(description.DebugNodeCount)
 	if err != nil {
 		return fmt.Errorf("reserve debug demo route ports: %w", err)
 	}
@@ -61,7 +69,7 @@ func executeDeploy(ctx context.Context, parsed invocation, output io.Writer) err
 		return fmt.Errorf("reserve debug demo Web port: %w", err)
 	}
 	webAddress := "127.0.0.1:" + strconv.Itoa(webPorts[0])
-	nodes, systemNATSURL, err := startDebugDemoNodes(ctx, configuredArtifact, delvePath, routePorts, webAddress)
+	nodes, systemNATSURL, err := startDebugDemoNodes(ctx, configuredArtifact, delvePath, description, routePorts, webAddress)
 	if err != nil {
 		return err
 	}
@@ -70,7 +78,7 @@ func executeDeploy(ctx context.Context, parsed invocation, output io.Writer) err
 	if err != nil {
 		return fmt.Errorf("connect to debug demo cluster: %w", err)
 	}
-	if err := waitForDebugDemoReady(ctx, transport, inspection.ArtifactDigest); err != nil {
+	if err := waitForDebugDemoReady(ctx, transport, description, inspection.ArtifactDigest); err != nil {
 		transport.Close()
 		return fmt.Errorf("wait for debug demo cluster: %w\n%s", err, debugDemoDiagnostics(nodes))
 	}
@@ -80,37 +88,50 @@ func executeDeploy(ctx context.Context, parsed invocation, output io.Writer) err
 		return err
 	}
 	defer removeLocalConnection()
-	fmt.Fprintln(output, "Grove Shop debug demo ready")
-	fmt.Fprintf(output, "Artifact %s\n", inspection.ArtifactDigest)
-	fmt.Fprintf(output, "Web      %s\n", state.WebURL)
-	fmt.Fprintln(output, "Web      node-1")
-	fmt.Fprintln(output, "Orders   node-2")
-	fmt.Fprintln(output, "Inventory node-3")
-	fmt.Fprintln(output, "Payment  node-4")
-	fmt.Fprintln(output, "Shipping node-5")
+	fmt.Fprintf(output, "%s debug demo ready\n", description.Name)
+	fmt.Fprintf(output, "%-8s %s\n", "Artifact", inspection.ArtifactDigest)
+	for _, component := range description.DebugPlacements {
+		if component.Ingress {
+			fmt.Fprintf(output, "%-8s %s\n", component.Name, state.WebURL)
+			break
+		}
+	}
+	for _, component := range description.DebugPlacements {
+		fmt.Fprintf(output, "%-8s %s\n", component.Name, component.NodeID)
+	}
 	fmt.Fprintln(output, "Keep this command running; press Ctrl-C to stop the cluster.")
 	<-ctx.Done()
 	return nil
 }
 
+// startDebugDemoNodes starts the application's fixed debug-demo topology.
+// Every HTTP ingress component listens on webAddress.
 func startDebugDemoNodes(
 	ctx context.Context,
 	artifactPath string,
 	delvePath string,
+	description scenario.Description,
 	routePorts []int,
 	webAddress string,
-) ([]*grovetest.Node, string, error) {
-	extras := [][]string{
-		{"--component", "web", "--component-listen", "web=" + webAddress},
-		{"--component", "orders", "--component-option", "orders=distributed"},
-		{"--component", "inventory"},
-		{"--component", "payment"},
-		{"--component", "shipping"},
+) ([]*nodeproc.Process, string, error) {
+	extras := make([][]string, description.DebugNodeCount)
+	for _, component := range description.DebugPlacements {
+		index := debugDemoNodeIndex(component.NodeID, len(extras))
+		if index < 0 {
+			return nil, "", fmt.Errorf("invalid debug demo placement: service %d on %q", component.ServiceID, component.NodeID)
+		}
+		extras[index] = append(extras[index], "--component", component.Kind)
+		for _, option := range component.Options {
+			extras[index] = append(extras[index], "--component-option", component.Kind+"="+option)
+		}
+		if component.Ingress {
+			extras[index] = append(extras[index], "--component-listen", component.Kind+"="+webAddress)
+		}
 	}
-	nodes := make([]*grovetest.Node, 0, len(extras))
+	nodes := make([]*nodeproc.Process, 0, len(extras))
 	for i := range extras {
 		seed := 0
-		if i == 0 {
+		if i == 0 && len(extras) > 1 {
 			seed = 1
 		}
 		nodeID := fmt.Sprintf("node-%d", i+1)
@@ -124,7 +145,7 @@ func startDebugDemoNodes(
 			"--system-nats-subject", "_GROVE.system.debug-demo." + nodeID,
 			"--delve-path", delvePath,
 		}
-		node, err := grovetest.StartNode(artifactPath, append(args, extras[i]...)...)
+		node, err := nodeproc.Start(artifactPath, append(args, extras[i]...)...)
 		if err != nil {
 			cleanupDebugDemoNodes(nodes)
 			return nil, "", fmt.Errorf("start debug demo %s: %w", nodeID, err)
@@ -143,6 +164,20 @@ func startDebugDemoNodes(
 		return nil, "", fmt.Errorf("read debug demo System NATS URL: %w", err)
 	}
 	return nodes, systemNATSURL, nil
+}
+
+// debugDemoNodeIndex maps "node-N" to its index in a topology of count
+// nodes, or -1.
+func debugDemoNodeIndex(nodeID string, count int) int {
+	number, found := strings.CutPrefix(nodeID, "node-")
+	if !found {
+		return -1
+	}
+	index, err := strconv.Atoi(number)
+	if err != nil || index < 1 || index > count {
+		return -1
+	}
+	return index - 1
 }
 
 func reserveLocalPorts(count int) ([]int, error) {
@@ -167,28 +202,17 @@ func reserveLocalPorts(count int) ([]int, error) {
 }
 
 func systemNATSURLFromLogs(logs string) (string, error) {
-	decoder := json.NewDecoder(strings.NewReader(logs))
-	for {
-		var event struct {
-			Event         string `json:"event"`
-			SystemNATSURL string `json:"system_nats_url"`
-		}
-		if err := decoder.Decode(&event); err != nil {
-			return "", err
-		}
-		if event.Event == "ready" && event.SystemNATSURL != "" {
-			return event.SystemNATSURL, nil
-		}
+	event, err := nodeproc.ReadyEvent(logs)
+	if err != nil {
+		return "", err
 	}
+	return event.SystemNATSURL, nil
 }
 
-func waitForDebugDemoReady(ctx context.Context, transport *systemnats.Transport, artifactDigest string) error {
-	wantNodes := map[grove.ServiceID]string{
-		groveshop.ServiceWeb:       "node-1",
-		groveshop.ServiceOrders:    "node-2",
-		groveshop.ServiceInventory: "node-3",
-		groveshop.ServicePayment:   "node-4",
-		groveshop.ServiceShipping:  "node-5",
+func waitForDebugDemoReady(ctx context.Context, transport *systemnats.Transport, description scenario.Description, artifactDigest string) error {
+	wantNodes := make(map[grove.ServiceID]string, len(description.DebugPlacements))
+	for _, component := range description.DebugPlacements {
+		wantNodes[component.ServiceID] = component.NodeID
 	}
 	ticker := time.NewTicker(debugDemoConditionInterval)
 	defer ticker.Stop()
@@ -205,7 +229,7 @@ func waitForDebugDemoReady(ctx context.Context, transport *systemnats.Transport,
 		if placementErr == nil {
 			lastPlacement = placement
 		}
-		ready := clusterErr == nil && cluster.Ready && len(cluster.Nodes) == debugDemoNodeCount &&
+		ready := clusterErr == nil && cluster.Ready && len(cluster.Nodes) == description.DebugNodeCount &&
 			placementErr == nil && placement.Ready && len(placement.Placements) == len(wantNodes)
 		for _, node := range cluster.Nodes {
 			ready = ready && node.Health == systemnats.HealthHealthy
@@ -241,13 +265,13 @@ func waitForDebugDemoReady(ctx context.Context, transport *systemnats.Transport,
 	}
 }
 
-func cleanupDebugDemoNodes(nodes []*grovetest.Node) {
+func cleanupDebugDemoNodes(nodes []*nodeproc.Process) {
 	for _, node := range nodes {
 		_ = node.Cleanup()
 	}
 }
 
-func debugDemoDiagnostics(nodes []*grovetest.Node) string {
+func debugDemoDiagnostics(nodes []*nodeproc.Process) string {
 	var diagnostics strings.Builder
 	for i, node := range nodes {
 		fmt.Fprintf(&diagnostics, "node-%d logs:\n%s", i+1, node.Logs())

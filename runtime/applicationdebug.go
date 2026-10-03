@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
-	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/artifact"
+	"github.com/grove-project/grove/internal/nodeproc"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
@@ -157,7 +157,7 @@ func startDebugApplicationCluster(ctx context.Context, artifactPath, delvePath s
 			"--system-nats-subject", "_GROVE.system.application.debug." + nodeID,
 			"--delve-path", delvePath,
 		}
-		node, err := grovetest.StartNode(artifactPath, append(args, extra...)...)
+		node, err := nodeproc.Start(artifactPath, append(args, extra...)...)
 		if err != nil {
 			cleanupApplicationNodes(cluster.nodes)
 			return nil, fmt.Errorf("start debug demo %s: %w", nodeID, err)

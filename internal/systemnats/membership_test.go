@@ -461,6 +461,7 @@ func waitForBucketReplicas(ctx context.Context, serverURL, bucket string, want i
 			if statusErr == nil {
 				last = status.Config().Replicas
 				if last == want {
+					cancel()
 					return nil
 				}
 			}

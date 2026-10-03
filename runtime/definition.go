@@ -136,10 +136,20 @@ type Scenario struct {
 	// Deprecated: see InitialPlacements.
 	DebugPlacements   []ScenarioPlacement
 	RecoveryServiceID grove.ServiceID
-	Probe             func(context.Context, string, string) (any, error)
-	ProbeHealthy      func(any) bool
-	ProbeSummary      func(any) string
-	InvalidConfig     func([]byte) (configuration Configuration, field string, message string, err error)
+	// CheckComponents lists the component kinds `grove test` pins one per
+	// node before running Check; one more node hosts no component and runs
+	// Check. RecoveryServiceID should be one of them for `grove test
+	// --resilience`.
+	CheckComponents []string
+	// Check is the application's end-to-end check for `grove test`. It runs
+	// in the application binary against a running cluster, calls the
+	// application's own services through client, and returns a short summary
+	// of what it proved. runID is unique per run.
+	Check         func(ctx context.Context, client *grove.Client, runID string) (string, error)
+	Probe         func(context.Context, string, string) (any, error)
+	ProbeHealthy  func(any) bool
+	ProbeSummary  func(any) string
+	InvalidConfig func([]byte) (configuration Configuration, field string, message string, err error)
 }
 
 // ScenarioPlacement gives a deterministic demo node to an application-owned
@@ -215,6 +225,14 @@ func validateDefinition(definition Definition) error {
 	if definition.Scenario != nil {
 		if definition.Scenario.Probe == nil || definition.Scenario.ProbeHealthy == nil || definition.Scenario.InvalidConfig == nil {
 			return fmt.Errorf("%w: scenario hooks are required", ErrApplicationDefinitionInvalid)
+		}
+		if (len(definition.Scenario.CheckComponents) == 0) != (definition.Scenario.Check == nil) {
+			return fmt.Errorf("%w: scenario check needs both Check and CheckComponents", ErrApplicationDefinitionInvalid)
+		}
+		for _, kind := range definition.Scenario.CheckComponents {
+			if _, ok := kinds[kind]; !ok {
+				return fmt.Errorf("%w: scenario check component %q is unknown", ErrApplicationDefinitionInvalid, kind)
+			}
 		}
 	}
 	return nil

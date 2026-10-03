@@ -65,7 +65,7 @@ func TestParseInvocation(t *testing.T) {
 		{args: []string{"components", "--system-nats-url", "nats://control", "--node-id", "node-1"}, command: commandComponents},
 		{args: []string{"component", "start", "--system-nats-url", "nats://control", "--node-id", "node-2", "--service-id", "2"}, command: commandComponent, action: componentStart, service: 2},
 		{args: []string{"component", "stop", "--system-nats-url", "nats://control", "--node-id", "node-2", "--service-id", "2"}, command: commandComponent, action: componentStop, service: 2},
-		{args: []string{"test", "--binary", "./grove-shop"}, command: commandTest, service: defaultResilienceServiceID, binary: "./grove-shop"},
+		{args: []string{"test", "--binary", "./grove-shop"}, command: commandTest, binary: "./grove-shop"},
 		{args: []string{"test", "--binary", "./grove-shop", "--resilience", "--service-id", "1"}, command: commandTest, service: 1, binary: "./grove-shop", resilience: true},
 		{args: []string{"debug", "--system-nats-url", "nats://control", "--node-id", "node-1", "--service", "orders", "--listen", "127.0.0.1:40000"}, command: commandDebug, serviceName: "orders", listen: "127.0.0.1:40000"},
 		{args: []string{"deploy", "--config", "configs/acme.yaml", "--debug-demo"}, command: commandDeploy, binary: "./bin/grove-shop", debugDemo: true},
@@ -459,6 +459,12 @@ func stopGrovlets(t *testing.T, nodes []*grovetest.Node) {
 		})
 	}
 	wait.Wait()
+}
+
+func cleanupGrovetestNodes(nodes []*grovetest.Node) {
+	for _, node := range nodes {
+		_ = node.Cleanup()
+	}
 }
 
 func grovletLogs(nodes []*grovetest.Node) string {
