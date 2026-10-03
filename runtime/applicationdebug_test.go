@@ -22,6 +22,7 @@ import (
 	"github.com/google/go-dap"
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/console"
+	"github.com/grove-project/grove/internal/localcluster"
 	"github.com/grove-project/grove/internal/systemnats"
 	groveshop "github.com/grove-project/grove/internal/testapp"
 )
@@ -117,7 +118,7 @@ func runGroveShopDebuggingDemo(t *testing.T) {
 		t.Errorf("debug demo workers = %#v", result.Status.Nodes)
 	}
 
-	debugPorts, err := reserveApplicationPorts(2)
+	debugPorts, err := localcluster.ReservePorts(2)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,6 +19,7 @@ import (
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/artifact"
+	"github.com/grove-project/grove/internal/localcluster"
 	"github.com/grove-project/grove/internal/systemnats"
 	groveshop "github.com/grove-project/grove/internal/testapp"
 )
@@ -91,11 +92,9 @@ func TestGroveShopMVPLifecycle(t *testing.T) {
 		t.Fatalf("wait for Artifact A desired state: %v\n%s", err, grovletLogs(cluster.nodes))
 	}
 	currentArtifact := artifactControlRecord(currentInspection)
-	if err := transport.PutDeploymentArtifact(ctx, "node-1", currentArtifact); err != nil {
-		t.Fatal(err)
-	}
-	active := rolloutRecord(1, currentArtifact.ArtifactDigest, "", systemnats.RolloutActive)
-	if err := transport.PutRollout(ctx, "node-2", active); err != nil {
+	operator := rolloutOperator(t, transport)
+	active, err := operator.Activate(ctx, currentArtifact, rolloutGeneration(1))
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := waitForDeploymentControlViews(ctx, transport, []systemnats.DeploymentArtifact{currentArtifact}, []systemnats.Rollout{active}); err != nil {
@@ -136,15 +135,10 @@ func TestGroveShopMVPLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	recoveredNodeID, err := waitForCommandTestRecovery(
-		ctx,
-		transport,
-		"node-3",
-		3,
-		"node-2",
-		groveshop.ServiceInventory,
-		currentInspection.ArtifactDigest,
-	)
+	recoveredNodeID, err := localcluster.WaitRecovery(ctx, transport, localcluster.Recovery{
+		Observer: "node-3", Nodes: 3, FailedNodeID: "node-2",
+		ServiceID: groveshop.ServiceInventory, ArtifactDigest: currentInspection.ArtifactDigest,
+	})
 	if err != nil {
 		t.Fatalf("recover Inventory after node loss: %v\n%s", err, grovletLogs(cluster.nodes))
 	}
@@ -182,11 +176,9 @@ func TestGroveShopMVPLifecycle(t *testing.T) {
 	assertMVPOrder(t, ctx, cluster.webAddress, "mvp-after-restart")
 
 	candidateArtifact := artifactControlRecord(candidateInspection)
-	if err := transport.PutDeploymentArtifact(ctx, "node-1", candidateArtifact); err != nil {
-		t.Fatal(err)
-	}
-	pending := rolloutRecord(2, currentArtifact.ArtifactDigest, candidateArtifact.ArtifactDigest, systemnats.RolloutPending)
-	if err := transport.PutRollout(ctx, "node-3", pending); err != nil {
+	operator = rolloutOperator(t, transport)
+	pending, err := operator.Propose(ctx, currentArtifact.ArtifactDigest, candidateArtifact, rolloutGeneration(2))
+	if err != nil {
 		t.Fatal(err)
 	}
 	wantArtifacts := []systemnats.DeploymentArtifact{currentArtifact, candidateArtifact}
@@ -248,7 +240,7 @@ func TestGroveShopMVPLifecycle(t *testing.T) {
 		Code: "candidate_startup_failed", Component: "Inventory",
 		Field: "inventory.reservation_buffer", Message: "must be zero or greater",
 	}
-	rolledBack, err := systemnats.NewDeployments().RollbackFailedUpgrade(ctx, transport, pending, routes, failure)
+	rolledBack, err := operator.Rollback(ctx, pending, routes, failure)
 	if err != nil {
 		t.Fatalf("rollback broken candidate: %v\n%s", err, grovletLogs(cluster.nodes))
 	}

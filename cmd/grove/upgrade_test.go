@@ -70,17 +70,12 @@ func TestHealthyCandidateTakesOwnership(t *testing.T) {
 
 	current := artifactControlRecord(currentInspection)
 	candidate := artifactControlRecord(candidateInspection)
-	for _, record := range []systemnats.DeploymentArtifact{current, candidate} {
-		if err := transport.PutDeploymentArtifact(ctx, "node-1", record); err != nil {
-			t.Fatal(err)
-		}
-	}
-	active := rolloutRecord(1, current.ArtifactDigest, "", systemnats.RolloutActive)
-	if err := transport.PutRollout(ctx, "node-2", active); err != nil {
+	operator := rolloutOperator(t, transport)
+	if _, err := operator.Activate(ctx, current, rolloutGeneration(1)); err != nil {
 		t.Fatal(err)
 	}
-	pending := rolloutRecord(2, current.ArtifactDigest, candidate.ArtifactDigest, systemnats.RolloutPending)
-	if err := transport.PutRollout(ctx, "node-3", pending); err != nil {
+	pending, err := operator.Propose(ctx, current.ArtifactDigest, candidate, rolloutGeneration(2))
+	if err != nil {
 		t.Fatal(err)
 	}
 	wantArtifacts := []systemnats.DeploymentArtifact{current, candidate}
@@ -130,7 +125,7 @@ func TestHealthyCandidateTakesOwnership(t *testing.T) {
 		}
 		routes[i] = systemnats.UpgradeRoute{Current: currentRoute, Candidate: candidateRoutes[candidateIndex]}
 	}
-	committed, err := systemnats.NewDeployments().CommitHealthyUpgrade(ctx, transport, pending, routes)
+	committed, err := operator.Commit(ctx, pending, routes)
 	if err != nil {
 		t.Fatalf("commit healthy upgrade: %v; candidate Orders=%q Inventory=%q\n%s", err, candidateOrders.Logs(), candidateInventory.Logs(), grovletLogs(currentNodes))
 	}

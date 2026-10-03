@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/grove-project/grove/internal/artifact"
+	"github.com/grove-project/grove/internal/rollout"
 	"github.com/grove-project/grove/internal/systemnats"
 	groveshop "github.com/grove-project/grove/internal/testapp"
 	"github.com/nats-io/nats.go"
@@ -203,25 +204,26 @@ func artifactControlRecord(inspection artifact.Inspection) systemnats.Deployment
 }
 
 func rolloutRecord(generation uint64, current, candidate string, phase systemnats.RolloutPhase) systemnats.Rollout {
-	nodes := make([]systemnats.RolloutNodeProgress, 3)
-	for i := range nodes {
-		nodes[i] = systemnats.RolloutNodeProgress{
-			NodeID:                  fmt.Sprintf("node-%d", i+1),
-			CurrentArtifactDigest:   current,
-			CandidateArtifactDigest: candidate,
-			Phase:                   phase,
-		}
+	return rollout.Record(groveshop.ApplicationID, "production", rolloutGeneration(generation), current, candidate, phase)
+}
+
+// rolloutGeneration is generation n of the three-node test cluster.
+func rolloutGeneration(n uint64) rollout.Generation {
+	return rollout.Generation{
+		RolloutID:  fmt.Sprintf("%s-%d", groveshop.ApplicationID, n),
+		Generation: n,
+		NodeIDs:    []string{"node-1", "node-2", "node-3"},
 	}
-	return systemnats.Rollout{
-		ApplicationID:           groveshop.ApplicationID,
-		ClusterID:               "production",
-		RolloutID:               fmt.Sprintf("%s-%d", groveshop.ApplicationID, generation),
-		Generation:              generation,
-		CurrentArtifactDigest:   current,
-		CandidateArtifactDigest: candidate,
-		Phase:                   phase,
-		Nodes:                   nodes,
+}
+
+// rolloutOperator rolls out through the deployment endpoints node-1 serves.
+func rolloutOperator(t *testing.T, transport *systemnats.Transport) *rollout.Operator {
+	t.Helper()
+	store, err := systemnats.NewRolloutStore(transport, "node-1")
+	if err != nil {
+		t.Fatal(err)
 	}
+	return rollout.New(store)
 }
 
 func waitForDeploymentControlViews(ctx context.Context, transport *systemnats.Transport, artifacts []systemnats.DeploymentArtifact, rollouts []systemnats.Rollout) error {

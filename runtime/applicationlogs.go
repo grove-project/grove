@@ -40,11 +40,11 @@ func (c *applicationController) logs(ctx context.Context, args []string) (any, e
 	var debugSessions []console.DebugSession
 	if cluster != nil {
 		systemNATSURL = cluster.systemNATSURL
-		nodes = make([]applicationNodeLogs, len(cluster.nodes))
-		for index, node := range cluster.nodes {
-			nodes[index] = applicationNodeLogs{
-				NodeID: fmt.Sprintf("node-%d", index+1),
-				Output: node.Logs(),
+		if cluster.local != nil {
+			for _, nodeID := range cluster.local.NodeIDs() {
+				if node, ok := cluster.local.Node(nodeID); ok {
+					nodes = append(nodes, applicationNodeLogs{NodeID: nodeID, Output: node.Logs()})
+				}
 			}
 		}
 	}
