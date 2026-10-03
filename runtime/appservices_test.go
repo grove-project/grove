@@ -1,14 +1,10 @@
 package runtime
 
 import (
-	"context"
 	"strings"
 	"testing"
 
-	"github.com/derailed/tcell/v2"
-	"github.com/derailed/tview"
 	"github.com/grove-project/grove"
-	"github.com/grove-project/grove/console"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
@@ -108,8 +104,8 @@ func TestServicesViewShowsScalableAndExclusiveHandlersOfOneService(t *testing.T)
 	if reconcile.Scaling != "exclusive" || reconcile.Owner != "node-1" || len(reconcile.Placements) != 1 || !reconcile.Placements[0].Owner || reconcile.Epoch != 1 {
 		t.Errorf("Reconcile = %#v; want exclusive, single owner node-1, epoch 1", reconcile)
 	}
-	if view.Services[0].placementCount() != 7 {
-		t.Errorf("placement count = %d; want 7", view.Services[0].placementCount())
+	if view.Services[0].PlacementCount() != 7 {
+		t.Errorf("placement count = %d; want 7", view.Services[0].PlacementCount())
 	}
 	// The inverse view lists the same placements per node.
 	if len(view.Nodes) != 3 || len(view.Nodes[0].Hosted) != 3 || len(view.Nodes[1].Hosted) != 2 {
@@ -195,180 +191,31 @@ func TestServicesViewFallsBackToWholeServicePlacements(t *testing.T) {
 	}
 }
 
-func TestServicesDrillDownLevelsAndBackNavigation(t *testing.T) {
+// Each placement carries the debug.attach invocation for its node, so the
+// services view offers debugging without knowing the action.
+func TestServicesViewPlacementsCarryTheirDebugInvocation(t *testing.T) {
 	withPaymentApplication(t)
 	view := buildServicesView(systemnats.HandlerPlacementView{
-		Ready: true,
-		Nodes: registrations("node-1", "node-2"),
-		Placements: []systemnats.HandlerPlacement{
-			handlerPlacement(methodValidate, 0, false, "node-1", "node-2"),
-			handlerPlacement(methodCharge, 0, false, "node-1", "node-2"),
-			handlerPlacement(methodReconcil, 1, true, "node-2"),
-		},
+		Ready:      true,
+		Nodes:      registrations("node-1", "node-2"),
+		Placements: []systemnats.HandlerPlacement{handlerPlacement(methodReconcil, 1, true, "node-2")},
 	}, clusterStatus(map[string]string{"node-1": "healthy", "node-2": "healthy"}, "node-1", "node-2"))
-
-	location := servicesLocation{}
-	screen := buildServicesScreen(view, location)
-	if screen.level != "services" || screen.title != "APP / SERVICES" || screen.rows[0].cells[0] != "Payment" || screen.rows[0].cells[2] != "5" {
-		t.Fatalf("services screen = %#v", screen)
+	debug := handlerByName(t, view, "Reconcile").Placements[0].Debug
+	if debug.Name != "debug.attach" || strings.Join(debug.Args, " ") != "Payment --node node-2" {
+		t.Fatalf("debug invocation = %#v; want debug.attach Payment --node node-2", debug)
 	}
-	location = location.drillDown(screen, screen.rows[0])
-	screen = buildServicesScreen(view, location)
-	if screen.level != "handlers" || screen.title != "APP / SERVICES / PAYMENT" || len(screen.rows) != 3 {
-		t.Fatalf("handlers screen = %#v", screen)
-	}
-	if got := screen.rows[2].cells; got[0] != "Reconcile" || got[1] != "exclusive" || got[3] != "node-2" {
-		t.Errorf("Reconcile row = %v; want exclusive owned by node-2", got)
-	}
-	location = location.drillDown(screen, screen.rows[2])
-	screen = buildServicesScreen(view, location)
-	if screen.level != "placements" || screen.title != "APP / SERVICES / PAYMENT / RECONCILE" || screen.service != "Payment" {
-		t.Fatalf("placements screen = %#v", screen)
-	}
-	if got := screen.rows[0].cells; got[1] != "node-2" || got[2] != "healthy" || !strings.Contains(got[3], "owner") {
-		t.Errorf("placement row = %v; want the owner on node-2", got)
-	}
-	if !strings.Contains(screen.hint, "Debug") {
-		t.Errorf("placement hint %q does not offer debugging", screen.hint)
+	if service, _, node, err := parseDebugAttachArguments(debug.Args); err != nil || service != "Payment" || node != "node-2" {
+		t.Fatalf("debug.attach parses its own invocation %q as (%q, %q, %v)", debug.Args, service, node, err)
 	}
 
-	for _, want := range []string{"handlers", "services"} {
-		var atTop bool
-		location, atTop = location.up()
-		if atTop || buildServicesScreen(view, location).level != want {
-			t.Fatalf("up did not reach %s: %#v", want, location)
-		}
-	}
-	if _, atTop := location.up(); !atTop {
-		t.Error("services level is not the top")
-	}
-
-	// A handler that disappears drops the view back to its service.
-	stale := servicesLocation{service: paymentService, hasService: true, method: 99, hasHandler: true}
-	if got := buildServicesScreen(view, stale).level; got != "handlers" {
-		t.Errorf("vanished handler level = %s; want handlers", got)
-	}
-
-	nodes := buildServicesScreen(view, servicesLocation{nodes: true})
-	if nodes.level != "nodes" || nodes.rows[0].cells[0] != "node-1" || nodes.rows[0].cells[2] != "2" {
-		t.Fatalf("nodes screen = %#v", nodes)
-	}
-	hosted := buildServicesScreen(view, servicesLocation{nodes: true}.drillDown(nodes, nodes.rows[1]))
-	if hosted.level != "hosted" || len(hosted.rows) != 3 || hosted.rows[2].cells[4] != "owner" {
-		t.Fatalf("hosted screen = %#v; want node-2's three placements with Reconcile owned", hosted)
-	}
-}
-
-func TestServicesOverlayDrillsToPlacementAndAttachesDebuggerToThatNode(t *testing.T) {
-	withPaymentApplication(t)
-	data := buildServicesView(systemnats.HandlerPlacementView{
-		Ready: true,
-		Nodes: registrations("node-1", "node-2"),
-		Placements: []systemnats.HandlerPlacement{
-			handlerPlacement(methodValidate, 0, false, "node-1", "node-2"),
-			handlerPlacement(methodCharge, 0, false, "node-1", "node-2"),
-			handlerPlacement(methodReconcil, 1, true, "node-2"),
-		},
-	}, clusterStatus(map[string]string{"node-1": "healthy", "node-2": "healthy"}, "node-1", "node-2"))
-
-	attached := make(chan []string, 1)
-	registry := &console.Registry{}
-	for _, action := range []console.Action{
-		{Name: "services.view", Label: "Services", Section: "Services", Handler: func(context.Context, []string) (any, error) { return data, nil }},
-		{Name: "debug.attach", Label: "Attach debugger", Section: "Debug", Handler: func(_ context.Context, args []string) (any, error) {
-			attached <- args
-			return nil, nil
-		}},
-		{Name: "logs.view", Label: "View logs", Section: "Logs", Handler: func(context.Context, []string) (any, error) { return applicationLogsView{}, nil }},
-	} {
-		if err := registry.Register(action); err != nil {
-			t.Fatal(err)
-		}
-	}
-	tui, err := console.NewTUI(registry, func(context.Context) (console.Model, error) {
-		return console.Model{Application: "Grove Shop", Sections: []string{"Services"}}, nil
+	// A service placed as a whole is debugged on its node too.
+	activeApplication = Definition{Components: []Component{{ServiceID: 1, Name: "Orders", Kind: "orders"}}}
+	whole := buildServicesView(systemnats.HandlerPlacementView{}, ClusterStatus{
+		Nodes:      []NodeStatus{{NodeID: "node-1", Health: "healthy"}},
+		Placements: []PlacementStatus{{ServiceID: 1, Name: "Orders", NodeID: "node-1", Health: "healthy"}},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	view, err := newApplicationTUI(t.Context(), tui)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Updates are applied on the test goroutine so the overlay is never
-	// touched concurrently.
-	updates := make(chan func(), 64)
-	view.queueDraw = func(update func()) { updates <- update }
-	pump := func() {
-		for {
-			select {
-			case update := <-updates:
-				update()
-			default:
-				return
-			}
-		}
-	}
-	waitFor := func(description string, condition func() bool) {
-		t.Helper()
-		waitForApplicationTUI(t, description, func() bool { pump(); return condition() })
-	}
-	press := func(key tcell.Key, r rune) {
-		t.Helper()
-		event := view.servicesKeyboard(tcell.NewEventKey(key, r, tcell.ModNone))
-		if event != nil {
-			view.servicesTable.InputHandler()(event, func(p tview.Primitive) { view.app.SetFocus(p) })
-		}
-	}
-	tableText := func() string {
-		var out strings.Builder
-		for row := 0; row < view.servicesTable.GetRowCount(); row++ {
-			for column := 0; column < view.servicesTable.GetColumnCount(); column++ {
-				out.WriteString(view.servicesTable.GetCell(row, column).Text + " ")
-			}
-			out.WriteString("\n")
-		}
-		return out.String()
-	}
-
-	view.activateActionName("services.view", nil)
-	if !view.servicesOpen {
-		t.Fatal("services.view did not open the services overlay")
-	}
-	waitFor("services listed", func() bool { return strings.Contains(tableText(), "Payment") })
-
-	press(tcell.KeyEnter, 0) // Payment
-	waitFor("handlers listed", func() bool { return strings.Contains(tableText(), "Reconcile") })
-	press(tcell.KeyDown, 0)
-	press(tcell.KeyDown, 0) // Reconcile
-	press(tcell.KeyEnter, 0)
-	waitFor("placements listed", func() bool { return strings.Contains(tableText(), "payment/1") })
-	if text := tableText(); !strings.Contains(text, "node-2") || !strings.Contains(text, "owner (epoch 1)") {
-		t.Fatalf("placement table does not name the owner:\n%s", text)
-	}
-
-	press(tcell.KeyRune, 'd')
-	select {
-	case args := <-attached:
-		if strings.Join(args, " ") != "Payment --node node-2" {
-			t.Fatalf("debug.attach args = %v; want the selected placement's node", args)
-		}
-	case <-t.Context().Done():
-		t.Fatal("debug.attach was not invoked")
-	}
-	if view.servicesOpen {
-		t.Error("services overlay stayed open after starting the debugger")
-	}
-}
-
-func TestServicesAndNodesHaveHotkeys(t *testing.T) {
-	for key, want := range map[rune]string{'p': "services.view", 'n': "cluster.nodes"} {
-		if got, ok := actionForHotkey(key); !ok || got != want || hotkeyLabel(want) != string(key) {
-			t.Errorf("hotkey %q = (%q, %t); want %s", key, got, ok, want)
-		}
-	}
-	if hint := k9sHintLine(); !strings.Contains(hint, "Services") || !strings.Contains(hint, "Nodes") {
-		t.Errorf("hint line %q does not advertise services and nodes", hint)
+	if debug := whole.Services[0].Handlers[0].Placements[0].Debug; strings.Join(debug.Args, " ") != "Orders --node node-1" {
+		t.Fatalf("whole-service debug invocation = %#v", debug)
 	}
 }
 
@@ -406,7 +253,7 @@ func TestServicesViewShowsServicesSharingOneProcess(t *testing.T) {
 	}
 	labels := map[string]string{}
 	for _, hosted := range view.Nodes[0].Hosted {
-		labels[hosted.Service] = hosted.label()
+		labels[hosted.Service] = hosted.Label()
 	}
 	want := map[string]string{
 		"Orders":    "app-runtime-1 (pid 100)",
@@ -417,9 +264,5 @@ func TestServicesViewShowsServicesSharingOneProcess(t *testing.T) {
 		if labels[service] != label {
 			t.Errorf("%s process = %q; want %q", service, labels[service], label)
 		}
-	}
-	screen := nodesScreen(view)
-	if got := screen.rows[0].cells[3]; got != "2" {
-		t.Errorf("node processes cell = %q; want 2", got)
 	}
 }

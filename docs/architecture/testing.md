@@ -114,8 +114,9 @@ the dependency or the call that broke it.
 | `delegationRules` | packages matching `Packages` call each function in `Uses` | the TestCluster runs production rules |
 | `callRules` | only `Owners` call the functions in `Names` | only the rollout owner writes deployment intent |
 
-`TestPresentationReadsThroughInspection` in the same file keeps the console,
-TUI and CLI reading through `internal/inspect`.
+In the same file, `TestPresentationReadsThroughInspection` keeps the console,
+TUI and CLI reading through `internal/inspect`, and `TestTUIOwnsNoActionNames`
+keeps `internal/tui` reading actions from their metadata.
 
 A rule also fails when it stops matching anything, for example after a rename,
 so a rule cannot silently guard nothing. To add a boundary:

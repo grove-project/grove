@@ -103,8 +103,16 @@ func (p *Placement) Run(ctx context.Context, transport *Transport) error {
 	}
 }
 
+// placementReadAttemptTimeout bounds one RecordedPlacements attempt. Like a
+// PutIngress write (grove#42), a JetStream request sent while the placement
+// stream is being resized or re-electing its leader after a cluster restart
+// can be lost without a reply, so an attempt gives up and is retried instead
+// of waiting out the caller's whole deadline.
+const placementReadAttemptTimeout = 2 * time.Second
+
 // RecordedPlacements reads every placement record in the cluster's control
 // state. It never creates the placement bucket; a missing bucket has none.
+// An attempt that gets no reply is retried until ctx ends.
 func RecordedPlacements(ctx context.Context, transport *Transport) ([]PlacementRecord, error) {
 	js, err := jetstream.New(transport.connection)
 	if err != nil {
@@ -112,21 +120,32 @@ func RecordedPlacements(ctx context.Context, transport *Transport) ([]PlacementR
 	}
 	operationCtx, cancel := operationContext(ctx)
 	defer cancel()
-	kv, err := js.KeyValue(operationCtx, PlacementBucket)
+	for {
+		attemptCtx, cancelAttempt := context.WithTimeout(operationCtx, placementReadAttemptTimeout)
+		records, err := readPlacements(attemptCtx, js)
+		cancelAttempt()
+		if err == nil || operationCtx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) {
+			return records, err
+		}
+	}
+}
+
+func readPlacements(ctx context.Context, js jetstream.JetStream) ([]PlacementRecord, error) {
+	kv, err := js.KeyValue(ctx, PlacementBucket)
 	if errors.Is(err, jetstream.ErrBucketNotFound) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("open placement bucket: %w", err)
 	}
-	keys, err := kv.ListKeys(operationCtx)
+	keys, err := kv.ListKeys(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list placement records: %w", err)
 	}
 	defer keys.Stop()
 	var records []PlacementRecord
 	for key := range keys.Keys() {
-		entry, err := kv.Get(operationCtx, key)
+		entry, err := kv.Get(ctx, key)
 		if errors.Is(err, jetstream.ErrKeyNotFound) {
 			continue
 		}
@@ -138,6 +157,11 @@ func RecordedPlacements(ctx context.Context, transport *Transport) ([]PlacementR
 			return nil, err
 		}
 		records = append(records, record)
+	}
+	// The key lister closes its channel when ctx ends, which would otherwise
+	// read as a complete, possibly empty, list.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("list placement records: %w", err)
 	}
 	return records, nil
 }

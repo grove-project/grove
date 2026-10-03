@@ -7,108 +7,32 @@ import (
 	"strings"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/internal/consoleview"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
 const (
-	placementHealthy  = "healthy"
-	placementLost     = "lost"
-	placementStarting = "starting"
+	placementHealthy  = consoleview.PlacementHealthy
+	placementLost     = consoleview.PlacementLost
+	placementStarting = consoleview.PlacementStarting
 
 	handlerScalingAutomatic = "automatic"
 	handlerScalingExclusive = "exclusive"
 	handlerScalingService   = "service"
 )
 
-// applicationPlacementRow is one concrete placement of a handler on a node.
-type applicationPlacementRow struct {
-	ID     string `json:"id"`
-	NodeID string `json:"node_id"`
-	Status string `json:"status"`
-	Owner  bool   `json:"owner,omitempty"`
-	applicationExecution
-}
-
-// applicationExecution is the process a placement executes in. Placement says
-// which node runs a handler; execution says which process on that node does,
-// and several placements usually share the node's application runtime.
-type applicationExecution struct {
-	ExecutionMode string `json:"execution_mode,omitempty"`
-	ProcessID     string `json:"process_id,omitempty"`
-	PID           int    `json:"pid,omitempty"`
-}
-
-// label renders the execution process for tables, or "-" when unknown.
-func (e applicationExecution) label() string {
-	if e.ProcessID == "" {
-		return "-"
-	}
-	label := e.ProcessID
-	if e.PID != 0 {
-		label += fmt.Sprintf(" (pid %d)", e.PID)
-	}
-	if e.ExecutionMode == string(systemnats.ExecutionIsolatedProcess) {
-		label += " isolated"
-	}
-	return label
-}
-
-// applicationProcessRow is one execution process on a node and the services
-// it runs.
-type applicationProcessRow struct {
-	applicationExecution
-	Services []string `json:"services"`
-}
-
-// applicationHandlerRow is one registered handler and where it runs.
-type applicationHandlerRow struct {
-	Method     grove.MethodID            `json:"method"`
-	Name       string                    `json:"name"`
-	Scaling    string                    `json:"scaling"`
-	Capability string                    `json:"capability,omitempty"`
-	Epoch      uint64                    `json:"epoch,omitempty"`
-	Owner      string                    `json:"owner,omitempty"`
-	Transfer   bool                      `json:"transferring,omitempty"`
-	Placements []applicationPlacementRow `json:"placements"`
-}
-
-type applicationServiceRow struct {
-	ServiceID grove.ServiceID         `json:"service_id"`
-	Name      string                  `json:"name"`
-	Status    string                  `json:"status"`
-	Handlers  []applicationHandlerRow `json:"handlers"`
-}
-
-// applicationHostedRow is the inverse relation: a placement hosted by a node.
-type applicationHostedRow struct {
-	Service string `json:"service"`
-	Handler string `json:"handler"`
-	Scaling string `json:"scaling"`
-	Status  string `json:"status"`
-	Owner   bool   `json:"owner,omitempty"`
-	applicationExecution
-}
-
-type applicationNodeRow struct {
-	NodeID    string                  `json:"node_id"`
-	Health    string                  `json:"health"`
-	Hosted    []applicationHostedRow  `json:"hosted"`
-	Processes []applicationProcessRow `json:"processes"`
-}
-
-type applicationServicesView struct {
-	Services []applicationServiceRow `json:"services"`
-	Nodes    []applicationNodeRow    `json:"nodes"`
-	Error    string                  `json:"error,omitempty"`
-}
-
-func (s applicationServiceRow) placementCount() int {
-	count := 0
-	for _, handler := range s.Handlers {
-		count += len(handler.Placements)
-	}
-	return count
-}
+// The services view's rows are console view models (internal/consoleview),
+// which interactive frontends render.
+type (
+	applicationPlacementRow = consoleview.Placement
+	applicationExecution    = consoleview.Execution
+	applicationProcessRow   = consoleview.Process
+	applicationHandlerRow   = consoleview.Handler
+	applicationServiceRow   = consoleview.Service
+	applicationHostedRow    = consoleview.Hosted
+	applicationNodeRow      = consoleview.Node
+	applicationServicesView = consoleview.Services
+)
 
 type handlerKey struct {
 	service grove.ServiceID
@@ -221,7 +145,8 @@ func buildServicesView(handlers systemnats.HandlerPlacementView, status ClusterS
 		add := func(nodeID, state string) {
 			seen[nodeID] = true
 			row.Placements = append(row.Placements, applicationPlacementRow{
-				NodeID: nodeID, Status: state, applicationExecution: executions[nodeService{nodeID, key.service}],
+				NodeID: nodeID, Status: state, Execution: executions[nodeService{nodeID, key.service}],
+				Debug: debugPlacement(service.Name, nodeID),
 			})
 		}
 		for _, nodeID := range placed {
@@ -272,7 +197,8 @@ func buildServicesView(handlers systemnats.HandlerPlacementView, status ClusterS
 			Name: "(whole service)", Scaling: handlerScalingService,
 			Placements: []applicationPlacementRow{{
 				ID: strings.ToLower(service.Name) + "/1", NodeID: placement.NodeID, Status: state,
-				applicationExecution: executions[nodeService{placement.NodeID, placement.ServiceID}],
+				Execution: executions[nodeService{placement.NodeID, placement.ServiceID}],
+				Debug:     debugPlacement(service.Name, placement.NodeID),
 			}},
 		}}
 	}
@@ -306,7 +232,7 @@ func buildServicesView(handlers systemnats.HandlerPlacementView, status ClusterS
 				index = len(row.Processes)
 				byProcess[component.ProcessID] = index
 				row.Processes = append(row.Processes, applicationProcessRow{
-					applicationExecution: executions[nodeService{node.NodeID, component.ServiceID}],
+					Execution: executions[nodeService{node.NodeID, component.ServiceID}],
 				})
 			}
 			row.Processes[index].Services = append(row.Processes[index].Services, component.Name)
@@ -319,7 +245,7 @@ func buildServicesView(handlers systemnats.HandlerPlacementView, status ClusterS
 				node.Hosted = append(node.Hosted, applicationHostedRow{
 					Service: service.Name, Handler: handler.Name, Scaling: handler.Scaling,
 					Status: placement.Status, Owner: placement.Owner,
-					applicationExecution: placement.applicationExecution,
+					Execution: placement.Execution,
 				})
 			}
 		}
@@ -329,6 +255,11 @@ func buildServicesView(handlers systemnats.HandlerPlacementView, status ClusterS
 	}
 	sort.Slice(view.Nodes, func(i, j int) bool { return view.Nodes[i].NodeID < view.Nodes[j].NodeID })
 	return view
+}
+
+// debugPlacement attaches a debugger to service's placement on nodeID.
+func debugPlacement(service, nodeID string) consoleview.Invocation {
+	return consoleview.Invocation{Name: "debug.attach", Args: []string{service, "--node", nodeID}}
 }
 
 // serviceStatus summarizes handler placement health: recovering while any

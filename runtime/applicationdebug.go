@@ -24,6 +24,11 @@ type debugDemoActionResult struct {
 	Status ClusterStatus `json:"status"`
 }
 
+// Summary describes the debug demo for interactive frontends.
+func (r debugDemoActionResult) Summary() string {
+	return fmt.Sprintf("Debug demo: %s\nWeb UI: %s", r.State, r.WebURL)
+}
+
 // startDebugDemo builds a debug-capable artifact, starts the application's
 // fixed debug topology with Delve and activates the artifact.
 func (d *applicationDemo) startDebugDemo(ctx context.Context, configPath string) (debugDemoActionResult, error) {

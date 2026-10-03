@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -49,6 +50,9 @@ type Model struct {
 	// entered the normal application TUI. Supported values are cluster.start
 	// and cluster.join.
 	StartupAction string
+	// StartupDiscovered reports that the startup action joins a discovered
+	// cluster rather than starting a new one.
+	StartupDiscovered bool
 	// StartupCluster is the discovered embedded cluster identity.
 	StartupCluster string
 	// StartupBuild is the short immutable build identity shown at startup.
@@ -57,6 +61,9 @@ type Model struct {
 	StartupNodes int
 	// StartupStatus is the discovered cluster health shown before joining.
 	StartupStatus string
+	// Actions names the actions an interactive frontend offers now, as the
+	// runtime decides. Nil offers every visible action.
+	Actions []string
 }
 
 // DebugSession identifies one active local DAP tunnel and its remote worker.
@@ -70,10 +77,15 @@ type DebugSession struct {
 // ModelReader returns the latest application-first console model.
 type ModelReader func(context.Context) (Model, error)
 
+// Resolver turns a typed command line into an action name and its
+// arguments. It reports false for a line that names no action.
+type Resolver func(line string) (name string, args []string, ok bool)
+
 // TUI renders application state and dispatches selections through one Registry.
 type TUI struct {
 	registry  *Registry
 	readModel ModelReader
+	resolve   Resolver
 }
 
 // NewTUI creates a TUI over the action registry and authoritative model reader
@@ -197,6 +209,39 @@ func (t *TUI) Actions() []Action {
 		}
 	}
 	return visible
+}
+
+// Offered returns the visible actions model offers now, in Actions order.
+func (t *TUI) Offered(model Model) []Action {
+	visible := t.Actions()
+	if model.Actions == nil {
+		return visible
+	}
+	offered := make([]Action, 0, len(model.Actions))
+	for _, action := range visible {
+		if slices.Contains(model.Actions, action.Name) {
+			offered = append(offered, action)
+		}
+	}
+	return offered
+}
+
+// SetResolver sets how typed command lines name actions. Without one, the
+// first word of a line is the action name and the rest are its arguments.
+func (t *TUI) SetResolver(resolve Resolver) {
+	t.resolve = resolve
+}
+
+// Resolve turns a typed command line into an action name and arguments.
+func (t *TUI) Resolve(line string) (string, []string, bool) {
+	if t.resolve != nil {
+		return t.resolve(line)
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return "", nil, false
+	}
+	return fields[0], fields[1:], true
 }
 
 // ReadModel returns the latest application state for interactive frontends.

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -50,6 +52,8 @@ type applicationController struct {
 	lastEvent      string
 	debugSessions  map[string]console.DebugSession
 	startedAt      time.Time
+	// actions is the console's action registry, which gating offers from.
+	actions *console.Registry
 }
 
 // applicationCluster is the cluster the console is attached to.
@@ -88,35 +92,42 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 			Name: "app.overview", Label: "Overview", Section: "App",
 			Description: "Show application identity, runtime, and deployment.",
 			Handler:     controller.appOverview,
+			View:        console.ViewApp, Key: 'o', KeyHint: "App",
 		},
 		{
 			Name: "app.config", Label: "Configuration", Section: "App",
 			Description: "Inspect the active embedded configuration (read-only).",
 			Handler:     controller.appConfig,
+			View:        console.ViewApp,
 		},
 		{
 			Name: "app.ingress", Label: "Ingress", Section: "App",
 			Description: "Inspect registered ingress routes.",
 			Handler:     controller.appIngress,
+			View:        console.ViewApp,
 		},
 		{
 			Name: "app.version", Label: "Version / Build", Section: "App",
 			Description: "Show build identity and version distribution across nodes.",
 			Handler:     controller.appVersion,
+			View:        console.ViewApp,
 		},
 		{
 			Name: "services.view", Label: "Services", Section: "Services",
 			Description: "Drill from services to handlers to concrete placements.",
 			Handler:     controller.appServices,
+			View:        console.ViewServices, Key: 'p', KeyHint: "Services",
 		},
 		{
 			Name: "cluster.nodes", Label: "Nodes", Section: "Cluster",
 			Description: "Show which handler placements each node hosts.",
 			Handler:     controller.appServices,
+			View:        console.ViewNodes, Key: 'n', KeyHint: "Nodes",
 		},
 		{
 			Name: "cluster.status", Label: "Status", Section: "Cluster",
 			Description: "Read current application cluster and rollout state.",
+			Key:         's', KeyHint: "Status",
 			Handler: func(ctx context.Context, args []string) (any, error) {
 				if len(args) != 0 {
 					return nil, errConsoleArguments
@@ -128,6 +139,7 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 			Name: "rollout.start", Label: "New rollout", Section: "Cluster", Hidden: true,
 			Description: "Build and roll out an immutable configured application artifact.",
 			Handler:     controller.startRollout,
+			Inputs:      []console.Input{{Label: "Config path", Flag: "--config", Initial: "configs/acme.yaml"}},
 		},
 		{
 			Name: "debug.demo.start", Label: "Debug demo > Start", Section: "Debug", Hidden: true,
@@ -148,11 +160,14 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 			Name: "logs.view", Label: "View logs", Section: "Logs",
 			Description: "Explain health using application, cluster, and System NATS diagnostics.",
 			Handler:     controller.logs,
+			View:        console.ViewLogs, Key: 'l', KeyHint: "Logs",
 		},
 		{
 			Name: "debug.attach", Label: "Attach debugger", Section: "Debug",
 			Description: "Resolve an application service and expose its Delve DAP session locally.",
 			Handler:     controller.attachDebugger,
+			Key:         'a',
+			Inputs:      []console.Input{{Label: "Arguments", Initial: "orders --listen 127.0.0.1:40000", Fields: true}},
 		},
 	}
 	if controller.applicationStartAvailable() {
@@ -160,6 +175,14 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 			Name: "cluster.start", Label: "Start new cluster", Section: "Cluster",
 			Description: "Start a new application cluster with this process hosting its first nodes (at least three).",
 			Handler:     controller.startDiscoveredApplicationCluster,
+			Inputs: []console.Input{
+				{
+					Label:   "Nodes to start (min " + strconv.Itoa(systemnats.MinClusterNodes) + ")",
+					Flag:    "--nodes",
+					Initial: strconv.Itoa(systemnats.MinClusterNodes),
+				},
+				{Label: "Ingress address", Flag: "--ingress", InitialFunc: defaultIngressAddress},
+			},
 		})
 	}
 	if controller.applicationJoinAvailable() {
@@ -167,6 +190,7 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 			Name: "cluster.join", Label: "Join cluster", Section: "Cluster",
 			Description: "Add one or more nodes hosted by this process to the discovered application cluster.",
 			Handler:     controller.joinApplicationCluster,
+			Inputs:      []console.Input{{Label: "Nodes to add", Flag: "--nodes", Initial: "1"}},
 		})
 	}
 	for _, action := range actions {
@@ -179,7 +203,36 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 			return fmt.Errorf("register %s actions: %w", activeApplication.Name, err)
 		}
 	}
+	controller.mu.Lock()
+	controller.actions = registry
+	controller.mu.Unlock()
 	return nil
+}
+
+// startupActions start or join a cluster. They are offered only before this
+// process enters one.
+var startupActions = []string{"cluster.start", "cluster.join"}
+
+// offeredActions is the console's gating rule: before this process enters a
+// cluster, only its startup action; afterwards every visible action except
+// the startup actions.
+func offeredActions(registered []console.Action, startupAction string) []string {
+	offered := []string{}
+	for _, action := range registered {
+		if action.Hidden {
+			continue
+		}
+		if startupAction != "" {
+			if action.Name == startupAction {
+				offered = append(offered, action.Name)
+			}
+			continue
+		}
+		if !slices.Contains(startupActions, action.Name) {
+			offered = append(offered, action.Name)
+		}
+	}
+	return offered
 }
 
 // startRollout runs the scripted rollout demo: the first rollout deploys a
@@ -377,6 +430,7 @@ func (c *applicationController) readModel(ctx context.Context) (console.Model, e
 	}
 	if c.joinAvailable {
 		model.StartupAction = "cluster.join"
+		model.StartupDiscovered = true
 		model.StartupNodes = c.startupNodes
 		model.StartupStatus = "Healthy"
 	}
@@ -384,6 +438,9 @@ func (c *applicationController) readModel(ctx context.Context) (console.Model, e
 		model.Application = activeApplication.Name
 		model.StartupCluster = c.startup.Config.Facts["cluster.name"]
 		model.StartupBuild = shortApplicationBuild(c.startup.ArtifactDigest)
+	}
+	if c.actions != nil {
+		model.Actions = offeredActions(c.actions.Actions(), model.StartupAction)
 	}
 	c.mu.RUnlock()
 	return model, nil

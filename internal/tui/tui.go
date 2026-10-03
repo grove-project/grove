@@ -1,18 +1,27 @@
-package runtime
+// Package tui is the operator console's interactive terminal frontend. It
+// renders the console model and action results, turns keys and forms into
+// action invocations, and owns no runtime rules: which actions are offered,
+// their inputs, keys and screens, and how results summarize themselves all
+// come from the console registry and model the runtime provides.
+//
+// The dependency direction is guarded by the module's boundary_test.go: tui
+// builds on console and consoleview only, never on the runtime or the
+// control plane.
+package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/derailed/tcell/v2"
 	"github.com/derailed/tview"
 	"github.com/grove-project/grove/console"
-	"github.com/grove-project/grove/internal/systemnats"
+	"github.com/grove-project/grove/internal/consoleview"
 )
 
 const (
@@ -28,6 +37,7 @@ type applicationTUI struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	tui    *console.TUI
+	name   string
 
 	app    *tview.Application
 	pages  *tview.Pages
@@ -53,6 +63,7 @@ type applicationTUI struct {
 	openURL        func(string) error
 	logsView       *tview.TextView
 	logsOpen       bool
+	logsAction     string
 	logsCancel     context.CancelFunc
 	appView        *tview.TextView
 	appOpen        bool
@@ -62,12 +73,15 @@ type applicationTUI struct {
 	servicesTable    *tview.Table
 	servicesHint     *tview.TextView
 	servicesOpen     bool
+	servicesAction   string
 	servicesCancel   context.CancelFunc
-	servicesData     applicationServicesView
+	servicesData     consoleview.Services
 	servicesLocation servicesLocation
 }
 
-func runInteractiveApplicationTUI(ctx context.Context, tui *console.TUI) error {
+// Run runs the interactive console over tui until the operator quits or ctx
+// ends.
+func Run(ctx context.Context, tui *console.TUI) error {
 	view, err := newApplicationTUI(ctx, tui)
 	if err != nil {
 		return err
@@ -95,15 +109,16 @@ func newApplicationTUI(parent context.Context, tui *console.TUI) (*applicationTU
 	view.queueDraw = func(update func()) { view.app.QueueUpdateDraw(update) }
 	if len(view.allActions) == 0 {
 		cancel()
-		return nil, fmt.Errorf("%s TUI has no actions", activeApplication.Name)
+		return nil, fmt.Errorf("console TUI has no actions")
 	}
-	view.configure()
 	model, err := tui.ReadModel(ctx)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("read initial %s TUI model: %w", activeApplication.Name, err)
+		return nil, fmt.Errorf("read initial console TUI model: %w", err)
 	}
-	view.actions = actionsForApplicationModel(view.allActions, model)
+	view.name = model.Application
+	view.configure()
+	view.actions = tui.Offered(model)
 	view.updateModel(model)
 	view.rebuildActions("")
 	return view, nil
@@ -113,7 +128,7 @@ func (v *applicationTUI) configure() {
 	v.header.SetDynamicColors(true)
 	v.header.SetRegions(true)
 	v.header.SetBorder(true)
-	v.header.SetTitle(" [::b]" + activeApplication.Name + "[-:-:-] ")
+	v.header.SetTitle(" [::b]" + tview.Escape(v.name) + "[-:-:-] ")
 	v.header.SetBorderColor(tcell.ColorDarkCyan)
 	v.header.SetBackgroundColor(tcell.ColorDefault)
 	v.header.SetMouseCapture(v.captureHeaderMouse)
@@ -149,7 +164,7 @@ func (v *applicationTUI) configure() {
 	v.hints.SetDynamicColors(true)
 	v.hints.SetTextAlign(tview.AlignCenter)
 	v.hints.SetBackgroundColor(tcell.ColorDefault)
-	v.hints.SetText(k9sHintLine())
+	v.hints.SetText(v.hintLine())
 
 	v.root = tview.NewFlex().SetDirection(tview.FlexRow)
 	v.root.SetBackgroundColor(tcell.ColorDefault)
@@ -173,7 +188,7 @@ func (v *applicationTUI) run() error {
 		v.app.Stop()
 	}()
 	if err := v.app.Run(); err != nil {
-		return fmt.Errorf("run %s TUI: %w", activeApplication.Name, err)
+		return fmt.Errorf("run %s TUI: %w", v.name, err)
 	}
 	return nil
 }
@@ -228,7 +243,7 @@ func (v *applicationTUI) refreshModel(model console.Model) {
 
 func (v *applicationTUI) updateModel(model console.Model) {
 	if model.StartupAction != "" {
-		if model.StartupAction == "cluster.start" {
+		if !model.StartupDiscovered {
 			v.header.SetText(fmt.Sprintf(
 				"[::b]No %s cluster discovered[-:-:-]\n\n[::b]Application[-:-:-] %s   [::b]Build[-:-:-] %s",
 				tview.Escape(model.Application),
@@ -249,7 +264,7 @@ func (v *applicationTUI) updateModel(model console.Model) {
 		v.root.ResizeItem(v.header, 7, 0)
 		return
 	}
-	v.hints.SetText(k9sHintLine())
+	v.hints.SetText(v.hintLine())
 	healthColor := "green"
 	if model.Health == "degraded" || model.Health == "failed" {
 		healthColor = "orangered"
@@ -302,26 +317,8 @@ func (v *applicationTUI) updateModel(model console.Model) {
 	}
 }
 
-func actionsForApplicationModel(actions []console.Action, model console.Model) []console.Action {
-	if model.StartupAction == "" {
-		normal := make([]console.Action, 0, len(actions))
-		for _, action := range actions {
-			if action.Name != "cluster.start" && action.Name != "cluster.join" {
-				normal = append(normal, action)
-			}
-		}
-		return normal
-	}
-	for _, action := range actions {
-		if action.Name == model.StartupAction {
-			return []console.Action{action}
-		}
-	}
-	return []console.Action{}
-}
-
 func (v *applicationTUI) setActionsForModel(model console.Model) bool {
-	next := actionsForApplicationModel(v.allActions, model)
+	next := v.tui.Offered(model)
 	if len(next) == len(v.actions) {
 		same := true
 		for index := range next {
@@ -401,7 +398,7 @@ func (v *applicationTUI) rebuildActions(filter string) {
 	selectedRow := 1
 	for index, action := range v.visibleActions {
 		row := index + 1
-		values := []string{action.Section, action.Label, hotkeyLabel(action.Name), action.Description}
+		values := []string{action.Section, action.Label, keyLabel(action.Key), action.Description}
 		for column, value := range values {
 			cell := tview.NewTableCell(value)
 			cell.SetTextColor(tcell.ColorWhite)
@@ -488,8 +485,8 @@ func (v *applicationTUI) keyboard(event *tcell.EventKey) *tcell.EventKey {
 	case '?':
 		v.showHelp()
 	default:
-		if actionName, ok := actionForHotkey(event.Rune()); ok {
-			v.activateActionName(actionName, nil)
+		if action, ok := v.actionForKey(event.Rune()); ok {
+			v.activateActionName(action.Name, nil)
 			return nil
 		}
 		return event
@@ -546,51 +543,23 @@ func (v *applicationTUI) activateAction(action console.Action, args []string) {
 		v.setFlash(tcell.ColorOrange, "An operation is already running")
 		return
 	}
-	if action.Name == "logs.view" {
-		v.showLogs()
+	switch action.View {
+	case console.ViewLogs:
+		v.showLogs(action.Name)
+		return
+	case console.ViewServices:
+		v.showServices(action.Name, false)
+		return
+	case console.ViewNodes:
+		v.showServices(action.Name, true)
+		return
+	case console.ViewApp:
+		v.showApp(action.Name)
 		return
 	}
-	switch action.Name {
-	case "services.view":
-		v.showServices(false)
+	if len(args) == 0 && len(action.Inputs) != 0 {
+		v.showFormDialog(action)
 		return
-	case "cluster.nodes":
-		v.showServices(true)
-		return
-	}
-	if mode, ok := appModes[action.Name]; ok {
-		v.showApp(mode)
-		return
-	}
-	if len(args) == 0 {
-		switch action.Name {
-		case "rollout.start":
-			v.showArgumentDialog(action, "New rollout", "Config path", "configs/acme.yaml", func(value string) []string {
-				return []string{"--config", strings.TrimSpace(value)}
-			})
-			return
-		case "cluster.start":
-			address, err := defaultIngressAddress()
-			if err != nil {
-				v.setFlash(tcell.ColorOrangeRed, err.Error())
-				return
-			}
-			v.showFormDialog(action, "Start new cluster", []dialogField{
-				{label: "Nodes to start (min " + strconv.Itoa(systemnats.MinClusterNodes) + ")", initial: strconv.Itoa(systemnats.MinClusterNodes)},
-				{label: "Ingress address", initial: address},
-			}, func(values []string) []string {
-				return []string{"--nodes", values[0], "--ingress", values[1]}
-			})
-			return
-		case "cluster.join":
-			v.showArgumentDialog(action, "Join cluster", "Nodes to add", "1", func(value string) []string {
-				return []string{"--nodes", value}
-			})
-			return
-		case "debug.attach":
-			v.showArgumentDialog(action, "Attach debugger", "Arguments", "orders --listen 127.0.0.1:40000", strings.Fields)
-			return
-		}
 	}
 	v.startAction(action, args)
 }
@@ -604,12 +573,12 @@ func (v *applicationTUI) startAction(action console.Action, args []string) {
 	go func() {
 		result, err := v.tui.Select(v.ctx, action.Name, args)
 		if err == nil {
-			if session, ok := result.(consoleActionSession); ok {
+			if session, ok := result.(console.Session); ok {
 				initial := session.InitialResult()
 				v.queueUpdate(func() {
 					v.busy = false
 					v.busyAction = ""
-					v.setFlash(tcell.ColorGreen, strings.ReplaceAll(summarizeInteractiveResult(initial), "\n", " · "))
+					v.setFlash(tcell.ColorGreen, strings.ReplaceAll(summarize(initial), "\n", " · "))
 				})
 				err = session.Wait(v.ctx)
 				if err != nil {
@@ -630,7 +599,7 @@ func (v *applicationTUI) startAction(action console.Action, args []string) {
 			message = "Error: " + err.Error()
 			color = tcell.ColorOrangeRed
 		} else {
-			message = summarizeInteractiveResult(result)
+			message = summarize(result)
 		}
 		v.queueUpdate(func() {
 			v.busy = false
@@ -681,7 +650,7 @@ func (v *applicationTUI) promptDone(key tcell.Key) {
 	if mode == "filter" || value == "" {
 		return
 	}
-	action, args, ok := resolveTUISelection(value)
+	action, args, ok := v.tui.Resolve(value)
 	if !ok {
 		return
 	}
@@ -692,51 +661,36 @@ func (v *applicationTUI) promptDone(key tcell.Key) {
 	v.activateActionName(action, args)
 }
 
-func (v *applicationTUI) showArgumentDialog(
-	action console.Action,
-	title, label, initial string,
-	arguments func(string) []string,
-) {
-	v.showFormDialog(action, title, []dialogField{{label: label, initial: initial}}, func(values []string) []string {
-		return arguments(values[0])
-	})
-}
-
-// dialogField is one required input of an action dialog.
-type dialogField struct {
-	label   string
-	initial string
-}
-
-// showFormDialog asks for every field before running action. Enter moves to
-// the next field and runs the action from the last one.
-func (v *applicationTUI) showFormDialog(
-	action console.Action,
-	title string,
-	fields []dialogField,
-	arguments func([]string) []string,
-) {
+// showFormDialog asks for every input of action before running it. Enter
+// moves to the next input and runs the action from the last one.
+func (v *applicationTUI) showFormDialog(action console.Action) {
+	fields := action.Inputs
 	form := tview.NewForm()
 	inputs := make([]*tview.InputField, len(fields))
 	for i, field := range fields {
-		inputs[i] = tview.NewInputField().SetLabel(field.label + ": ").SetText(field.initial)
+		initial, err := field.Default()
+		if err != nil {
+			v.setFlash(tcell.ColorOrangeRed, err.Error())
+			return
+		}
+		inputs[i] = tview.NewInputField().SetLabel(field.Label + ": ").SetText(initial)
 		form.AddFormItem(inputs[i])
 	}
 	form.SetButtonsAlign(tview.AlignCenter)
 	form.SetBorder(true)
-	form.SetTitle(" [::b]" + title + "[-:-:-] ")
+	form.SetTitle(" [::b]" + tview.Escape(action.Label) + "[-:-:-] ")
 	form.SetBorderColor(tcell.ColorAqua)
 	submit := func() {
 		values := make([]string, len(inputs))
 		for i, input := range inputs {
 			values[i] = strings.TrimSpace(input.GetText())
 			if values[i] == "" {
-				v.setFlash(tcell.ColorOrangeRed, fields[i].label+" is required")
+				v.setFlash(tcell.ColorOrangeRed, fields[i].Label+" is required")
 				return
 			}
 		}
 		v.closeDialog()
-		v.startAction(action, arguments(values))
+		v.startAction(action, console.Args(fields, values))
 	}
 	form.AddButton("Run", submit)
 	form.AddButton("Cancel", v.closeDialog)
@@ -767,7 +721,7 @@ func (v *applicationTUI) showFormDialog(
 func (v *applicationTUI) showHelp() {
 	modal := tview.NewModal()
 	modal.SetText(strings.Join([]string{
-		activeApplication.Name + " navigation",
+		v.name + " navigation",
 		"",
 		"↑/↓ or j/k   Move selection",
 		"Enter/→      Run selected action",
@@ -791,10 +745,11 @@ func (v *applicationTUI) showHelp() {
 	v.app.SetFocus(modal)
 }
 
-func (v *applicationTUI) showLogs() {
+func (v *applicationTUI) showLogs(action string) {
 	if v.logsOpen {
 		return
 	}
+	v.logsAction = action
 	logsCtx, cancel := context.WithCancel(v.ctx)
 	view := tview.NewTextView()
 	view.SetDynamicColors(true)
@@ -839,12 +794,12 @@ func (v *applicationTUI) watchLogs(ctx context.Context) {
 
 func (v *applicationTUI) refreshLogs(ctx context.Context) {
 	attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	result, err := v.tui.Select(attemptCtx, "logs.view", nil)
+	result, err := v.tui.Select(attemptCtx, v.logsAction, nil)
 	cancel()
 	text := ""
 	if err != nil {
 		text = "[orangered::b]Unable to read logs[-:-:-]\n" + tview.Escape(err.Error())
-	} else if logs, ok := result.(applicationLogsView); ok {
+	} else if logs, ok := result.(consoleview.Logs); ok {
 		text = renderApplicationLogs(logs)
 	} else {
 		text = "[orangered::b]Logs action returned an unexpected result[-:-:-]"
@@ -870,7 +825,7 @@ func (v *applicationTUI) closeLogs() {
 	v.app.SetFocus(v.table)
 }
 
-func renderApplicationLogs(logs applicationLogsView) string {
+func renderApplicationLogs(logs consoleview.Logs) string {
 	var output strings.Builder
 	healthColor := "green"
 	if logs.Health != "healthy" {
@@ -920,12 +875,38 @@ func writeApplicationLogSection(output *strings.Builder, title string, lines []s
 	}
 }
 
-// appModes maps generic App actions to the screen each one opens.
-var appModes = map[string]string{
-	"app.overview": "overview",
-	"app.config":   "config",
-	"app.ingress":  "ingress",
-	"app.version":  "version",
+// appViews returns the App screens in footer order: the home screen, the App
+// view with a Key, first, then the others in registry order.
+func (v *applicationTUI) appViews() []console.Action {
+	var home, others []console.Action
+	for _, action := range v.allActions {
+		if action.View != console.ViewApp {
+			continue
+		}
+		if action.Key != 0 && len(home) == 0 {
+			home = append(home, action)
+		} else {
+			others = append(others, action)
+		}
+	}
+	return append(home, others...)
+}
+
+// appHome is the App screen Esc returns to.
+func (v *applicationTUI) appHome() string {
+	if views := v.appViews(); len(views) != 0 {
+		return views[0].Name
+	}
+	return ""
+}
+
+// appKey is the key that opens an App screen from within the App screens:
+// the first letter of its label.
+func appKey(action console.Action) rune {
+	for _, letter := range strings.ToLower(action.Label) {
+		return letter
+	}
+	return 0
 }
 
 func (v *applicationTUI) showApp(mode string) {
@@ -947,35 +928,41 @@ func (v *applicationTUI) showApp(mode string) {
 		v.app.SetFocus(view)
 		go v.watchApp(appCtx)
 	}
-	v.appView.SetTitle(" [::b]App · " + tview.Escape(appTitle(mode)) + "[-:-:-] ")
+	v.appView.SetTitle(" [::b]App · " + tview.Escape(v.appTitle(mode)) + "[-:-:-] ")
 	v.appView.SetText("[aqua::b]Loading…[-:-:-]")
 	go v.refreshApp(v.ctx, mode)
 }
 
-func appTitle(mode string) string {
-	switch mode {
-	case "config":
-		return "Configuration"
-	case "ingress":
-		return "Ingress"
-	case "version":
-		return "Version / Build"
+// appTitle names an App screen: the application on the home screen, else the
+// screen's label.
+func (v *applicationTUI) appTitle(mode string) string {
+	if mode == v.appHome() {
+		return v.name
 	}
-	return activeApplication.Name
+	for _, action := range v.appViews() {
+		if action.Name == mode {
+			return action.Label
+		}
+	}
+	return mode
 }
 
-func appFooter(mode string) string {
-	keys := "[aqua::b]<c>[-:-:-] Configuration  [aqua::b]<i>[-:-:-] Ingress  [aqua::b]<v>[-:-:-] Version  "
-	if mode != "overview" {
-		keys = "[aqua::b]<o>[-:-:-] Overview  " + keys
+func (v *applicationTUI) appFooter(mode string) string {
+	var keys strings.Builder
+	home := v.appHome()
+	for _, action := range v.appViews() {
+		if action.Name == home && mode == home {
+			continue
+		}
+		fmt.Fprintf(&keys, "[aqua::b]<%c>[-:-:-] %s  ", appKey(action), tview.Escape(action.Label))
 	}
-	return "\n" + keys + "[aqua::b]<esc>[-:-:-] Back"
+	return "\n" + keys.String() + "[aqua::b]<esc>[-:-:-] Back"
 }
 
 func (v *applicationTUI) appKeyboard(event *tcell.EventKey) *tcell.EventKey {
 	if event.Key() == tcell.KeyEscape {
-		if v.appMode != "overview" {
-			v.showApp("overview")
+		if home := v.appHome(); v.appMode != home {
+			v.showApp(home)
 		} else {
 			v.closeApp()
 		}
@@ -984,21 +971,17 @@ func (v *applicationTUI) appKeyboard(event *tcell.EventKey) *tcell.EventKey {
 	if event.Key() != tcell.KeyRune {
 		return event
 	}
-	switch event.Rune() {
-	case 'q':
+	if event.Rune() == 'q' {
 		v.closeApp()
-	case 'o':
-		v.showApp("overview")
-	case 'c':
-		v.showApp("config")
-	case 'i':
-		v.showApp("ingress")
-	case 'v':
-		v.showApp("version")
-	default:
-		return event
+		return nil
 	}
-	return nil
+	for _, action := range v.appViews() {
+		if appKey(action) == event.Rune() {
+			v.showApp(action.Name)
+			return nil
+		}
+	}
+	return event
 }
 
 func (v *applicationTUI) watchApp(ctx context.Context) {
@@ -1021,8 +1004,7 @@ func (v *applicationTUI) watchApp(ctx context.Context) {
 func (v *applicationTUI) refreshApp(ctx context.Context, mode string) {
 	attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	name := "app." + mode
-	result, err := v.tui.Select(attemptCtx, name, nil)
+	result, err := v.tui.Select(attemptCtx, mode, nil)
 	text := ""
 	if err != nil {
 		text = "[orangered::b]Unable to read app information[-:-:-]\n" + tview.Escape(err.Error())
@@ -1034,20 +1016,20 @@ func (v *applicationTUI) refreshApp(ctx context.Context, mode string) {
 			return
 		}
 		row, column := v.appView.GetScrollOffset()
-		v.appView.SetText(text + appFooter(mode))
+		v.appView.SetText(text + v.appFooter(mode))
 		v.appView.ScrollTo(row, column)
 	})
 }
 
 func renderApplicationView(result any, now time.Time) string {
 	switch view := result.(type) {
-	case applicationOverviewView:
+	case consoleview.Overview:
 		return renderApplicationOverview(view, now)
-	case applicationConfigView:
+	case consoleview.Config:
 		return renderApplicationConfig(view)
-	case applicationIngressView:
+	case consoleview.Ingress:
 		return renderApplicationIngress(view)
-	case applicationVersionView:
+	case consoleview.Version:
 		return renderApplicationVersion(view)
 	}
 	return "[orangered::b]App action returned an unexpected result[-:-:-]"
@@ -1100,37 +1082,46 @@ func centeredPrimitive(primitive tview.Primitive, width, height int) tview.Primi
 	return columns
 }
 
-func hotkeyLabel(action string) string {
-	for key, name := range map[rune]string{
-		's': "cluster.status",
-		'a': "debug.attach",
-		'l': "logs.view",
-		'o': "app.overview",
-		'p': "services.view",
-		'n': "cluster.nodes",
-	} {
-		if action == name {
-			return string(key)
+func keyLabel(key rune) string {
+	if key == 0 {
+		return ""
+	}
+	return string(key)
+}
+
+// actionForKey returns the visible action whose shortcut is key.
+func (v *applicationTUI) actionForKey(key rune) (console.Action, bool) {
+	for _, action := range v.allActions {
+		if action.Key == key {
+			return action, true
 		}
 	}
-	return ""
+	return console.Action{}, false
 }
 
-func actionForHotkey(key rune) (string, bool) {
-	action, ok := map[rune]string{
-		's': "cluster.status",
-		'a': "debug.attach",
-		'l': "logs.view",
-		'o': "app.overview",
-		'p': "services.view",
-		'n': "cluster.nodes",
-	}[key]
-	return action, ok
-}
-
-func k9sHintLine() string {
-	return "[aqua::b]<enter>[-:-:-] Run  [aqua::b]<s>[-:-:-] Status  [aqua::b]<l>[-:-:-] Logs  [aqua::b]<o>[-:-:-] App  " +
-		"[aqua::b]<p>[-:-:-] Services  [aqua::b]<n>[-:-:-] Nodes\n" +
+// hintLine advertises the shortcuts of actions that name a KeyHint.
+func (v *applicationTUI) hintLine() string {
+	var keys strings.Builder
+	keys.WriteString("[aqua::b]<enter>[-:-:-] Run")
+	for _, action := range v.allActions {
+		if action.Key != 0 && action.KeyHint != "" {
+			fmt.Fprintf(&keys, "  [aqua::b]<%c>[-:-:-] %s", action.Key, tview.Escape(action.KeyHint))
+		}
+	}
+	return keys.String() + "\n" +
 		"[aqua::b]<:>[-:-:-] Command  [aqua::b]</>[-:-:-] Filter  [aqua::b]<?>[-:-:-] Help  " +
 		"[aqua::b]<esc>[-:-:-] Back  [aqua::b]<q>[-:-:-] Quit"
+}
+
+// summarize renders an action result for the flash line: its own Summary
+// when it has one, else its JSON.
+func summarize(result any) string {
+	if summarizer, ok := result.(console.Summarizer); ok {
+		return summarizer.Summary()
+	}
+	encoded, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return fmt.Sprintf("%v", result)
+	}
+	return string(encoded)
 }

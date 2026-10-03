@@ -46,6 +46,89 @@ type Action struct {
 	// navigation while it remains invokable by name through Registry.Invoke
 	// and structured automation.
 	Hidden bool
+	// Key is an optional single-key shortcut in interactive frontends.
+	Key rune
+	// KeyHint, when set, advertises Key under this short name in a
+	// frontend's key hints. A Key without one works but is not advertised.
+	KeyHint string
+	// Inputs are the arguments an interactive frontend asks for when the
+	// action is selected without arguments.
+	Inputs []Input
+	// View says how an interactive frontend presents the action's result.
+	View View
+}
+
+// View says how an interactive frontend presents an action's result.
+type View string
+
+const (
+	// ViewResult runs the action once and summarizes its result.
+	ViewResult View = ""
+	// ViewLogs opens a live diagnostics screen that re-runs the action.
+	ViewLogs View = "logs"
+	// ViewServices opens a live services drill-down that re-runs the action.
+	ViewServices View = "services"
+	// ViewNodes opens the same drill-down starting at the cluster's nodes.
+	ViewNodes View = "nodes"
+	// ViewApp opens one of the live application information screens. Within
+	// them, each App view is reached by the first letter of its label; the
+	// App view with a Key is their home screen.
+	ViewApp View = "app"
+)
+
+// Input is one argument an interactive frontend asks for before running an
+// action.
+type Input struct {
+	// Label names the input in the frontend's form.
+	Label string
+	// Flag, when set, precedes the entered value in the arguments.
+	Flag string
+	// Initial is the value the form starts with.
+	Initial string
+	// InitialFunc, when set, computes the starting value as the form opens.
+	InitialFunc func() (string, error)
+	// Fields splits the entered value on white space into several arguments.
+	Fields bool
+}
+
+// Default returns the value a form starts with.
+func (i Input) Default() (string, error) {
+	if i.InitialFunc != nil {
+		return i.InitialFunc()
+	}
+	return i.Initial, nil
+}
+
+// Args returns the action arguments for values entered for inputs, in order.
+func Args(inputs []Input, values []string) []string {
+	var args []string
+	for index, input := range inputs {
+		if index >= len(values) {
+			break
+		}
+		if input.Flag != "" {
+			args = append(args, input.Flag)
+		}
+		if input.Fields {
+			args = append(args, strings.Fields(values[index])...)
+		} else {
+			args = append(args, values[index])
+		}
+	}
+	return args
+}
+
+// Session is an action result that stays active after its initial result,
+// such as an attached debugger, until Wait returns.
+type Session interface {
+	InitialResult() any
+	Wait(context.Context) error
+}
+
+// Summarizer is an action result that describes itself in a short,
+// possibly multi-line, message for interactive frontends.
+type Summarizer interface {
+	Summary() string
 }
 
 // ActionError identifies the action involved in a registration or invocation
