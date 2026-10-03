@@ -1,4 +1,4 @@
-package runtime
+package tui
 
 import (
 	"context"
@@ -9,6 +9,8 @@ import (
 	"github.com/derailed/tcell/v2"
 	"github.com/derailed/tview"
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/console"
+	"github.com/grove-project/grove/internal/consoleview"
 )
 
 const applicationTUIServicesPage = "services"
@@ -31,6 +33,8 @@ type servicesRow struct {
 	method  grove.MethodID
 	node    string
 	color   tcell.Color
+	// debug attaches a debugger to the row's placement, when one can.
+	debug consoleview.Invocation
 }
 
 // servicesScreen is one rendered level of the drill-down.
@@ -48,38 +52,38 @@ const servicesHintBase = "[aqua::b]<enter>[-:-:-] Drill in  [aqua::b]<esc>[-:-:-
 
 func statusColor(status string) tcell.Color {
 	switch status {
-	case placementHealthy:
+	case consoleview.PlacementHealthy:
 		return tcell.ColorGreen
-	case placementLost, "unavailable":
+	case consoleview.PlacementLost, "unavailable":
 		return tcell.ColorOrangeRed
-	case placementStarting, "recovering":
+	case consoleview.PlacementStarting, "recovering":
 		return tcell.ColorYellow
 	}
 	return tcell.ColorDefault
 }
 
-func findService(view applicationServicesView, id grove.ServiceID) (applicationServiceRow, bool) {
+func findService(view consoleview.Services, id grove.ServiceID) (consoleview.Service, bool) {
 	for _, service := range view.Services {
 		if service.ServiceID == id {
 			return service, true
 		}
 	}
-	return applicationServiceRow{}, false
+	return consoleview.Service{}, false
 }
 
-func findHandler(service applicationServiceRow, method grove.MethodID) (applicationHandlerRow, bool) {
+func findHandler(service consoleview.Service, method grove.MethodID) (consoleview.Handler, bool) {
 	for _, handler := range service.Handlers {
 		if handler.Method == method {
 			return handler, true
 		}
 	}
-	return applicationHandlerRow{}, false
+	return consoleview.Handler{}, false
 }
 
 // buildServicesScreen renders the level named by location. A location whose
 // service, handler, or node has disappeared falls back to the nearest level
 // that still exists.
-func buildServicesScreen(view applicationServicesView, location servicesLocation) servicesScreen {
+func buildServicesScreen(view consoleview.Services, location servicesLocation) servicesScreen {
 	if location.nodes {
 		if location.hasNode {
 			for _, node := range view.Nodes {
@@ -103,7 +107,7 @@ func buildServicesScreen(view applicationServicesView, location servicesLocation
 	return servicesListScreen(view)
 }
 
-func servicesListScreen(view applicationServicesView) servicesScreen {
+func servicesListScreen(view consoleview.Services) servicesScreen {
 	screen := servicesScreen{
 		title: "APP / SERVICES", level: "services",
 		columns: []string{"SERVICE", "HANDLERS", "PLACEMENTS", "STATUS"},
@@ -111,14 +115,14 @@ func servicesListScreen(view applicationServicesView) servicesScreen {
 	}
 	for _, service := range view.Services {
 		screen.rows = append(screen.rows, servicesRow{
-			cells:   []string{service.Name, fmt.Sprint(len(service.Handlers)), fmt.Sprint(service.placementCount()), service.Status},
+			cells:   []string{service.Name, fmt.Sprint(len(service.Handlers)), fmt.Sprint(service.PlacementCount()), service.Status},
 			service: service.ServiceID, color: statusColor(service.Status),
 		})
 	}
 	return screen
 }
 
-func handlersScreen(service applicationServiceRow) servicesScreen {
+func handlersScreen(service consoleview.Service) servicesScreen {
 	screen := servicesScreen{
 		title: "APP / SERVICES / " + strings.ToUpper(service.Name), level: "handlers", service: service.Name,
 		columns: []string{"HANDLER", "SCALING", "PLACEMENTS", "OWNER"},
@@ -144,7 +148,7 @@ func handlersScreen(service applicationServiceRow) servicesScreen {
 	return screen
 }
 
-func placementsScreen(service applicationServiceRow, handler applicationHandlerRow) servicesScreen {
+func placementsScreen(service consoleview.Service, handler consoleview.Handler) servicesScreen {
 	screen := servicesScreen{
 		title: "APP / SERVICES / " + strings.ToUpper(service.Name) + " / " + strings.ToUpper(handler.Name), level: "placements",
 		service: service.Name, handler: handler.Name,
@@ -160,14 +164,15 @@ func placementsScreen(service applicationServiceRow, handler applicationHandlerR
 			role = fmt.Sprintf("owner (epoch %d)", handler.Epoch)
 		}
 		screen.rows = append(screen.rows, servicesRow{
-			cells:   []string{placement.ID, placement.NodeID, placement.Status, role, placement.label()},
+			cells:   []string{placement.ID, placement.NodeID, placement.Status, role, placement.Label()},
 			service: service.ServiceID, method: handler.Method, node: placement.NodeID, color: statusColor(placement.Status),
+			debug: placement.Debug,
 		})
 	}
 	return screen
 }
 
-func nodesScreen(view applicationServicesView) servicesScreen {
+func nodesScreen(view consoleview.Services) servicesScreen {
 	screen := servicesScreen{
 		title: "CLUSTER / NODES", level: "nodes",
 		columns: []string{"NODE", "HEALTH", "PLACEMENTS", "PROCESSES"},
@@ -182,7 +187,7 @@ func nodesScreen(view applicationServicesView) servicesScreen {
 	return screen
 }
 
-func hostedScreen(node applicationNodeRow) servicesScreen {
+func hostedScreen(node consoleview.Node) servicesScreen {
 	screen := servicesScreen{
 		title: "CLUSTER / NODES / " + strings.ToUpper(node.NodeID), level: "hosted",
 		columns: []string{"SERVICE", "HANDLER", "SCALING", "STATUS", "ROLE", "PROCESS"},
@@ -194,7 +199,7 @@ func hostedScreen(node applicationNodeRow) servicesScreen {
 			role = "owner"
 		}
 		screen.rows = append(screen.rows, servicesRow{
-			cells: []string{hosted.Service, hosted.Handler, hosted.Scaling, hosted.Status, role, hosted.label()},
+			cells: []string{hosted.Service, hosted.Handler, hosted.Scaling, hosted.Status, role, hosted.Label()},
 			node:  node.NodeID, color: statusColor(hosted.Status),
 		})
 	}
@@ -229,12 +234,8 @@ func (l servicesLocation) up() (servicesLocation, bool) {
 	return l, false
 }
 
-// debugArguments names the debug.attach arguments for the selected placement.
-func debugArgumentsFor(service, nodeID string) []string {
-	return []string{service, "--node", nodeID}
-}
-
-func (v *applicationTUI) showServices(nodes bool) {
+func (v *applicationTUI) showServices(action string, nodes bool) {
+	v.servicesAction = action
 	v.servicesLocation = servicesLocation{nodes: nodes}
 	if !v.servicesOpen {
 		servicesCtx, cancel := context.WithCancel(v.ctx)
@@ -345,15 +346,17 @@ func (v *applicationTUI) servicesKeyboard(event *tcell.EventKey) *tcell.EventKey
 		v.renderServices()
 	case 'd':
 		screen, row, ok := v.selectedServicesRow()
-		if !ok || screen.level != "placements" {
+		if !ok || screen.level != "placements" || row.debug.Name == "" {
 			v.setFlash(tcell.ColorOrange, "Select a placement to debug")
 			return nil
 		}
 		v.closeServices()
-		v.activateActionName("debug.attach", debugArgumentsFor(screen.service, row.node))
+		v.activateActionName(row.debug.Name, row.debug.Args)
 	case 'l':
 		v.closeServices()
-		v.activateActionName("logs.view", nil)
+		if logs, ok := v.actionForView(console.ViewLogs); ok {
+			v.activateActionName(logs.Name, nil)
+		}
 	default:
 		return event
 	}
@@ -380,10 +383,10 @@ func (v *applicationTUI) watchServices(ctx context.Context) {
 func (v *applicationTUI) refreshServices(ctx context.Context) {
 	attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	result, err := v.tui.Select(attemptCtx, "services.view", nil)
-	view, ok := result.(applicationServicesView)
+	result, err := v.tui.Select(attemptCtx, v.servicesAction, nil)
+	view, ok := result.(consoleview.Services)
 	if err != nil || !ok {
-		view = applicationServicesView{Error: "unable to read services"}
+		view = consoleview.Services{Error: "unable to read services"}
 		if err != nil {
 			view.Error = err.Error()
 		}
@@ -406,4 +409,14 @@ func (v *applicationTUI) closeServices() {
 	v.servicesOpen = false
 	v.servicesCancel = nil
 	v.app.SetFocus(v.table)
+}
+
+// actionForView returns the first offered action presented as view.
+func (v *applicationTUI) actionForView(view console.View) (console.Action, bool) {
+	for _, action := range v.actions {
+		if action.View == view {
+			return action, true
+		}
+	}
+	return console.Action{}, false
 }

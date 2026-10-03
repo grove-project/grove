@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -77,6 +78,23 @@ var importRules = []importRule{
 		Name:      "inspection does not depend on NATS",
 		From:      []string{modulePath + "/internal/inspect"},
 		Forbidden: []string{modulePath + "/internal/systemnats", "github.com/nats-io/..."},
+	},
+	{
+		// The interactive TUI renders the console model and the console view
+		// models and invokes actions through the console registry. Which
+		// actions it offers, their inputs, keys and screens, and how results
+		// summarize themselves are runtime rules it reads from that metadata.
+		Name: "the TUI and console view models depend only on the console",
+		From: []string{modulePath + "/internal/tui", modulePath + "/internal/consoleview"},
+		Forbidden: []string{
+			modulePath + "/runtime/...",
+			modulePath + "/internal/systemnats",
+			modulePath + "/internal/controlplane",
+			modulePath + "/internal/inspect",
+			modulePath + "/internal/rollout",
+			modulePath + "/internal/localcluster",
+			"github.com/nats-io/...",
+		},
 	},
 	{
 		// Grove Shop is a standalone application that consumes Grove.
@@ -183,8 +201,9 @@ var presentationFiles = []string{
 	"runtime/appservices.go",
 	"runtime/applicationlogs.go",
 	"runtime/console.go",
-	"runtime/k9s_tui.go",
-	"runtime/k9s_services.go",
+	"internal/tui/tui.go",
+	"internal/tui/services.go",
+	"internal/tui/appscreens.go",
 	"cmd/grove/main.go",
 }
 
@@ -218,6 +237,32 @@ func TestPresentationReadsThroughInspection(t *testing.T) {
 				if strings.Contains(literal, "/grove/status") {
 					t.Errorf("%s reads Grove status from the application's ingress; read it through internal/inspect", literal)
 				}
+			}
+		}
+	}
+}
+
+// actionNameLiteral matches a string literal shaped like a console action
+// name ("cluster.start") or a prefix of one ("app.").
+var actionNameLiteral = regexp.MustCompile(`^"[a-z][a-z0-9_]*\.[a-z0-9_.]*"$`)
+
+// TestTUIOwnsNoActionNames proves the interactive TUI branches on action
+// metadata, not on action names: no production file in internal/tui spells
+// one. Which actions are offered and how each is presented are runtime rules
+// it reads from the console registry and model.
+func TestTUIOwnsNoActionNames(t *testing.T) {
+	files, err := filepath.Glob("internal/tui/*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("list internal/tui: %v (%d files)", err, len(files))
+	}
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		for _, literal := range stringLiterals(t, path) {
+			value := literal[strings.Index(literal, " ")+1:]
+			if actionNameLiteral.MatchString(value) {
+				t.Errorf("%s names an action; read it from the action's metadata instead", literal)
 			}
 		}
 	}

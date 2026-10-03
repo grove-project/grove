@@ -30,6 +30,11 @@ type Status struct {
 	Rollout           *Rollout    `json:"rollout,omitempty"`
 }
 
+// Summary describes the cluster's health in a few lines.
+func (s Status) Summary() string {
+	return fmt.Sprintf("Cluster: %s\nNodes: %d\nServices: %d", s.Health, len(s.Nodes), len(s.Placements))
+}
+
 // Node is one cluster member and the components it hosts.
 type Node struct {
 	NodeID string `json:"node_id"`

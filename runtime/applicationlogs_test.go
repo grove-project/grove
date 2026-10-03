@@ -66,13 +66,6 @@ func TestBuildApplicationLogsViewExplainsUnhealthyCluster(t *testing.T) {
 			t.Errorf("System NATS logs = %#v; want %q", view.SystemNATS, want)
 		}
 	}
-
-	rendered := renderApplicationLogs(view)
-	for _, want := range []string{"WHY NOT HEALTHY", "ACTIVE DELVE / DAP SESSIONS", "127.0.0.1:40000", "APPLICATION", "CLUSTER", "SYSTEM NATS / CONTROL PLANE", "reservation_buffer"} {
-		if !strings.Contains(rendered, want) {
-			t.Errorf("rendered logs = %q; want %q", rendered, want)
-		}
-	}
 }
 
 func TestBuildApplicationLogsViewSurvivesStatusFailure(t *testing.T) {

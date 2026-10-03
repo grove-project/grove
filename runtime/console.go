@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/grove-project/grove/console"
+	"github.com/grove-project/grove/internal/tui"
 	"golang.org/x/term"
 )
 
@@ -39,11 +40,6 @@ type consoleActionResponse struct {
 	Result json.RawMessage `json:"result,omitempty"`
 	Error  string          `json:"error,omitempty"`
 	Active bool            `json:"active,omitempty"`
-}
-
-type consoleActionSession interface {
-	InitialResult() any
-	Wait(context.Context) error
 }
 
 func runApplicationConsole(ctx context.Context, args []string, input io.Reader, output io.Writer) error {
@@ -74,10 +70,11 @@ func runApplicationConsole(ctx context.Context, args []string, input io.Reader, 
 	if err := registerApplicationConsoleActions(&registry, controller); err != nil {
 		return err
 	}
-	tui, err := console.NewTUI(&registry, controller.readModel)
+	consoleTUI, err := console.NewTUI(&registry, controller.readModel)
 	if err != nil {
 		return fmt.Errorf("create application TUI: %w", err)
 	}
+	consoleTUI.SetResolver(resolveTUISelection)
 	listener, err := net.Listen("unix", filepath.Join(runtimeDir, "actions.sock"))
 	if err != nil {
 		return fmt.Errorf("listen for application actions: %w", err)
@@ -93,10 +90,10 @@ func runApplicationConsole(ctx context.Context, args []string, input io.Reader, 
 	if inputFile, inputOK := input.(*os.File); inputOK {
 		if outputFile, outputOK := output.(*os.File); outputOK &&
 			term.IsTerminal(int(inputFile.Fd())) && term.IsTerminal(int(outputFile.Fd())) {
-			return runInteractiveApplicationTUI(ctx, tui)
+			return tui.Run(ctx, consoleTUI)
 		}
 	}
-	if err := renderApplicationTUI(ctx, tui, output); err != nil {
+	if err := renderApplicationTUI(ctx, consoleTUI, output); err != nil {
 		return err
 	}
 	lines := make(chan string)
@@ -116,10 +113,10 @@ func runApplicationConsole(ctx context.Context, args []string, input io.Reader, 
 			if action == "q" || action == "quit" {
 				return nil
 			}
-			result, err := tui.Select(ctx, action, actionArgs)
+			result, err := consoleTUI.Select(ctx, action, actionArgs)
 			if err != nil {
 				fmt.Fprintf(output, "Error: %v\n", err)
-			} else if session, ok := result.(consoleActionSession); ok {
+			} else if session, ok := result.(console.Session); ok {
 				if err := writeConsoleResult(output, session.InitialResult()); err != nil {
 					return err
 				}
@@ -131,53 +128,11 @@ func runApplicationConsole(ctx context.Context, args []string, input io.Reader, 
 					return err
 				}
 			}
-			if err := renderApplicationTUI(ctx, tui, output); err != nil {
+			if err := renderApplicationTUI(ctx, consoleTUI, output); err != nil {
 				return err
 			}
 		}
 	}
-}
-
-func summarizeInteractiveResult(result any) string {
-	switch value := result.(type) {
-	case rolloutActionResult:
-		return fmt.Sprintf("Rollout: %s\nWeb UI: %s", value.State, value.WebURL)
-	case resilienceActionResult:
-		serviceName := "Service"
-		if activeApplication.Scenario != nil {
-			serviceName = applicationServiceName(activeApplication.Scenario.RecoveryServiceID)
-		}
-		result := fmt.Sprintf("%v", value.Result)
-		if activeApplication.Scenario != nil && activeApplication.Scenario.ProbeSummary != nil {
-			result = activeApplication.Scenario.ProbeSummary(value.Result)
-		}
-		return fmt.Sprintf(
-			"%s recovered: %s -> %s\nResult: %s",
-			serviceName,
-			value.FailedNodeID,
-			value.RecoveredNodeID,
-			result,
-		)
-	case debugDemoActionResult:
-		return fmt.Sprintf("Debug demo: %s\nWeb UI: %s", value.State, value.WebURL)
-	case debugAttachResult:
-		return fmt.Sprintf(
-			"Debugger ready: %s on %s/%s\nDAP: %s",
-			value.ServiceName,
-			value.NodeID,
-			value.WorkerID,
-			value.DAPEndpoint,
-		)
-	case applicationJoinResult:
-		return fmt.Sprintf("Cluster: %s\nNodes: %s", value.State, strings.Join(value.NodeIDs, ", "))
-	case ClusterStatus:
-		return fmt.Sprintf("Cluster: %s\nNodes: %d\nServices: %d", value.Health, len(value.Nodes), len(value.Placements))
-	}
-	encoded, err := json.MarshalIndent(result, "", "  ")
-	if err != nil {
-		return fmt.Sprintf("%v", result)
-	}
-	return string(encoded)
 }
 
 func scanConsoleInput(input io.Reader, lines chan<- string, result chan<- error) {
@@ -332,7 +287,7 @@ func (s *consoleActionServer) handle(ctx context.Context, stream net.Conn) {
 		_ = json.NewEncoder(stream).Encode(consoleActionResponse{Error: err.Error()})
 		return
 	}
-	session, active := result.(consoleActionSession)
+	session, active := result.(console.Session)
 	if active {
 		result = session.InitialResult()
 	}
