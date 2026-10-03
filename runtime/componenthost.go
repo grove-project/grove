@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/internal/inspect"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
@@ -123,7 +124,7 @@ func (p *applicationProcess) host(launch componentLaunch) (*runningComponent, er
 		Configuration: p.config.Value,
 		ConfigDigest:  p.digest,
 		Artifact:      p.artifact,
-		ReadStatus:    newStatusReader(p.transport, p.nodeID, p.artifact),
+		ReadStatus:    inspect.New(p.transport, applicationInspection(p.artifact), p.nodeID).Status,
 		ListenAddress: launch.ListenAddress,
 		NodeID:        p.nodeID,
 		Options:       launch.Options,

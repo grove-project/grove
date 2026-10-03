@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/internal/controlplane"
+	"github.com/grove-project/grove/internal/inspect"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
@@ -86,9 +88,10 @@ type invocation struct {
 	debugDemo     bool
 }
 
+// controlClient reads the cluster through the inspection surface and sends
+// the component lifecycle commands, the CLI's only writes.
 type controlClient interface {
-	RequestClusterView(context.Context, string) (systemnats.ClusterView, error)
-	RequestComponents(context.Context, string) (systemnats.ComponentView, error)
+	inspect.Source
 	RequestStartComponent(context.Context, string, grove.ServiceID) (systemnats.ComponentView, error)
 	RequestStopComponent(context.Context, string, grove.ServiceID) (systemnats.ComponentView, error)
 }
@@ -315,8 +318,8 @@ func execute(ctx context.Context, parsed invocation, client controlClient, stdou
 }
 
 type componentRow struct {
-	nodeID string
-	status systemnats.ComponentStatus
+	nodeID    string
+	component inspect.Component
 }
 
 func writeStatus(ctx context.Context, client controlClient, nodeID string, output io.Writer) error {
@@ -326,13 +329,13 @@ func writeStatus(ctx context.Context, client controlClient, nodeID string, outpu
 	}
 	healthyNodes := 0
 	for _, node := range cluster.Nodes {
-		if node.Health == systemnats.HealthHealthy {
+		if node.Health == string(controlplane.HealthHealthy) {
 			healthyNodes++
 		}
 	}
 	healthyComponents := 0
-	for _, component := range components {
-		if component.status.State == systemnats.ComponentHealthy || component.status.State == systemnats.ComponentDebugging {
+	for _, row := range components {
+		if row.component.Healthy() {
 			healthyComponents++
 		}
 	}
@@ -348,14 +351,14 @@ func writeStatus(ctx context.Context, client controlClient, nodeID string, outpu
 }
 
 func writeNodes(ctx context.Context, client controlClient, nodeID string, output io.Writer) error {
-	cluster, err := client.RequestClusterView(ctx, nodeID)
+	cluster, err := inspect.New(client, inspect.Application{}, nodeID).Nodes(ctx)
 	if err != nil {
-		return fmt.Errorf("request cluster view: %w", err)
+		return err
 	}
 	writer := tabwriter.NewWriter(output, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(writer, "NODE\tHEALTH\tENDPOINT")
 	for _, node := range cluster.Nodes {
-		fmt.Fprintf(writer, "%s\t%s\t%s\n", node.NodeID, node.Health, node.AdvertisedEndpoint)
+		fmt.Fprintf(writer, "%s\t%s\t%s\n", node.NodeID, node.Health, node.Endpoint)
 	}
 	return writer.Flush()
 }
@@ -368,26 +371,27 @@ func writeComponents(ctx context.Context, client controlClient, nodeID string, o
 	return writeComponentRows(output, components)
 }
 
-func readCluster(ctx context.Context, client controlClient, nodeID string) (systemnats.ClusterView, []componentRow, error) {
-	cluster, err := client.RequestClusterView(ctx, nodeID)
+// readCluster reads the cluster through nodeID and lists every node's hosted
+// components. A node whose components cannot be read fails the read.
+func readCluster(ctx context.Context, client controlClient, nodeID string) (inspect.Cluster, []componentRow, error) {
+	cluster, err := inspect.New(client, inspect.Application{}, nodeID).Nodes(ctx)
 	if err != nil {
-		return systemnats.ClusterView{}, nil, fmt.Errorf("request cluster view: %w", err)
+		return inspect.Cluster{}, nil, err
 	}
 	rows := make([]componentRow, 0)
 	for _, node := range cluster.Nodes {
-		view, err := client.RequestComponents(ctx, node.NodeID)
-		if err != nil {
-			return systemnats.ClusterView{}, nil, fmt.Errorf("request components from %s: %w", node.NodeID, err)
+		if node.Error != "" {
+			return inspect.Cluster{}, nil, fmt.Errorf("request components from %s: %s", node.NodeID, node.Error)
 		}
-		for _, component := range view.Components {
-			rows = append(rows, componentRow{nodeID: node.NodeID, status: component})
+		for _, component := range node.Components {
+			rows = append(rows, componentRow{nodeID: node.NodeID, component: component})
 		}
 	}
 	sort.Slice(rows, func(i, j int) bool {
 		if rows[i].nodeID != rows[j].nodeID {
 			return rows[i].nodeID < rows[j].nodeID
 		}
-		return rows[i].status.ServiceID < rows[j].status.ServiceID
+		return rows[i].component.ServiceID < rows[j].component.ServiceID
 	})
 	return cluster, rows, nil
 }
@@ -407,7 +411,11 @@ func runComponentAction(ctx context.Context, client controlClient, parsed invoca
 	}
 	for _, component := range view.Components {
 		if component.ServiceID == parsed.serviceID {
-			return writeComponentRows(output, []componentRow{{nodeID: parsed.nodeID, status: component}})
+			row := componentRow{nodeID: parsed.nodeID, component: inspect.Component{
+				ServiceID: component.ServiceID, Name: component.Name, Generation: component.Generation,
+				State: string(component.State), Error: component.Error,
+			}}
+			return writeComponentRows(output, []componentRow{row})
 		}
 	}
 	return fmt.Errorf("find component %d on %s: %w", parsed.serviceID, parsed.nodeID, errComponentNotFound)
@@ -417,7 +425,7 @@ func writeComponentRows(output io.Writer, rows []componentRow) error {
 	writer := tabwriter.NewWriter(output, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(writer, "NODE\tSERVICE\tNAME\tSTATE\tGENERATION\tERROR")
 	for _, row := range rows {
-		componentErr := row.status.Error
+		componentErr := row.component.Error
 		if componentErr == "" {
 			componentErr = "-"
 		}
@@ -425,10 +433,10 @@ func writeComponentRows(output io.Writer, rows []componentRow) error {
 			writer,
 			"%s\t%s\t%s\t%s\t%s\t%s\n",
 			row.nodeID,
-			strconv.FormatUint(uint64(row.status.ServiceID), 10),
-			row.status.Name,
-			row.status.State,
-			strconv.FormatUint(row.status.Generation, 10),
+			strconv.FormatUint(uint64(row.component.ServiceID), 10),
+			row.component.Name,
+			row.component.State,
+			strconv.FormatUint(row.component.Generation, 10),
 			componentErr,
 		)
 	}
