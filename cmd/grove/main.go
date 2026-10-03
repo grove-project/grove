@@ -34,7 +34,7 @@ var (
 	errBinaryPathRequired    = errors.New("binary path is required")
 	errConfigPathRequired    = errors.New("config path is required")
 	errOutputPathRequired    = errors.New("output path is required")
-	errTestApplication       = errors.New("test artifact must contain Grove's test application")
+	errTestApplication       = errors.New("test artifact must declare an application scenario check")
 	errResilienceRequired    = errors.New("service selection requires resilience mode")
 	errServiceNameRequired   = errors.New("service name is required")
 	errDebugListenRequired   = errors.New("local DAP listen address is required")
@@ -212,12 +212,12 @@ func parseDeployInvocation(args []string, stderr io.Writer) (invocation, error) 
 }
 
 func parseTestInvocation(args []string, stderr io.Writer) (invocation, error) {
-	parsed := invocation{command: commandTest, serviceID: defaultResilienceServiceID}
+	parsed := invocation{command: commandTest}
 	flags := flag.NewFlagSet("test", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.StringVar(&parsed.binaryPath, "binary", "", "Grove application artifact to test")
 	flags.BoolVar(&parsed.resilience, "resilience", false, "kill one service-hosting node and rerun the flow after recovery")
-	serviceID := flags.Uint64("service-id", uint64(defaultResilienceServiceID), "stateless service to target in resilience mode")
+	serviceID := flags.Uint64("service-id", 0, "stateless service to target in resilience mode (default: the application's recovery service)")
 	if err := flags.Parse(args); err != nil {
 		return invocation{}, fmt.Errorf("parse test flags: %w", err)
 	}
@@ -227,13 +227,13 @@ func parseTestInvocation(args []string, stderr io.Writer) (invocation, error) {
 	if parsed.binaryPath == "" {
 		return invocation{}, errBinaryPathRequired
 	}
-	if *serviceID == 0 || *serviceID > uint64(^grove.ServiceID(0)) {
-		return invocation{}, errServiceIDRequired
-	}
 	serviceSelected := false
 	flags.Visit(func(option *flag.Flag) {
 		serviceSelected = serviceSelected || option.Name == "service-id"
 	})
+	if serviceSelected && (*serviceID == 0 || *serviceID > uint64(^grove.ServiceID(0))) {
+		return invocation{}, errServiceIDRequired
+	}
 	if serviceSelected && !parsed.resilience {
 		return invocation{}, errResilienceRequired
 	}

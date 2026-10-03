@@ -24,6 +24,8 @@ import (
 
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/internal/bootstrap"
+	"github.com/grove-project/grove/internal/nodeproc"
+	"github.com/grove-project/grove/internal/scenario"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
@@ -95,23 +97,9 @@ func newEventEmitter(stdout io.Writer) (func(lifecycleEvent), *json.Encoder, *sy
 	}, encoder, &mu
 }
 
-type lifecycleEvent struct {
-	Event              string `json:"event"`
-	NodeID             string `json:"node_id,omitempty"`
-	AdvertisedEndpoint string `json:"advertised_endpoint,omitempty"`
-	SystemNATSURL      string `json:"system_nats_url,omitempty"`
-	SystemNATSRouteURL string `json:"system_nats_route_url,omitempty"`
-	ConfigRevision     string `json:"config_revision,omitempty"`
-	ConfigDigest       string `json:"config_digest,omitempty"`
-	ArtifactDigest     string `json:"artifact_digest,omitempty"`
-	ClusterName        string `json:"cluster_name,omitempty"`
-	NodeZone           string `json:"node_zone,omitempty"`
-	// Leader, Voters and Detail describe control-plane events such as
-	// metadata leader elections and cluster formation.
-	Leader string `json:"leader,omitempty"`
-	Voters int    `json:"voters,omitempty"`
-	Detail string `json:"detail,omitempty"`
-}
+// lifecycleEvent is one line of the Grovlet lifecycle stream; the protocol is
+// owned by internal/nodeproc, which supervisors use to read it.
+type lifecycleEvent = nodeproc.Event
 
 type runtimeDirError struct {
 	path string
@@ -176,6 +164,9 @@ func execute(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	}
 	if len(args) != 0 && args[0] == "config-compile" {
 		return runConfigCompile(ctx, args[1:], stdin, stdout)
+	}
+	if args[0] == scenario.Command {
+		return runScenarioCommand(ctx, args[1:], stdout, stderr)
 	}
 	runCommand := run
 	if len(args) != 0 && args[0] == "worker" {

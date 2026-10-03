@@ -219,6 +219,22 @@ Restoring production-42...
 
 The important output is **what changed, what Grove observed, what Grove did, and whether the system recovered**.
 
+## Application-owned test scenarios
+
+The `grove` CLI never links application code. `grove test --binary <app>` and
+`grove deploy --debug-demo` ask the application binary for its scenario
+instead:
+
+- `<app> scenario describe` prints the application's name, the components
+  `grove test` pins one per node (`Scenario.CheckComponents`), the default
+  resilience target (`Scenario.RecoveryServiceID`) and the debug-demo topology.
+- `<app> scenario check --system-nats-url URL --node-id NODE --run-id ID` runs
+  the application's own end-to-end check (`Scenario.Check`) against a running
+  cluster and prints a one-line summary.
+
+An application opts in by setting `Check` and `CheckComponents` on
+`runtime.Definition.Scenario`. The protocol types live in `internal/scenario`.
+
 ## Design rules
 
 ### One binary

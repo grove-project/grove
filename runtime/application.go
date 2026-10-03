@@ -18,8 +18,8 @@ import (
 
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/console"
-	"github.com/grove-project/grove/grovetest"
 	"github.com/grove-project/grove/internal/artifact"
+	"github.com/grove-project/grove/internal/nodeproc"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
@@ -56,7 +56,7 @@ type applicationController struct {
 }
 
 type applicationCluster struct {
-	nodes         []*grovetest.Node
+	nodes         []*nodeproc.Process
 	systemNATSURL string
 	webAddress    string
 	artifact      artifact.Inspection
@@ -463,7 +463,7 @@ func (c *applicationController) rejectBrokenCandidate(ctx context.Context, confi
 	targetServiceID := activeApplication.Scenario.RecoveryServiceID
 	targetComponent, _ := activeApplication.componentByID(targetServiceID)
 	c.setLastEvent("rollout: starting candidate " + targetComponent.Name)
-	candidateNode, err := grovetest.StartNode(
+	candidateNode, err := nodeproc.Start(
 		candidatePath,
 		"--node-id", "node-2-candidate",
 		"--advertise-endpoint", "nats-subject://system/node-2-candidate",
@@ -618,7 +618,7 @@ func startApplicationCluster(
 			"--system-nats-membership", "--system-nats-recovery",
 			"--system-nats-subject", "_GROVE.system.application." + nodeID,
 		}
-		node, err := grovetest.StartNode(artifactPath, append(args, extra...)...)
+		node, err := nodeproc.Start(artifactPath, append(args, extra...)...)
 		if err != nil {
 			cleanupApplicationNodes(cluster.nodes)
 			return nil, fmt.Errorf("start application %s: %w", nodeID, err)
@@ -661,20 +661,11 @@ func reserveApplicationPorts(count int) ([]int, error) {
 }
 
 func applicationSystemNATSURL(logs string) (string, error) {
-	decoder := json.NewDecoder(strings.NewReader(logs))
-	url := ""
-	for {
-		var event lifecycleEvent
-		if err := decoder.Decode(&event); err != nil {
-			if errors.Is(err, io.EOF) && url != "" {
-				return url, nil
-			}
-			return "", err
-		}
-		if event.Event == "ready" && event.SystemNATSURL != "" {
-			url = event.SystemNATSURL
-		}
+	event, err := nodeproc.ReadyEvent(logs)
+	if err != nil {
+		return "", err
 	}
+	return event.SystemNATSURL, nil
 }
 
 func waitForApplicationPlacement(ctx context.Context, transport *systemnats.Transport, digest string) error {
@@ -1066,13 +1057,13 @@ func (c *applicationController) setLastEvent(event string) {
 	c.mu.Unlock()
 }
 
-func cleanupApplicationNodes(nodes []*grovetest.Node) {
+func cleanupApplicationNodes(nodes []*nodeproc.Process) {
 	for _, node := range nodes {
 		_ = node.Cleanup()
 	}
 }
 
-func gracefullyStopApplicationNodes(nodes []*grovetest.Node) {
+func gracefullyStopApplicationNodes(nodes []*nodeproc.Process) {
 	for _, node := range nodes {
 		// A configured application node may spend up to gracefulLeaveTimeout
 		// relocating services and evacuating its JetStream peers. Keep the
@@ -1085,7 +1076,7 @@ func gracefullyStopApplicationNodes(nodes []*grovetest.Node) {
 	}
 }
 
-func applicationDiagnostics(nodes []*grovetest.Node) string {
+func applicationDiagnostics(nodes []*nodeproc.Process) string {
 	var output strings.Builder
 	for i, node := range nodes {
 		fmt.Fprintf(&output, "node-%d logs:\n%s", i+1, node.Logs())

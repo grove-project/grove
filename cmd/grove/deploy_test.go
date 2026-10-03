@@ -46,7 +46,7 @@ func TestDebugDemoDeploysFiveDiscoverableWorkers(t *testing.T) {
 			_ = command.Process.Kill()
 		}
 	}()
-	if err := waitForText(ctx, &output, "Grove Shop debug demo ready", "Orders   node-2", "Payment  node-4"); err != nil {
+	if err := waitForText(ctx, &output, "Grove Test App debug demo ready", "Orders   node-2", "Payment  node-4"); err != nil {
 		t.Fatalf("wait for deploy: %v\n%s", err, output.String())
 	}
 	state, err := readLocalConnectionAt(statePath)

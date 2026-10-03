@@ -64,6 +64,8 @@ func RuntimeDefinition() groveruntime.Definition {
 				{ServiceID: testapp.ServiceShipping, NodeID: "node-5"},
 			},
 			RecoveryServiceID: testapp.ServiceInventory,
+			CheckComponents:   []string{"orders", "inventory"},
+			Check:             runtimeOrderCheck,
 			Probe:             runtimeOrderProbe,
 			ProbeHealthy:      runtimeOrderHealthy,
 			ProbeSummary:      runtimeOrderSummary,
@@ -210,6 +212,31 @@ func groveShopArtifactStatus(status *groveruntime.ArtifactStatus) *testapp.Artif
 		ApplicationID: status.ApplicationID, CodeVersion: status.CodeVersion,
 		ArtifactDigest: status.ArtifactDigest, ConfigRevision: status.ConfigRevision, ConfigDigest: status.ConfigDigest,
 	}
+}
+
+// runtimeOrderCheck is the end-to-end check `grove test` runs: one order
+// through Orders, which reserves stock from Inventory.
+func runtimeOrderCheck(ctx context.Context, client *grove.Client, runID string) (string, error) {
+	order, err := grove.Call[testapp.CreateOrderRequest, testapp.Order](
+		ctx,
+		client,
+		testapp.ServiceOrders,
+		testapp.MethodCreateOrder,
+		testapp.CreateOrderRequest{
+			OrderID:         runID,
+			SKU:             "coffee-beans",
+			Quantity:        1,
+			AmountCents:     1200,
+			ShippingAddress: "30 Grove Lane",
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+	if order.Status != testapp.OrderCompleted || order.Reservation.ID != "reservation-"+runID {
+		return "", fmt.Errorf("order result = %#v", order)
+	}
+	return "order completed", nil
 }
 
 func runtimeOrderProbe(ctx context.Context, webAddress, orderID string) (any, error) {

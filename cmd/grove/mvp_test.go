@@ -139,6 +139,8 @@ func TestGroveShopMVPLifecycle(t *testing.T) {
 	recoveredNodeID, err := waitForCommandTestRecovery(
 		ctx,
 		transport,
+		"node-3",
+		3,
 		"node-2",
 		groveshop.ServiceInventory,
 		currentInspection.ArtifactDigest,
@@ -267,7 +269,7 @@ func TestGroveShopMVPLifecycle(t *testing.T) {
 	assertMVPOrder(t, ctx, cluster.webAddress, "mvp-after-rollback")
 
 	resilienceOutput, err := runGroveCommand(ctx, "test", "--binary", currentPath, "--resilience")
-	wantResilienceOutput := "Grove Shop E2E\n✓ baseline\nKilled service 2 host node-2\n✓ failure detected\n✓ service 2 recovered on node-1\n✓ flow after recovery\nPASS\n"
+	wantResilienceOutput := "Grove Test App E2E\n✓ baseline\nKilled service 2 host node-2\n✓ failure detected\n✓ service 2 recovered on node-1\n✓ flow after recovery\nPASS\n"
 	if err != nil || resilienceOutput != wantResilienceOutput {
 		t.Fatalf("MVP resilience workflow = %v; output=%q", err, resilienceOutput)
 	}
