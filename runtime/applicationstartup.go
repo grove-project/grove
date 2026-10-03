@@ -49,6 +49,8 @@ type applicationStartupOffer struct {
 	nodes         int
 	systemNATSURL string
 	webAddress    string
+	// nodeIDs are the discovered nodes, the reachable one first.
+	nodeIDs []string
 }
 
 func newApplicationHost(binaryPath string) *applicationHost {
@@ -75,9 +77,15 @@ func (h *applicationHost) prepare(ctx context.Context, inspection artifact.Inspe
 	if err != nil {
 		return applicationStartupOffer{}, err
 	}
+	nodeIDs := []string{reachable.NodeID}
+	for _, node := range record.Nodes {
+		if node.NodeID != reachable.NodeID {
+			nodeIDs = append(nodeIDs, node.NodeID)
+		}
+	}
 	return applicationStartupOffer{
 		discovered: true, join: record.ArtifactDigest == inspection.ArtifactDigest, nodes: len(record.Nodes),
-		systemNATSURL: reachable.SystemNATSURL, webAddress: record.WebAddress,
+		systemNATSURL: reachable.SystemNATSURL, webAddress: record.WebAddress, nodeIDs: nodeIDs,
 	}, nil
 }
 
@@ -332,9 +340,10 @@ func (c *applicationController) prepareConfiguredApplicationStartup(
 		return nil
 	}
 	c.cluster = &applicationCluster{
-		systemNATSURL: offer.systemNATSURL,
-		webAddress:    offer.webAddress,
-		artifact:      inspection,
+		systemNATSURL:   offer.systemNATSURL,
+		webAddress:      offer.webAddress,
+		artifact:        inspection,
+		discoveredNodes: offer.nodeIDs,
 	}
 	if offer.join {
 		c.joinAvailable = true

@@ -70,7 +70,7 @@ func (d *applicationDemo) startDebugDemo(ctx context.Context, configPath string)
 	}
 	d.attach(cluster)
 	d.event("started five-node debug demo")
-	status, err := waitForClusterStatus(ctx, cluster.webAddress, func(status ClusterStatus) bool {
+	status, err := waitForClusterStatus(ctx, cluster, func(status ClusterStatus) bool {
 		return debugApplicationStatusHealthy(status, inspection.ArtifactDigest)
 	})
 	if err != nil {

@@ -2,11 +2,8 @@ package runtime
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -65,6 +62,11 @@ type applicationCluster struct {
 	artifact      artifact.Inspection
 	failedNodeID  string
 	debugDemo     bool
+	// discoveredNodes are cluster nodes learned from discovery, which the
+	// console can read the cluster through before it hosts any.
+	discoveredNodes []string
+	// reader is the console's connection for inspecting this cluster.
+	reader clusterReader
 }
 
 func newApplicationController(binaryPath, runtimeDir string) *applicationController {
@@ -263,7 +265,7 @@ func (c *applicationController) restartCluster(ctx context.Context, args []strin
 	cluster.failedNodeID = ""
 	c.lastEvent = "reconstructed deployment from durable state"
 	c.mu.Unlock()
-	status, err := waitForClusterStatus(operationCtx, cluster.webAddress, func(status ClusterStatus) bool {
+	status, err := waitForClusterStatus(operationCtx, cluster, func(status ClusterStatus) bool {
 		return applicationStatusHealthy(status, cluster.artifact.ArtifactDigest)
 	})
 	if err != nil {
@@ -301,69 +303,32 @@ func (c *applicationController) attached() *applicationCluster {
 // attach makes cluster the one the console shows; nil detaches.
 func (c *applicationController) attach(cluster *applicationCluster) {
 	c.mu.Lock()
+	previous := c.cluster
 	c.cluster = cluster
 	c.mu.Unlock()
+	if previous != nil && previous != cluster {
+		previous.reader.close()
+	}
 }
 
+// inspection returns what reading the attached cluster needs, and false
+// when the console is not attached to one.
+func (c *applicationController) inspection() (inspectionTarget, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.cluster == nil {
+		return inspectionTarget{}, false
+	}
+	return c.cluster.target(), true
+}
+
+// status reads the attached cluster's status through its control plane.
 func (c *applicationController) status(ctx context.Context) (ClusterStatus, error) {
-	cluster := c.attached()
-	if cluster == nil {
+	target, attached := c.inspection()
+	if !attached {
 		return ClusterStatus{Health: "not-deployed", Nodes: []NodeStatus{}, Placements: []PlacementStatus{}}, nil
 	}
-	return readClusterStatus(ctx, cluster.webAddress)
-}
-
-// readClusterStatus reads the cluster status that the application's ingress
-// serves at webAddress.
-func readClusterStatus(ctx context.Context, webAddress string) (ClusterStatus, error) {
-	var status ClusterStatus
-	if err := readApplicationJSON(ctx, "http://"+webAddress+"/grove/status", &status); err != nil {
-		return ClusterStatus{}, err
-	}
-	return status, nil
-}
-
-// waitForClusterStatus polls the status served at webAddress until accept
-// returns true.
-func waitForClusterStatus(ctx context.Context, webAddress string, accept func(ClusterStatus) bool) (ClusterStatus, error) {
-	ticker := time.NewTicker(applicationConditionInterval)
-	defer ticker.Stop()
-	var last ClusterStatus
-	var lastErr error
-	for {
-		attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		status, err := readClusterStatus(attemptCtx, webAddress)
-		cancel()
-		if err == nil {
-			last = status
-			if accept(status) {
-				return status, nil
-			}
-		}
-		lastErr = err
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			return last, fmt.Errorf("status=%#v: %w", last, errors.Join(lastErr, ctx.Err()))
-		}
-	}
-}
-
-func readApplicationJSON(ctx context.Context, url string, output any) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		return fmt.Errorf("GET %s: %s: %s", url, response.Status, body)
-	}
-	return json.NewDecoder(response.Body).Decode(output)
+	return target.status(ctx)
 }
 
 func (c *applicationController) readModel(ctx context.Context) (console.Model, error) {
@@ -446,6 +411,9 @@ func (c *applicationController) close() {
 	c.cluster = nil
 	clear(c.debugSessions)
 	c.mu.Unlock()
+	if cluster != nil {
+		cluster.reader.close()
+	}
 	if c.host.hosting() {
 		c.host.leave()
 		return

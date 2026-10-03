@@ -9,6 +9,7 @@ import (
 
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/console"
+	"github.com/grove-project/grove/internal/inspect"
 )
 
 var (
@@ -296,67 +297,17 @@ func (definition Definition) scenarioDebugNodeCount() int {
 }
 
 // ClusterStatus is Grove's application-agnostic control-plane read model.
-type ClusterStatus struct {
-	Health            string            `json:"health"`
-	Ready             bool              `json:"ready"`
-	Nodes             []NodeStatus      `json:"nodes"`
-	Placements        []PlacementStatus `json:"placements"`
-	ActiveArtifact    *ArtifactStatus   `json:"active_artifact,omitempty"`
-	CandidateArtifact *ArtifactStatus   `json:"candidate_artifact,omitempty"`
-	Rollout           *RolloutStatus    `json:"rollout,omitempty"`
-}
-
-type NodeStatus struct {
-	NodeID     string            `json:"node_id"`
-	Health     string            `json:"health"`
-	Components []ComponentStatus `json:"components"`
-	Error      string            `json:"error,omitempty"`
-}
-
-type ComponentStatus struct {
-	ServiceID grove.ServiceID `json:"service_id"`
-	Name      string          `json:"name"`
-	// WorkerID identifies the component instance generation, not a process.
-	WorkerID string `json:"worker_id"`
-	// ExecutionMode, ProcessID and PID identify the process running the
-	// component. Components in the node's shared application runtime report
-	// the same process.
-	ExecutionMode string `json:"execution_mode,omitempty"`
-	ProcessID     string `json:"process_id,omitempty"`
-	PID           int    `json:"pid,omitempty"`
-	State         string `json:"state"`
-	Error         string `json:"error,omitempty"`
-}
-
-type PlacementStatus struct {
-	ServiceID         grove.ServiceID `json:"service_id"`
-	Name              string          `json:"name"`
-	NodeID            string          `json:"node_id"`
-	InvocationSubject string          `json:"invocation_subject"`
-	ArtifactDigest    string          `json:"artifact_digest"`
-	Health            string          `json:"health"`
-}
-
-type ArtifactStatus struct {
-	ApplicationID  string `json:"application_id"`
-	CodeVersion    string `json:"code_version"`
-	ArtifactDigest string `json:"artifact_digest"`
-	ConfigRevision string `json:"config_revision"`
-	ConfigDigest   string `json:"config_digest"`
-}
-
-type RolloutStatus struct {
-	Generation uint64          `json:"generation"`
-	Phase      string          `json:"phase"`
-	Failure    *RolloutFailure `json:"failure,omitempty"`
-}
-
-type RolloutFailure struct {
-	Code      string `json:"code"`
-	Component string `json:"component,omitempty"`
-	Field     string `json:"field,omitempty"`
-	Message   string `json:"message"`
-}
+// It is defined by the inspection surface (internal/inspect), which the
+// console and CLI read through as well.
+type (
+	ClusterStatus   = inspect.Status
+	NodeStatus      = inspect.Node
+	ComponentStatus = inspect.Component
+	PlacementStatus = inspect.Placement
+	ArtifactStatus  = inspect.Artifact
+	RolloutStatus   = inspect.Rollout
+	RolloutFailure  = inspect.RolloutFailure
+)
 
 // StatusReader returns the latest generic Grove control-plane read model.
 type StatusReader func(context.Context) (ClusterStatus, error)
