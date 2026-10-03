@@ -25,6 +25,16 @@ node-1
 
 This is the model in [ADR-002](../adr/002-grovlet-worker-process-boundary.md): the Grovlet never runs application code, and a node runs the fewest application processes that isolation requires.
 
+## In the code
+
+| Process | Entry point | Owns |
+| --- | --- | --- |
+| Grovlet | `run` → `startGrovlet` (`runtime/grovlet.go`) | System NATS, the node's share of the control plane, and supervision of its components through `componentManager`; graceful leave (`grovletleave.go`) |
+| Application runtime | `runApplicationRuntime` (`runtime/appruntime.go`) | Every non-isolated component placed on the node |
+| Isolated worker | `runWorker` (`runtime/worker.go`) | One isolated component |
+
+Both application processes register components through one host, `applicationProcess` (`runtime/componenthost.go`). `TestGrovletNeverRunsApplicationCode` guards the boundary: a `ComponentContext` is built only there, and only the two application entry points create that host. A Grovlet asked to host components without the clustered control plane (`--component` without `--system-nats-membership`) refuses to start.
+
 ## What you see
 
 Component status reports the process for every service. Services sharing the runtime share its `process_id` and `pid`:

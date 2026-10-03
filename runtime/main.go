@@ -9,21 +9,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/url"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
-	"github.com/grove-project/grove"
-	"github.com/grove-project/grove/internal/bootstrap"
 	"github.com/grove-project/grove/internal/nodeproc"
 	"github.com/grove-project/grove/internal/scenario"
 	"github.com/grove-project/grove/internal/systemnats"
@@ -41,7 +35,7 @@ var (
 	errSystemNATSMembershipCluster   = errors.New("system NATS membership requires a route listener")
 	errSystemNATSRecoveryCluster     = errors.New("system NATS recovery requires membership")
 	errApplicationEndpoint           = errors.New("application component placement requires a System NATS endpoint")
-	errApplicationPlacementCluster   = errors.New("placed application components require System NATS membership or an explicit route")
+	errApplicationPlacementCluster   = errors.New("hosted application components require System NATS membership")
 	errApplicationListenRequired     = errors.New("HTTP application component requires a listen address")
 	errNodeIdentityPair              = errors.New("node ID and advertised endpoint must be configured together")
 	errNodeIDInvalid                 = errors.New("node ID is invalid")
@@ -74,7 +68,6 @@ type config struct {
 	// cluster was founded with an ingress address, the node hosts every
 	// component the application defines; otherwise it hosts none.
 	adoptCluster              bool
-	routeSubject              string
 	applicationConfiguration  Configuration
 	applicationConfigDigest   string
 	applicationArtifactDigest string
@@ -198,7 +191,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	}
 	emit, encoder, encoderMu := newEventEmitter(stdout)
 	cfg.emit = emit
-	systemRuntime, err := startSystemNATS(ctx, cfg)
+	node, err := startGrovlet(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -207,8 +200,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		Event:              "ready",
 		NodeID:             cfg.nodeID,
 		AdvertisedEndpoint: cfg.advertisedEndpoint,
-		SystemNATSURL:      systemRuntime.url,
-		SystemNATSRouteURL: systemRuntime.routeURL,
+		SystemNATSURL:      node.url,
+		SystemNATSRouteURL: node.routeURL,
 	}
 	if !inspection.ConfigEmpty {
 		ready.ConfigRevision = configuration.Revision
@@ -221,7 +214,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	err = encoder.Encode(ready)
 	encoderMu.Unlock()
 	if err != nil {
-		systemRuntime.stop()
+		node.stop()
 		return fmt.Errorf("encode ready event: %w", err)
 	}
 
@@ -229,10 +222,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	var leaveErr error
 	if cfg.systemNATSRetireOnStop {
 		leaveCtx, leaveCancel := context.WithTimeout(context.Background(), gracefulLeaveTimeout)
-		leaveErr = systemRuntime.gracefulLeave(leaveCtx, cfg.nodeID)
+		leaveErr = node.gracefulLeave(leaveCtx, cfg.nodeID)
 		leaveCancel()
 	}
-	systemRuntime.stop()
+	node.stop()
 
 	encoderMu.Lock()
 	err = encoder.Encode(lifecycleEvent{Event: "stopped"})
@@ -261,7 +254,6 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	flags.Var(&cfg.componentOptions, "component-option", "application-owned worker option as kind=value (repeatable)")
 	flags.Var(&cfg.isolatedComponents, "component-isolate", "component kind to run in a dedicated worker process instead of the shared application runtime (repeatable)")
 	flags.StringVar(&cfg.ingressAddress, "ingress-address", "", "cluster ingress address recorded by the node that founds the cluster")
-	flags.StringVar(&cfg.routeSubject, "route-subject", "", "explicit Grove invocation subject used by directly hosted components")
 	flags.StringVar(&cfg.delvePath, "delve-path", "", "path to the Delve executable used for worker debugging")
 	flags.StringVar(&cfg.nodeID, "node-id", "", "stable process-lifetime Grove node ID")
 	flags.StringVar(&cfg.advertisedEndpoint, "advertise-endpoint", "", "advertised Grove transport endpoint URL")
@@ -304,10 +296,13 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	if cfg.systemNATSSubject != "" && cfg.systemNATSListen == "" && cfg.systemNATSURL == "" {
 		return config{}, errSystemNATSRequired
 	}
-	if (len(cfg.componentKinds) != 0 || cfg.routeSubject != "" || cfg.systemNATSRecovery) && cfg.systemNATSSubject == "" {
+	if (len(cfg.componentKinds) != 0 || cfg.systemNATSRecovery) && cfg.systemNATSSubject == "" {
 		return config{}, errApplicationEndpoint
 	}
-	if len(cfg.componentKinds) != 0 && !cfg.systemNATSMembership && cfg.routeSubject == "" && len(cfg.componentKinds) > 1 {
+	// Components run in the node's application runtime or isolated workers,
+	// which the Grovlet supervises through the clustered control plane; the
+	// Grovlet never hosts application code itself.
+	if len(cfg.componentKinds) != 0 && !cfg.systemNATSMembership {
 		return config{}, errApplicationPlacementCluster
 	}
 	if cfg.ingressAddress != "" && !cfg.systemNATSRecovery {
@@ -315,7 +310,7 @@ func parseConfig(args []string, stderr io.Writer) (config, error) {
 	}
 	if cfg.ingressAddress != "" {
 		cfg = hostEveryComponent(cfg)
-	} else if len(cfg.componentKinds) == 0 && cfg.systemNATSRecovery && cfg.routeSubject == "" {
+	} else if len(cfg.componentKinds) == 0 && cfg.systemNATSRecovery {
 		cfg.adoptCluster = true
 	}
 	if err := validateConfiguredComponents(cfg); err != nil {
@@ -353,65 +348,6 @@ func hostEveryComponent(cfg config) config {
 		}
 	}
 	return cfg
-}
-
-// resolveIngress makes the cluster's ingress address known to this node. The
-// founding node records it in control state; every other node reads it, so
-// recovery can move ingress onto any survivor. A node that names no component
-// joins a cluster founded this way by hosting every non-ingress component.
-func resolveIngress(ctx context.Context, cfg config, transport *systemnats.Transport, deployments *systemnats.Deployments) (config, error) {
-	if !cfg.hostAll && !cfg.adoptCluster {
-		return cfg, nil
-	}
-	hasIngress := false
-	for _, component := range activeApplication.Components {
-		hasIngress = hasIngress || component.HTTPHandler != nil
-	}
-	if !hasIngress {
-		return cfg, nil
-	}
-	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-	var lastErr error
-	for {
-		view := deployments.Snapshot()
-		if view.Ready && cfg.hostAll && view.Ingress != cfg.ingressAddress {
-			lastErr = deployments.PutIngress(waitCtx, transport, cfg.ingressAddress)
-			view = deployments.Snapshot()
-		}
-		ingressKnown := view.Ready && view.Ingress != ""
-		if view.Ready && !ingressKnown && cfg.adoptCluster {
-			// No ingress recorded yet. A runtime-placed founder records its
-			// ingress before any placement, so placements without an ingress
-			// mean an explicitly placed cluster; no placements means the
-			// founder may still be recording it, so keep waiting (grove#40).
-			placed, err := systemnats.RecordedPlacements(waitCtx, transport)
-			if err != nil {
-				lastErr = err
-			} else if len(placed) != 0 {
-				return cfg, nil // not a runtime-placed cluster: host nothing
-			}
-		}
-		if ingressKnown {
-			for _, component := range activeApplication.Components {
-				if component.HTTPHandler != nil {
-					if configuredValue(cfg.componentListeners, component.Kind) == "" {
-						cfg.componentListeners = append(cfg.componentListeners, component.Kind+"="+view.Ingress)
-					}
-				} else if cfg.adoptCluster {
-					cfg.componentKinds = append(cfg.componentKinds, component.Kind)
-				}
-			}
-			return cfg, nil
-		}
-		select {
-		case <-ticker.C:
-		case <-waitCtx.Done():
-			return cfg, fmt.Errorf("wait for cluster ingress address: %w", errors.Join(lastErr, waitCtx.Err()))
-		}
-	}
 }
 
 func validateConfiguredComponents(cfg config) error {
@@ -481,860 +417,6 @@ func validNodeID(nodeID string) bool {
 		return false
 	}
 	return nodeID != ""
-}
-
-type systemNATSRuntime struct {
-	server            *systemnats.Server
-	transport         *systemnats.Transport
-	url               string
-	routeURL          string
-	membershipCancel  context.CancelFunc
-	membershipDone    chan struct{}
-	placementCancel   context.CancelFunc
-	placementDone     chan struct{}
-	healthCancel      context.CancelFunc
-	healthDone        chan struct{}
-	components        *componentManager
-	desiredCancel     context.CancelFunc
-	desiredDone       chan struct{}
-	deploymentsCancel context.CancelFunc
-	deploymentsDone   chan struct{}
-	recoveryCancel    context.CancelFunc
-	recoveryDone      chan struct{}
-	reconcileCancel   context.CancelFunc
-	reconcileDone     chan struct{}
-	membership        *systemnats.Membership
-	placement         *systemnats.Placement
-	handlers          *systemnats.HandlerPlacements
-	handlersCancel    context.CancelFunc
-	handlersDone      chan struct{}
-	witnessCancel     context.CancelFunc
-	witnessDone       chan struct{}
-	eventsCancel      context.CancelFunc
-	eventsDone        chan struct{}
-	// metadataVoters is the JetStream metadata group size last observed by
-	// this node's server; zero while unknown.
-	metadataVoters atomic.Int32
-}
-
-func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error) {
-	restoreControlState := cfg.systemNATSRecovery && systemNATSStateExists(cfg.runtimeDir)
-	runtime := &systemNATSRuntime{}
-	url := cfg.systemNATSURL
-	if cfg.systemNATSListen != "" {
-		host, port, err := parseListenAddress(cfg.systemNATSListen)
-		if err != nil {
-			return nil, fmt.Errorf("parse System NATS client listener: %w", err)
-		}
-		if cfg.systemNATSRouteListen == "" {
-			runtime.server, err = systemnats.StartServer(ctx, host, port)
-		} else {
-			routeHost, routePort, routeErr := parseListenAddress(cfg.systemNATSRouteListen)
-			if routeErr != nil {
-				return nil, fmt.Errorf("parse System NATS route listener: %w", routeErr)
-			}
-			clusterConfig := systemnats.ClusterConfig{
-				Name:      cfg.nodeID,
-				Host:      host,
-				Port:      port,
-				RouteHost: routeHost,
-				RoutePort: routePort,
-			}
-			if cfg.systemNATSSeed != "" {
-				clusterConfig.SeedURLs = []string{cfg.systemNATSSeed}
-			}
-			if cfg.systemNATSMembership {
-				clusterConfig.JetStreamStoreDir = filepath.Join(cfg.runtimeDir, "system-nats")
-			}
-			runtime.server, err = systemnats.StartClusterServer(ctx, clusterConfig)
-		}
-		if err != nil {
-			return nil, err
-		}
-		url = runtime.server.URL()
-		runtime.routeURL = runtime.server.RouteURL()
-	}
-	if url == "" {
-		return runtime, nil
-	}
-	runtime.url = url
-
-	transport, err := systemnats.Connect(ctx, url)
-	if err != nil {
-		runtime.stop()
-		return nil, err
-	}
-	runtime.transport = transport
-	var placement *systemnats.Placement
-	if cfg.systemNATSMembership {
-		membership, err := systemnats.NewMembership(systemnats.MembershipRecord{
-			NodeID:             cfg.nodeID,
-			AdvertisedEndpoint: cfg.advertisedEndpoint,
-		})
-		if err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		if err := transport.ServeMembership(ctx, cfg.nodeID, membership); err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		runtime.startMembership(ctx, membership)
-		runtime.membership = membership
-		if runtime.server != nil {
-			if err := transport.ServePeer(ctx, cfg.nodeID, runtime.server); err != nil {
-				runtime.stop()
-				return nil, err
-			}
-		}
-
-		deployments := systemnats.NewDeployments()
-		if err := transport.ServeDeployments(ctx, cfg.nodeID, deployments); err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		runtime.startDeployments(ctx, deployments)
-		if cfg, err = resolveIngress(ctx, cfg, transport, deployments); err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		if restoreControlState && cfg.hostAll {
-			if cfg, err = rejoinRuntimePlacedCluster(ctx, cfg, transport); err != nil {
-				runtime.stop()
-				return nil, err
-			}
-		}
-
-		desired := systemnats.NewDesired()
-		placementRecords := applicationPlacements(cfg)
-		if cfg.adoptCluster {
-			// A joining node hosts the components but does not claim their
-			// placement: the founder's records stay authoritative and recovery
-			// moves them when their node is lost.
-			placementRecords = nil
-		}
-		initialServiceIDs := applicationPlacedServiceIDs(cfg)
-		if restoreControlState {
-			if err := transport.ServeDesired(ctx, cfg.nodeID, desired); err != nil {
-				runtime.stop()
-				return nil, err
-			}
-			runtime.startDesired(ctx, desired)
-			desiredView, err := waitForDesiredState(ctx, desired)
-			if err != nil {
-				runtime.stop()
-				return nil, err
-			}
-			placementRecords, initialServiceIDs = applicationStartupState(cfg, desiredView)
-		}
-
-		placement, err = systemnats.NewPlacement(placementRecords)
-		if err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		if err := transport.ServePlacement(ctx, cfg.nodeID, placement); err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		runtime.startPlacement(ctx, placement)
-		runtime.placement = placement
-		if !restoreControlState {
-			if err := transport.ServeDesired(ctx, cfg.nodeID, desired); err != nil {
-				runtime.stop()
-				return nil, err
-			}
-			runtime.startDesired(ctx, desired)
-		}
-
-		settled := func(nodes int) error {
-			if runtime.server == nil {
-				return nil
-			}
-			return controlPlaneSettled(int(runtime.metadataVoters.Load()), nodes)
-		}
-		health, err := systemnats.NewHealth(cfg.nodeID, membership, systemnats.HealthConfig{
-			MinNodes: systemnats.MinClusterNodes,
-			Settled:  settled,
-		})
-		if err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		// The cluster serves placement only once it has enough nodes.
-		placement.SetGate(func() error {
-			joined := len(health.Snapshot().Nodes)
-			if joined < systemnats.MinClusterNodes {
-				return systemnats.ClusterFormingError(joined, systemnats.MinClusterNodes)
-			}
-			return settled(joined)
-		})
-		if err := transport.ServeClusterView(ctx, cfg.nodeID, health); err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		runtime.startHealth(ctx, health)
-		runtime.startWitnessRelease(ctx, health)
-		runtime.startControlPlaneEvents(ctx, cfg, health)
-
-		componentSpecs := applicationComponentSpecs(cfg)
-		if cfg.systemNATSRecovery {
-			componentSpecs = applicationRecoveryComponentSpecs(cfg)
-		}
-		runtime.components = newComponentManager(
-			componentSpecs,
-			newExecutionStarter(url, cfg.nodeID),
-		)
-		if err := transport.ServeComponents(ctx, cfg.nodeID, runtime.components); err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		if err := transport.ServeDebug(ctx, cfg.nodeID, newDebugController(cfg.nodeID, cfg.runtimeDir, cfg.delvePath, runtime.components)); err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		if applicationDeclaresHandlers() {
-			if err := runtime.startHandlerPlacement(ctx, cfg, health); err != nil {
-				runtime.stop()
-				return nil, err
-			}
-		}
-		if err := runtime.components.start(ctx, initialServiceIDs); err != nil {
-			runtime.stop()
-			return nil, err
-		}
-		if cfg.systemNATSRecovery {
-			runtime.startRecovery(ctx, newServiceRecovery(cfg.nodeID, health, placement, runtime.components, transport))
-			runtime.startReconciler(ctx, &desiredReconciler{nodeID: cfg.nodeID, desired: desired, components: runtime.components})
-		}
-	}
-	if cfg.systemNATSSubject != "" {
-		handler := systemnats.Handler(func(_ context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
-			return grove.ResponseEnvelope{Payload: request.Payload}
-		})
-		if !cfg.systemNATSMembership && len(cfg.componentKinds) != 0 {
-			registry := &grove.Registry{}
-			var client *grove.Client
-			if cfg.routeSubject != "" {
-				client, err = transport.RoutedClient(cfg.routeSubject)
-				if err != nil {
-					runtime.stop()
-					return nil, err
-				}
-			}
-			for _, kind := range cfg.componentKinds {
-				component, _ := activeApplication.componentByKind(kind)
-				if component.HTTPHandler != nil {
-					runtime.stop()
-					return nil, fmt.Errorf("direct HTTP component %s requires clustered worker placement", component.Name)
-				}
-				if err := component.Register(ComponentContext{
-					Context:       ctx,
-					Registry:      registry,
-					Client:        client,
-					Configuration: cfg.applicationConfiguration.Value,
-					ConfigDigest:  cfg.applicationConfigDigest,
-					NodeID:        cfg.nodeID,
-					Options:       configuredOptions(cfg.componentOptions, kind),
-				}); err != nil {
-					runtime.stop()
-					return nil, fmt.Errorf("register application component %s: %w", component.Name, err)
-				}
-			}
-			dispatcher, err := grove.NewDispatcher(registry)
-			if err != nil {
-				runtime.stop()
-				return nil, err
-			}
-			handler = func(ctx context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
-				return dispatcher.Dispatch(ctx, request)
-			}
-		}
-		if err := transport.Serve(
-			ctx,
-			cfg.systemNATSSubject,
-			handler,
-		); err != nil {
-			runtime.stop()
-			return nil, err
-		}
-	}
-	if cfg.nodeID != "" {
-		if err := transport.ServeBootstrapReadiness(ctx, bootstrap.Readiness{
-			NodeID:         cfg.nodeID,
-			ArtifactDigest: cfg.applicationArtifactDigest,
-			State:          bootstrap.ReadinessHealthy,
-		}); err != nil {
-			runtime.stop()
-			return nil, err
-		}
-	}
-	return runtime, nil
-}
-
-func systemNATSStateExists(runtimeDir string) bool {
-	_, err := os.Stat(filepath.Join(runtimeDir, "system-nats"))
-	return err == nil
-}
-
-func applicationPlacements(cfg config) []systemnats.PlacementRecord {
-	placements := make([]systemnats.PlacementRecord, 0, len(cfg.componentKinds))
-	for _, kind := range cfg.componentKinds {
-		component, _ := activeApplication.componentByKind(kind)
-		placements = append(placements, systemnats.PlacementRecord{
-			ServiceID:         component.ServiceID,
-			NodeID:            cfg.nodeID,
-			InvocationSubject: componentInvocationSubject(cfg.systemNATSSubject, component.ServiceID),
-			ArtifactDigest:    cfg.applicationArtifactDigest,
-		})
-	}
-	return placements
-}
-
-func applicationComponentSpecs(cfg config) []componentSpec {
-	return componentSpecsForKinds(cfg, cfg.componentKinds)
-}
-
-func applicationRecoveryComponentSpecs(cfg config) []componentSpec {
-	kinds := make([]string, 0, len(activeApplication.Components))
-	for _, component := range activeApplication.Components {
-		if component.HTTPHandler != nil && configuredValue(cfg.componentListeners, component.Kind) == "" {
-			continue
-		}
-		kinds = append(kinds, component.Kind)
-	}
-	return componentSpecsForKinds(cfg, kinds)
-}
-
-func componentSpecsForKinds(cfg config, kinds []string) []componentSpec {
-	components := make([]componentSpec, 0, len(kinds))
-	for _, kind := range kinds {
-		component, _ := activeApplication.componentByKind(kind)
-		components = append(components, componentSpec{
-			serviceID:      component.ServiceID,
-			name:           component.Name,
-			kind:           component.Kind,
-			subject:        componentInvocationSubject(cfg.systemNATSSubject, component.ServiceID),
-			artifactDigest: cfg.applicationArtifactDigest,
-			codeVersion:    cfg.applicationCodeVersion,
-			listenAddress:  configuredValue(cfg.componentListeners, kind),
-			options:        configuredOptions(cfg.componentOptions, kind),
-			mode:           componentExecutionMode(cfg, kind),
-		})
-	}
-	return components
-}
-
-// componentExecutionMode is the initial execution policy: every component
-// runs in the node's shared application runtime unless it is explicitly
-// isolated.
-func componentExecutionMode(cfg config, kind string) systemnats.ExecutionMode {
-	if slices.Contains(cfg.isolatedComponents, kind) {
-		return systemnats.ExecutionIsolatedProcess
-	}
-	return systemnats.ExecutionInProcess
-}
-
-func applicationPlacedServiceIDs(cfg config) []grove.ServiceID {
-	serviceIDs := make([]grove.ServiceID, 0, len(cfg.componentKinds))
-	for _, kind := range cfg.componentKinds {
-		component, _ := activeApplication.componentByKind(kind)
-		serviceIDs = append(serviceIDs, component.ServiceID)
-	}
-	return serviceIDs
-}
-
-func applicationStartupState(cfg config, desired systemnats.DesiredView) ([]systemnats.PlacementRecord, []grove.ServiceID) {
-	if cfg.systemNATSRecovery && desired.Ready && len(desired.Deployments) != 0 {
-		return nil, nil
-	}
-	if cfg.adoptCluster {
-		return nil, applicationPlacedServiceIDs(cfg)
-	}
-	return applicationPlacements(cfg), applicationPlacedServiceIDs(cfg)
-}
-
-// rejoinRuntimePlacedCluster lets a restarted founding node rejoin a cluster
-// whose services recovery already moved to other nodes. It must not reclaim
-// those placements or bind the ingress a survivor now serves (grove#41), so
-// it joins like any other node: it hosts every non-ingress component without
-// claiming placement, and keeps the ingress listener only so recovery can move
-// the ingress back if its current node fails.
-func rejoinRuntimePlacedCluster(ctx context.Context, cfg config, transport *systemnats.Transport) (config, error) {
-	records, err := systemnats.RecordedPlacements(ctx, transport)
-	if err != nil {
-		return cfg, fmt.Errorf("read placements before rejoining: %w", err)
-	}
-	movedAway := slices.ContainsFunc(records, func(record systemnats.PlacementRecord) bool {
-		return record.NodeID != cfg.nodeID
-	})
-	if !movedAway {
-		return cfg, nil
-	}
-	cfg.hostAll = false
-	cfg.adoptCluster = true
-	cfg.componentKinds = slices.DeleteFunc(slices.Clone(cfg.componentKinds), func(kind string) bool {
-		component, _ := activeApplication.componentByKind(kind)
-		return component.HTTPHandler != nil
-	})
-	return cfg, nil
-}
-
-func waitForDesiredState(ctx context.Context, desired *systemnats.Desired) (systemnats.DesiredView, error) {
-	ticker := time.NewTicker(25 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		view := desired.Snapshot()
-		if view.Ready {
-			return view, nil
-		}
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			return systemnats.DesiredView{}, fmt.Errorf("wait for desired deployment state: %w", ctx.Err())
-		}
-	}
-}
-
-func parseListenAddress(address string) (string, int, error) {
-	host, portText, err := net.SplitHostPort(address)
-	if err != nil {
-		return "", 0, err
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil {
-		return "", 0, err
-	}
-	if port < 0 || port > 65535 {
-		return "", 0, syscall.EINVAL
-	}
-	return host, port, nil
-}
-
-func (r *systemNATSRuntime) startMembership(ctx context.Context, membership *systemnats.Membership) {
-	membershipCtx, cancel := context.WithCancel(ctx)
-	r.membershipCancel = cancel
-	r.membershipDone = make(chan struct{})
-	go func() {
-		defer close(r.membershipDone)
-		_ = membership.Run(membershipCtx, r.transport)
-	}()
-}
-
-func (r *systemNATSRuntime) startPlacement(ctx context.Context, placement *systemnats.Placement) {
-	placementCtx, cancel := context.WithCancel(ctx)
-	r.placementCancel = cancel
-	r.placementDone = make(chan struct{})
-	go func() {
-		defer close(r.placementDone)
-		_ = placement.Run(placementCtx, r.transport)
-	}()
-}
-
-func (r *systemNATSRuntime) startHealth(ctx context.Context, health *systemnats.Health) {
-	healthCtx, cancel := context.WithCancel(ctx)
-	r.healthCancel = cancel
-	r.healthDone = make(chan struct{})
-	go func() {
-		defer close(r.healthDone)
-		_ = health.Run(healthCtx, r.transport)
-	}()
-}
-
-func (r *systemNATSRuntime) startDesired(ctx context.Context, desired *systemnats.Desired) {
-	desiredCtx, cancel := context.WithCancel(ctx)
-	r.desiredCancel = cancel
-	r.desiredDone = make(chan struct{})
-	go func() {
-		defer close(r.desiredDone)
-		_ = desired.Run(desiredCtx, r.transport)
-	}()
-}
-
-func (r *systemNATSRuntime) startDeployments(ctx context.Context, deployments *systemnats.Deployments) {
-	deploymentsCtx, cancel := context.WithCancel(ctx)
-	r.deploymentsCancel = cancel
-	r.deploymentsDone = make(chan struct{})
-	go func() {
-		defer close(r.deploymentsDone)
-		_ = deployments.Run(deploymentsCtx, r.transport)
-	}()
-}
-
-// startControlPlaneEvents reports leader elections, voter changes and cluster
-// formation as lifecycle events, so they appear in the cluster log view.
-func (r *systemNATSRuntime) startControlPlaneEvents(ctx context.Context, cfg config, health *systemnats.Health) {
-	if r.server == nil {
-		return
-	}
-	eventsCtx, cancel := context.WithCancel(ctx)
-	r.eventsCancel = cancel
-	r.eventsDone = make(chan struct{})
-	go func() {
-		defer close(r.eventsDone)
-		ticker := time.NewTicker(250 * time.Millisecond)
-		defer ticker.Stop()
-		var (
-			leader     string
-			voters     int
-			joined     = -1
-			formed     bool
-			everLeader bool
-		)
-		emit := func(event lifecycleEvent) {
-			if cfg.emit == nil {
-				return
-			}
-			event.NodeID = cfg.nodeID
-			cfg.emit(event)
-		}
-		for {
-			select {
-			case <-ticker.C:
-			case <-eventsCtx.Done():
-				return
-			}
-			if count := len(health.Snapshot().Nodes); count != joined {
-				joined = count
-				if count >= systemnats.MinClusterNodes {
-					if !formed {
-						formed = true
-						emit(lifecycleEvent{Event: "cluster_formed", Detail: fmt.Sprintf("%d of %d nodes joined", count, systemnats.MinClusterNodes)})
-					}
-				} else if !formed {
-					emit(lifecycleEvent{Event: "cluster_forming", Detail: fmt.Sprintf("%d of %d nodes joined; not serving", count, systemnats.MinClusterNodes)})
-				}
-			}
-			nextLeader, nextVoters := r.server.MetadataState()
-			if nextVoters != 0 {
-				// Keep the last known size through a failed read, so a
-				// momentary gap does not count as a settled control plane.
-				r.metadataVoters.Store(int32(nextVoters))
-			}
-			if nextVoters != 0 && nextVoters != voters {
-				if voters != 0 {
-					emit(lifecycleEvent{Event: "metadata_voters", Voters: nextVoters, Detail: fmt.Sprintf("changed from %d", voters)})
-				}
-				voters = nextVoters
-			}
-			switch {
-			case nextLeader == leader:
-			case nextLeader == "":
-				emit(lifecycleEvent{Event: "metadata_leader_lost", Leader: leader, Voters: voters, Detail: "control plane has no leader; placement and cluster operations fail fast"})
-			case leader == "" && !everLeader:
-				emit(lifecycleEvent{Event: "metadata_leader_elected", Leader: nextLeader, Voters: voters})
-			case leader == "":
-				emit(lifecycleEvent{Event: "metadata_leader_elected", Leader: nextLeader, Voters: voters, Detail: "re-elected after leader loss"})
-			default:
-				emit(lifecycleEvent{Event: "metadata_leader_changed", Leader: nextLeader, Voters: voters, Detail: "from " + leader})
-			}
-			if nextLeader != "" {
-				everLeader = true
-			}
-			leader = nextLeader
-		}
-	}()
-}
-
-// controlPlaneSettled reports whether the JetStream metadata group has no more
-// voters than joined nodes. Zero voters means the embedded server has not
-// reported its metadata group yet. That is unknown, not settled: after a
-// cluster restart the founder's bootstrap witness rejoins as an extra voter
-// once the group forms, and serving placement before then would withdraw it
-// again until the witness is released.
-func controlPlaneSettled(voters, nodes int) error {
-	if voters == 0 {
-		return fmt.Errorf("%w: control-plane voters not yet observed", systemnats.ErrClusterSettling)
-	}
-	if voters > nodes {
-		return systemnats.ClusterSettlingError(voters, nodes)
-	}
-	return nil
-}
-
-// startWitnessRelease retires the bootstrap metadata witness once three
-// healthy logical nodes exist, so every node is one voter and the loss of any
-// single node leaves a quorum that can re-elect a metadata leader.
-func (r *systemNATSRuntime) startWitnessRelease(ctx context.Context, health *systemnats.Health) {
-	if r.server == nil {
-		return
-	}
-	witnessCtx, cancel := context.WithCancel(ctx)
-	r.witnessCancel = cancel
-	r.witnessDone = make(chan struct{})
-	go func() {
-		defer close(r.witnessDone)
-		ticker := time.NewTicker(500 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-			case <-witnessCtx.Done():
-				return
-			}
-			if !r.server.HasPeer() {
-				continue
-			}
-			healthy := 0
-			for _, node := range health.Snapshot().Nodes {
-				if node.Health == systemnats.HealthHealthy {
-					healthy++
-				}
-			}
-			if healthy < systemnats.MinClusterNodes {
-				continue
-			}
-			releaseCtx, releaseCancel := context.WithTimeout(witnessCtx, 30*time.Second)
-			if r.server.ControlStateSettled(releaseCtx) {
-				_ = r.server.ReleaseWitness(releaseCtx)
-			}
-			releaseCancel()
-		}
-	}()
-}
-
-func (r *systemNATSRuntime) startRecovery(ctx context.Context, recovery *serviceRecovery) {
-	recoveryCtx, cancel := context.WithCancel(ctx)
-	r.recoveryCancel = cancel
-	r.recoveryDone = make(chan struct{})
-	go func() {
-		defer close(r.recoveryDone)
-		_ = recovery.Run(recoveryCtx)
-	}()
-}
-
-func (r *systemNATSRuntime) startReconciler(ctx context.Context, reconciler *desiredReconciler) {
-	reconcileCtx, cancel := context.WithCancel(ctx)
-	r.reconcileCancel = cancel
-	r.reconcileDone = make(chan struct{})
-	go func() {
-		defer close(r.reconcileDone)
-		_ = reconciler.Run(reconcileCtx)
-	}()
-}
-
-func (r *systemNATSRuntime) stop() {
-	if r.eventsCancel != nil {
-		r.eventsCancel()
-		<-r.eventsDone
-		r.eventsCancel = nil
-	}
-	if r.witnessCancel != nil {
-		r.witnessCancel()
-		<-r.witnessDone
-		r.witnessCancel = nil
-	}
-	if r.reconcileCancel != nil {
-		r.reconcileCancel()
-		<-r.reconcileDone
-	}
-	if r.recoveryCancel != nil {
-		r.recoveryCancel()
-		<-r.recoveryDone
-	}
-	if r.components != nil {
-		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_ = r.components.stopAll(stopCtx)
-		cancel()
-	}
-	r.stopHandlerPlacement()
-	if r.healthCancel != nil {
-		r.healthCancel()
-		<-r.healthDone
-	}
-	if r.placementCancel != nil {
-		r.placementCancel()
-		<-r.placementDone
-	}
-	if r.desiredCancel != nil {
-		r.desiredCancel()
-		<-r.desiredDone
-	}
-	if r.deploymentsCancel != nil {
-		r.deploymentsCancel()
-		<-r.deploymentsDone
-	}
-	if r.membershipCancel != nil {
-		r.membershipCancel()
-		<-r.membershipDone
-	}
-	if r.transport != nil {
-		r.transport.Close()
-	}
-	if r.server != nil {
-		r.server.Shutdown()
-	}
-}
-
-func (r *systemNATSRuntime) gracefulLeave(ctx context.Context, nodeID string) error {
-	if r.membership == nil || r.transport == nil {
-		return nil
-	}
-	membership := r.membership.Snapshot()
-	if !membership.Ready {
-		return nil
-	}
-	if len(membership.Members) >= systemnats.MinClusterNodes && len(membership.Members)-1 < systemnats.MinClusterNodes {
-		return fmt.Errorf("%w: leaving would drop the cluster below %d nodes; add a replacement node first",
-			errClusterTooSmallToLeave, systemnats.MinClusterNodes)
-	}
-	if err := r.membership.BeginLeave(ctx, r.transport); err != nil {
-		return err
-	}
-	if r.reconcileCancel != nil {
-		r.reconcileCancel()
-		<-r.reconcileDone
-		r.reconcileCancel = nil
-	}
-	if r.recoveryCancel != nil {
-		r.recoveryCancel()
-		<-r.recoveryDone
-		r.recoveryCancel = nil
-	}
-	if r.components != nil {
-		if err := r.components.stopAll(ctx); err != nil {
-			return fmt.Errorf("stop components before node retirement: %w", err)
-		}
-	}
-	if r.healthCancel != nil {
-		r.healthCancel()
-		<-r.healthDone
-		r.healthCancel = nil
-	}
-	peerIDs := make([]string, 0, len(membership.Members)-1)
-	for _, member := range membership.Members {
-		if member.NodeID != nodeID {
-			peerIDs = append(peerIDs, member.NodeID)
-		}
-	}
-	if r.placement != nil && len(peerIDs) != 0 {
-		shouldRetire, err := r.waitForPlacementRetirement(ctx, nodeID, peerIDs, membership.Members)
-		if err != nil {
-			return err
-		}
-		if !shouldRetire {
-			return nil
-		}
-	}
-	if r.server != nil {
-		if r.server.HasPeer() && len(peerIDs) != 0 {
-			var transferErr error
-			for _, peerID := range peerIDs {
-				if err := r.transport.RequestPeer(ctx, peerID); err == nil {
-					transferErr = nil
-					break
-				} else {
-					transferErr = errors.Join(transferErr, err)
-				}
-			}
-			if transferErr != nil {
-				return fmt.Errorf("transfer System NATS metadata witness: %w", transferErr)
-			}
-		}
-		if err := r.server.PrepareRetire(ctx); err != nil {
-			return err
-		}
-	}
-	if err := r.membership.Leave(ctx, r.transport); err != nil {
-		return err
-	}
-	if len(peerIDs) != 0 {
-		if err := r.waitForMembershipRetirement(ctx, nodeID, peerIDs); err != nil {
-			return err
-		}
-	}
-	if r.server != nil {
-		if err := r.server.Retire(ctx); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (r *systemNATSRuntime) waitForMembershipRetirement(
-	ctx context.Context,
-	nodeID string,
-	peerIDs []string,
-) error {
-	ticker := time.NewTicker(25 * time.Millisecond)
-	defer ticker.Stop()
-	var last systemnats.MembershipView
-	var lastErr error
-	for {
-		for _, peerID := range peerIDs {
-			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-			view, err := r.transport.RequestMembership(requestCtx, peerID)
-			cancel()
-			if err != nil {
-				lastErr = err
-				continue
-			}
-			last = view
-			retired := view.Ready
-			for _, member := range view.Members {
-				if member.NodeID == nodeID {
-					retired = false
-					break
-				}
-			}
-			if retired {
-				return nil
-			}
-		}
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			return fmt.Errorf("wait for membership retirement of %s: membership=%#v: %w", nodeID, last, errors.Join(lastErr, ctx.Err()))
-		}
-	}
-}
-
-func (r *systemNATSRuntime) waitForPlacementRetirement(
-	ctx context.Context,
-	nodeID string,
-	peerIDs []string,
-	members []systemnats.MembershipRecord,
-) (bool, error) {
-	ticker := time.NewTicker(25 * time.Millisecond)
-	defer ticker.Stop()
-	var last systemnats.PlacementView
-	var lastErr error
-	for {
-		allLeaving, err := r.membership.AllLeaving(ctx, r.transport, members)
-		if err == nil && allLeaving {
-			return false, nil
-		}
-		if err != nil {
-			lastErr = err
-		}
-		for _, peerID := range peerIDs {
-			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-			view, err := r.transport.RequestPlacement(requestCtx, peerID)
-			cancel()
-			if err != nil {
-				lastErr = err
-				continue
-			}
-			last = view
-			if view.Ready && !placementReferencesNode(view, nodeID) {
-				return true, nil
-			}
-		}
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			return false, fmt.Errorf("wait for service relocation from %s: placement=%#v: %w", nodeID, last, errors.Join(lastErr, ctx.Err()))
-		}
-	}
-}
-
-func placementReferencesNode(view systemnats.PlacementView, nodeID string) bool {
-	for _, placement := range view.Placements {
-		if placement.NodeID == nodeID {
-			return true
-		}
-	}
-	return false
 }
 
 func prepareRuntimeDir(path string) error {
