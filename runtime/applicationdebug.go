@@ -8,12 +8,11 @@ import (
 	"io"
 	"os/exec"
 	"path/filepath"
-	"strconv"
-	"time"
 
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/internal/artifact"
-	"github.com/grove-project/grove/internal/nodeproc"
+	"github.com/grove-project/grove/internal/localcluster"
+	"github.com/grove-project/grove/internal/rollout"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
@@ -25,71 +24,58 @@ type debugDemoActionResult struct {
 	Status ClusterStatus `json:"status"`
 }
 
-func (c *applicationController) startDebugDemo(ctx context.Context, args []string) (any, error) {
-	operationCtx, cancel := context.WithTimeout(ctx, applicationOperationTimeout)
-	defer cancel()
-	configPath, err := parseDebugDemoArguments(args)
-	if err != nil {
-		return nil, err
-	}
-	c.operationMu.Lock()
-	defer c.operationMu.Unlock()
-	c.mu.RLock()
-	deployed := c.cluster != nil
-	c.mu.RUnlock()
-	if deployed {
-		return nil, errApplicationAlreadyDeployed
-	}
+// startDebugDemo builds a debug-capable artifact, starts the application's
+// fixed debug topology with Delve and activates the artifact.
+func (d *applicationDemo) startDebugDemo(ctx context.Context, configPath string) (debugDemoActionResult, error) {
 	delvePath, err := exec.LookPath("dlv")
 	if err != nil {
-		return nil, fmt.Errorf("locate Delve for debug demo: %w", err)
+		return debugDemoActionResult{}, fmt.Errorf("locate Delve for debug demo: %w", err)
 	}
 	compilation, err := compileApplicationConfiguration(configPath)
 	if err != nil {
-		return nil, fmt.Errorf("compile debug demo configuration: %w", err)
+		return debugDemoActionResult{}, fmt.Errorf("compile debug demo configuration: %w", err)
 	}
-	artifactPath := filepath.Join(c.runtimeDir, "application-debug")
-	inspection, err := artifact.EmbedFile(c.binaryPath, artifactPath, compilation)
+	artifactPath := filepath.Join(d.runtimeDir, "application-debug")
+	inspection, err := artifact.EmbedFile(d.binaryPath, artifactPath, compilation)
 	if err != nil {
-		return nil, fmt.Errorf("build debug-capable application artifact: %w", err)
+		return debugDemoActionResult{}, fmt.Errorf("build debug-capable application artifact: %w", err)
 	}
-	cluster, err := startDebugApplicationCluster(operationCtx, artifactPath, delvePath, inspection)
+	cluster, err := startDebugApplicationCluster(ctx, artifactPath, delvePath, inspection)
 	if err != nil {
-		return nil, err
+		return debugDemoActionResult{}, err
 	}
 	cleanup := true
 	defer func() {
 		if cleanup {
-			cleanupApplicationNodes(cluster.nodes)
+			_ = cluster.local.Cleanup()
 		}
 	}()
-	transport, err := systemnats.Connect(operationCtx, cluster.systemNATSURL)
+	transport, err := systemnats.Connect(ctx, cluster.systemNATSURL)
 	if err != nil {
-		return nil, fmt.Errorf("connect to debug demo cluster: %w", err)
+		return debugDemoActionResult{}, fmt.Errorf("connect to debug demo cluster: %w", err)
 	}
 	defer transport.Close()
-	if err := waitForDebugApplicationPlacement(operationCtx, transport, inspection.ArtifactDigest); err != nil {
-		return nil, fmt.Errorf("wait for debug demo placement: %w\n%s", err, applicationDiagnostics(cluster.nodes))
+	if err := localcluster.WaitServing(ctx, transport, localcluster.Serving{
+		Observer: localcluster.NodeID(0), Nodes: activeApplication.scenarioDebugNodeCount(),
+		Placements: debugApplicationPlacements(), ArtifactDigest: inspection.ArtifactDigest, RequireWorker: true,
+	}); err != nil {
+		return debugDemoActionResult{}, fmt.Errorf("wait for debug demo placement: %w\n%s", err, cluster.local.Diagnostics())
 	}
-	record := applicationArtifactRecord(inspection)
-	if err := transport.PutDeploymentArtifact(operationCtx, "node-1", record); err != nil {
-		return nil, fmt.Errorf("record debug demo artifact: %w", err)
+	operator, err := demoRollout(transport, localcluster.NodeID(0))
+	if err != nil {
+		return debugDemoActionResult{}, err
 	}
-	if err := transport.PutRollout(operationCtx, "node-2", debugApplicationRollout(record)); err != nil {
-		return nil, fmt.Errorf("activate debug demo rollout: %w", err)
+	if _, err := operator.Activate(ctx, applicationArtifactRecord(inspection), debugApplicationGeneration()); err != nil {
+		return debugDemoActionResult{}, fmt.Errorf("activate debug demo rollout: %w", err)
 	}
-	c.mu.Lock()
-	c.cluster = cluster
-	c.lastEvent = "started five-node debug demo"
-	c.mu.Unlock()
-	status, err := c.waitForStatus(operationCtx, func(status ClusterStatus) bool {
+	d.attach(cluster)
+	d.event("started five-node debug demo")
+	status, err := waitForClusterStatus(ctx, cluster.webAddress, func(status ClusterStatus) bool {
 		return debugApplicationStatusHealthy(status, inspection.ArtifactDigest)
 	})
 	if err != nil {
-		c.mu.Lock()
-		c.cluster = nil
-		c.mu.Unlock()
-		return nil, fmt.Errorf("wait for debug demo status: %w\n%s", err, applicationDiagnostics(cluster.nodes))
+		d.attach(nil)
+		return debugDemoActionResult{}, fmt.Errorf("wait for debug demo status: %w\n%s", err, cluster.local.Diagnostics())
 	}
 	cleanup = false
 	return debugDemoActionResult{State: "active", WebURL: "http://" + cluster.webAddress, Status: status}, nil
@@ -114,121 +100,25 @@ func startDebugApplicationCluster(ctx context.Context, artifactPath, delvePath s
 	if nodeCount < 1 {
 		return nil, fmt.Errorf("start debug demo cluster: %w", errApplicationScenarioNodes)
 	}
-	routePorts, err := reserveApplicationPorts(nodeCount)
+	components, err := applicationTopology(activeApplication.scenarioDebugPlacements())
 	if err != nil {
-		return nil, fmt.Errorf("reserve debug demo route ports: %w", err)
+		return nil, err
 	}
-	webPorts, err := reserveApplicationPorts(1)
+	webAddress, err := defaultIngressAddress()
 	if err != nil {
-		return nil, fmt.Errorf("reserve debug demo Web port: %w", err)
+		return nil, err
 	}
-	cluster := &applicationCluster{
-		webAddress: "127.0.0.1:" + strconv.Itoa(webPorts[0]),
-		artifact:   inspection, debugDemo: true,
-	}
-	extras := make([][]string, nodeCount)
-	for _, placement := range activeApplication.scenarioDebugPlacements() {
-		index := applicationNodeIndex(placement.NodeID)
-		component, ok := activeApplication.componentByID(placement.ServiceID)
-		if !ok || index < 0 || index >= len(extras) {
-			return nil, fmt.Errorf("invalid debug scenario placement: service %d on %q", placement.ServiceID, placement.NodeID)
-		}
-		extras[index] = append(extras[index], "--component", component.Kind)
-		for _, option := range placement.Options {
-			extras[index] = append(extras[index], "--component-option", component.Kind+"="+option)
-		}
-		if component.HTTPHandler != nil {
-			extras[index] = append(extras[index], "--component-listen", component.Kind+"="+cluster.webAddress)
-		}
-	}
-	for i, extra := range extras {
-		seed := 0
-		if i == 0 && len(extras) > 1 {
-			seed = 1
-		}
-		nodeID := fmt.Sprintf("node-%d", i+1)
-		args := []string{
-			"--node-id", nodeID,
-			"--advertise-endpoint", "nats-subject://system/" + nodeID,
-			"--system-nats-listen", "127.0.0.1:0",
-			"--system-nats-route-listen", "127.0.0.1:" + strconv.Itoa(routePorts[i]),
-			"--system-nats-seed", "nats-route://127.0.0.1:" + strconv.Itoa(routePorts[seed]),
-			"--system-nats-membership",
-			"--system-nats-subject", "_GROVE.system.application.debug." + nodeID,
-			"--delve-path", delvePath,
-		}
-		node, err := nodeproc.Start(artifactPath, append(args, extra...)...)
-		if err != nil {
-			cleanupApplicationNodes(cluster.nodes)
-			return nil, fmt.Errorf("start debug demo %s: %w", nodeID, err)
-		}
-		cluster.nodes = append(cluster.nodes, node)
-	}
-	for i, node := range cluster.nodes {
-		if err := node.WaitReady(ctx); err != nil {
-			cleanupApplicationNodes(cluster.nodes)
-			return nil, fmt.Errorf("wait for debug demo node-%d: %w\n%s", i+1, err, applicationDiagnostics(cluster.nodes))
-		}
-	}
-	cluster.systemNATSURL, err = applicationSystemNATSURL(cluster.nodes[0].Logs())
+	local, err := localcluster.Start(ctx, artifactPath, localcluster.Spec{
+		Nodes: nodeCount, Components: components, IngressAddress: webAddress,
+		SubjectRoot: "_GROVE.system.application.debug.", DelvePath: delvePath,
+	})
 	if err != nil {
-		cleanupApplicationNodes(cluster.nodes)
-		return nil, fmt.Errorf("read debug demo System NATS URL: %w\n%s", err, applicationDiagnostics(cluster.nodes))
+		return nil, fmt.Errorf("start debug demo cluster: %w", err)
 	}
-	return cluster, nil
-}
-
-func waitForDebugApplicationPlacement(ctx context.Context, transport *systemnats.Transport, digest string) error {
-	want := debugApplicationPlacements()
-	ticker := time.NewTicker(applicationConditionInterval)
-	defer ticker.Stop()
-	var lastCluster systemnats.ClusterView
-	var lastPlacement systemnats.PlacementView
-	var lastErr error
-	for {
-		attemptCtx, cancel := context.WithTimeout(ctx, time.Second)
-		cluster, clusterErr := transport.RequestClusterView(attemptCtx, "node-1")
-		placement, placementErr := transport.RequestPlacement(attemptCtx, "node-1")
-		if clusterErr == nil {
-			lastCluster = cluster
-		}
-		if placementErr == nil {
-			lastPlacement = placement
-		}
-		ready := clusterErr == nil && cluster.Ready && len(cluster.Nodes) == activeApplication.scenarioDebugNodeCount() &&
-			placementErr == nil && placement.Ready && len(placement.Placements) == len(want)
-		for _, node := range cluster.Nodes {
-			ready = ready && node.Health == systemnats.HealthHealthy
-		}
-		for _, record := range placement.Placements {
-			wantNode, expected := want[record.ServiceID]
-			ready = ready && expected && record.NodeID == wantNode && record.ArtifactDigest == digest
-			components, err := transport.RequestComponents(attemptCtx, record.NodeID)
-			if err != nil {
-				lastErr = errors.Join(lastErr, err)
-				ready = false
-				continue
-			}
-			found := false
-			for _, component := range components.Components {
-				if component.ServiceID == record.ServiceID && component.InvocationSubject == record.InvocationSubject && component.State == systemnats.ComponentHealthy && component.WorkerID != "" {
-					found = true
-					break
-				}
-			}
-			ready = ready && found
-		}
-		cancel()
-		if ready {
-			return nil
-		}
-		lastErr = errors.Join(lastErr, clusterErr, placementErr)
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			return fmt.Errorf("cluster=%#v placement=%#v: %w", lastCluster, lastPlacement, errors.Join(lastErr, ctx.Err()))
-		}
-	}
+	return &applicationCluster{
+		local: local, systemNATSURL: local.SystemNATSURL(),
+		webAddress: webAddress, artifact: inspection, debugDemo: true,
+	}, nil
 }
 
 func debugApplicationPlacements() map[grove.ServiceID]string {
@@ -239,19 +129,13 @@ func debugApplicationPlacements() map[grove.ServiceID]string {
 	return placements
 }
 
-func debugApplicationRollout(artifact systemnats.DeploymentArtifact) systemnats.Rollout {
-	nodes := make([]systemnats.RolloutNodeProgress, activeApplication.scenarioDebugNodeCount())
-	for i := range nodes {
-		nodes[i] = systemnats.RolloutNodeProgress{
-			NodeID: fmt.Sprintf("node-%d", i+1), CurrentArtifactDigest: artifact.ArtifactDigest,
-			Phase: systemnats.RolloutActive,
-		}
+// debugApplicationGeneration is the debug demo's only rollout generation.
+func debugApplicationGeneration() rollout.Generation {
+	nodeIDs := make([]string, activeApplication.scenarioDebugNodeCount())
+	for i := range nodeIDs {
+		nodeIDs[i] = localcluster.NodeID(i)
 	}
-	return systemnats.Rollout{
-		ApplicationID: artifact.ApplicationID, ClusterID: artifact.ClusterID,
-		RolloutID: activeApplicationName() + "-debug-1", Generation: 1,
-		CurrentArtifactDigest: artifact.ArtifactDigest, Phase: systemnats.RolloutActive, Nodes: nodes,
-	}
+	return rollout.Generation{RolloutID: activeApplicationName() + "-debug-1", Generation: 1, NodeIDs: nodeIDs}
 }
 
 func debugApplicationStatusHealthy(status ClusterStatus, digest string) bool {

@@ -28,7 +28,7 @@ func commit(t *testing.T, stored, next Rollout) Rollout {
 	return next
 }
 
-// TestHealthyUpgradeStepsCommit walks CommitHealthyUpgrade's records through
+// TestHealthyUpgradeStepsCommit walks rollout.Operator.Commit's records through
 // the domain rules: pending -> candidate-healthy -> switching -> active.
 func TestHealthyUpgradeStepsCommit(t *testing.T) {
 	pending := rollout(RolloutPending, 2, digestA, digestB, "n1", "n2")
@@ -60,7 +60,7 @@ func TestHealthyUpgradeStepsCommit(t *testing.T) {
 	}
 }
 
-// TestRollbackStepsCommit walks RollbackFailedUpgrade's records from each
+// TestRollbackStepsCommit walks rollout.Operator.Rollback's records from each
 // in-flight phase: candidate-failed -> rolling-back -> rolled-back.
 func TestRollbackStepsCommit(t *testing.T) {
 	failure := RolloutFailure{Code: "unhealthy", Message: "candidate did not become ready"}

@@ -96,7 +96,7 @@ func TestDebugDemoDeploysFiveDiscoverableWorkers(t *testing.T) {
 }
 
 func waitForText(ctx context.Context, output *synchronizedBuffer, fragments ...string) error {
-	ticker := time.NewTicker(debugDemoConditionInterval)
+	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		text := output.String()

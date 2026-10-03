@@ -4,22 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/console"
 	"github.com/grove-project/grove/internal/artifact"
-	"github.com/grove-project/grove/internal/nodeproc"
+	"github.com/grove-project/grove/internal/localcluster"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
@@ -29,34 +24,42 @@ const (
 )
 
 var (
-	errApplicationConfigRequired = errors.New("rollout configuration path is required")
-	errApplicationNotDeployed    = errors.New("Grove application is not deployed")
-	errCandidateMustFail         = errors.New("a second lifecycle rollout must exercise application-owned invalid configuration")
-	// errApplicationScenarioNodes is returned by the scripted demo actions for
-	// an application whose Scenario declares no demo nodes, such as one that
-	// leaves component placement to the runtime (grove#43).
-	errApplicationScenarioNodes = errors.New("application scenario declares no demo nodes")
+	errApplicationNotDeployed = errors.New("Grove application is not deployed")
 )
 
+// applicationController is the operator console's facade. It registers the
+// console actions, serializes operations, and holds what the console shows:
+// the attached cluster, the startup offer and the last event. The work
+// behind each action belongs to an owner:
+//
+//   - applicationHost: hosting nodes in this process (discovery, start, join, leave)
+//   - applicationDemo: the scripted demo scenarios (rollout, resilience, restart, debug demo)
+//   - internal/rollout, via the demos: every deployment-intent write
+//   - internal/localcluster, via host and demos: every node process
+//   - internal/debuggateway: debugger sessions
 type applicationController struct {
-	binaryPath     string
-	runtimeDir     string
-	operationMu    sync.Mutex
+	host *applicationHost
+	demo *applicationDemo
+
+	// operationMu serializes operations that change the attached cluster.
+	operationMu sync.Mutex
+
 	mu             sync.RWMutex
 	cluster        *applicationCluster
-	discovery      *applicationDiscovery
 	startup        artifact.Inspection
 	startAvailable bool
 	joinAvailable  bool
 	startupNodes   int
-	localNodeIDs   []string
 	lastEvent      string
 	debugSessions  map[string]console.DebugSession
 	startedAt      time.Time
 }
 
+// applicationCluster is the cluster the console is attached to.
 type applicationCluster struct {
-	nodes         []*nodeproc.Process
+	// local holds the nodes this process hosts; nil while the console only
+	// observes a discovered cluster.
+	local         *localcluster.Cluster
 	systemNATSURL string
 	webAddress    string
 	artifact      artifact.Inspection
@@ -64,31 +67,17 @@ type applicationCluster struct {
 	debugDemo     bool
 }
 
-type rolloutActionResult struct {
-	State       string          `json:"state"`
-	WebURL      string          `json:"web_url"`
-	Transitions []ClusterStatus `json:"transitions"`
-	Status      ClusterStatus   `json:"status"`
-}
-
-type resilienceActionResult struct {
-	FailedNodeID    string        `json:"failed_node_id"`
-	RecoveredNodeID string        `json:"recovered_node_id"`
-	Result          any           `json:"result"`
-	Status          ClusterStatus `json:"status"`
-}
-
-type applicationJoinResult struct {
-	State   string   `json:"state"`
-	NodeIDs []string `json:"node_ids"`
-}
-
 func newApplicationController(binaryPath, runtimeDir string) *applicationController {
-	return &applicationController{
-		binaryPath: binaryPath, runtimeDir: runtimeDir,
+	c := &applicationController{
+		host:          newApplicationHost(binaryPath),
 		debugSessions: make(map[string]console.DebugSession),
 		startedAt:     time.Now(),
 	}
+	c.demo = &applicationDemo{
+		binaryPath: binaryPath, runtimeDir: runtimeDir,
+		event: c.setLastEvent, attach: c.attach,
+	}
+	return c
 }
 
 func registerApplicationConsoleActions(registry *console.Registry, controller *applicationController) error {
@@ -191,6 +180,8 @@ func registerApplicationConsoleActions(registry *console.Registry, controller *a
 	return nil
 }
 
+// startRollout runs the scripted rollout demo: the first rollout deploys a
+// known-good artifact, the next rejects a broken candidate.
 func (c *applicationController) startRollout(ctx context.Context, args []string) (any, error) {
 	operationCtx, cancel := context.WithTimeout(ctx, applicationOperationTimeout)
 	defer cancel()
@@ -201,38 +192,17 @@ func (c *applicationController) startRollout(ctx context.Context, args []string)
 	c.setLastEvent("rollout: validating " + filepath.Base(configPath))
 	c.operationMu.Lock()
 	defer c.operationMu.Unlock()
-	c.mu.RLock()
-	deployed := c.cluster != nil
-	c.mu.RUnlock()
-	if !deployed {
-		result, rolloutErr := c.startKnownGood(operationCtx, configPath)
-		if rolloutErr != nil {
-			c.setLastEvent("rollout failed: " + rolloutErr.Error())
-		}
-		return result, rolloutErr
+	cluster := c.attached()
+	var result rolloutActionResult
+	if cluster == nil {
+		result, err = c.demo.startKnownGood(operationCtx, configPath)
+	} else {
+		result, err = c.demo.rejectBrokenCandidate(operationCtx, cluster, configPath)
 	}
-	result, rolloutErr := c.rejectBrokenCandidate(operationCtx, configPath)
-	if rolloutErr != nil {
-		c.setLastEvent("rollout failed: " + rolloutErr.Error())
+	if err != nil {
+		c.setLastEvent("rollout failed: " + err.Error())
 	}
-	return result, rolloutErr
-}
-
-func parseRolloutArguments(args []string) (string, error) {
-	flags := flag.NewFlagSet("rollout.start", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	var configPath string
-	flags.StringVar(&configPath, "config", "", "application YAML configuration path")
-	if err := flags.Parse(args); err != nil {
-		return "", fmt.Errorf("parse rollout.start arguments: %w", err)
-	}
-	if flags.NArg() != 0 {
-		return "", fmt.Errorf("parse rollout.start arguments: %w: %q", errConsoleArguments, flags.Args())
-	}
-	if configPath == "" {
-		return "", errApplicationConfigRequired
-	}
-	return configPath, nil
+	return result, err
 }
 
 func (c *applicationController) runResilience(ctx context.Context, args []string) (any, error) {
@@ -243,69 +213,31 @@ func (c *applicationController) runResilience(ctx context.Context, args []string
 	}
 	c.operationMu.Lock()
 	defer c.operationMu.Unlock()
-	c.mu.RLock()
-	cluster := c.cluster
-	c.mu.RUnlock()
+	cluster := c.attached()
 	if cluster == nil {
 		return nil, errApplicationNotDeployed
 	}
-	if cluster.failedNodeID != "" {
+	c.mu.RLock()
+	failedNodeID := cluster.failedNodeID
+	c.mu.RUnlock()
+	if failedNodeID != "" {
 		return nil, errors.New("restart the cluster before running another resilience scenario")
 	}
-	if activeApplication.Scenario == nil || activeApplication.Scenario.RecoveryServiceID == 0 || activeApplication.Scenario.Probe == nil || activeApplication.Scenario.ProbeHealthy == nil {
-		return nil, errors.New("application does not define a resilience scenario")
-	}
-	targetServiceID := activeApplication.Scenario.RecoveryServiceID
-	targetName := applicationServiceName(targetServiceID)
-	transport, err := systemnats.Connect(operationCtx, cluster.systemNATSURL)
+	result, err := c.demo.runResilience(operationCtx, cluster)
 	if err != nil {
-		return nil, fmt.Errorf("connect to application cluster: %w", err)
-	}
-	placement, err := transport.RequestPlacement(operationCtx, "node-3")
-	if err != nil {
-		transport.Close()
-		return nil, fmt.Errorf("read %s placement: %w", targetName, err)
-	}
-	failedNodeID := applicationPlacementNode(placement.Placements, targetServiceID)
-	failedIndex := applicationNodeIndex(failedNodeID)
-	if failedIndex < 0 || failedIndex >= len(cluster.nodes) {
-		transport.Close()
-		return nil, fmt.Errorf("%s host %q is not a managed Grovlet", targetName, failedNodeID)
-	}
-	transport.Close()
-	if err := cluster.nodes[failedIndex].Kill(operationCtx); err != nil {
-		return nil, fmt.Errorf("kill %s host %s: %w", targetName, failedNodeID, err)
-	}
-	transport, err = systemnats.Connect(operationCtx, cluster.systemNATSURL)
-	if err != nil {
-		return nil, fmt.Errorf("reconnect after %s host failure: %w", targetName, err)
-	}
-	defer transport.Close()
-	recoveredNodeID, err := waitForApplicationRecovery(operationCtx, transport, targetServiceID, failedNodeID, cluster.artifact.ArtifactDigest)
-	if err != nil {
-		return nil, fmt.Errorf("recover %s after node loss: %w\n%s", targetName, err, applicationDiagnostics(cluster.nodes))
-	}
-	if err := putApplicationDesired(operationCtx, transport, applicationDesiredDeployment(cluster.artifact, recoveredNodeID)); err != nil {
 		return nil, err
 	}
-	result, err := waitForApplicationProbe(operationCtx, cluster.webAddress, "resilience-probe")
-	if err != nil {
-		return nil, fmt.Errorf("run application probe after %s recovery: %w", targetName, err)
-	}
-	if !activeApplication.Scenario.ProbeHealthy(result) {
-		return nil, fmt.Errorf("recovered application probe did not complete: %#v", result)
-	}
 	c.mu.Lock()
-	cluster.failedNodeID = failedNodeID
-	c.lastEvent = targetName + " recovered from " + failedNodeID + " on " + recoveredNodeID
+	cluster.failedNodeID = result.FailedNodeID
+	cluster.systemNATSURL = cluster.local.SystemNATSURL()
+	c.lastEvent = applicationServiceName(activeApplication.Scenario.RecoveryServiceID) + " recovered from " + result.FailedNodeID + " on " + result.RecoveredNodeID
 	c.mu.Unlock()
 	status, err := c.status(operationCtx)
 	if err != nil {
 		return nil, fmt.Errorf("read recovered application status: %w", err)
 	}
-	return resilienceActionResult{
-		FailedNodeID: failedNodeID, RecoveredNodeID: recoveredNodeID, Result: result, Status: status,
-	}, nil
+	result.Status = status
+	return result, nil
 }
 
 func (c *applicationController) restartCluster(ctx context.Context, args []string) (any, error) {
@@ -316,603 +248,91 @@ func (c *applicationController) restartCluster(ctx context.Context, args []strin
 	}
 	c.operationMu.Lock()
 	defer c.operationMu.Unlock()
-	c.mu.RLock()
-	cluster := c.cluster
-	c.mu.RUnlock()
-	if cluster == nil {
+	cluster := c.attached()
+	if cluster == nil || cluster.local == nil {
 		return nil, errApplicationNotDeployed
 	}
-	for i := len(cluster.nodes) - 1; i >= 0; i-- {
-		if fmt.Sprintf("node-%d", i+1) == cluster.failedNodeID {
-			continue
-		}
-		if err := cluster.nodes[i].Stop(operationCtx); err != nil {
-			return nil, fmt.Errorf("stop node-%d for durable restart: %w\n%s", i+1, err, applicationDiagnostics(cluster.nodes))
-		}
-	}
-	for i, node := range cluster.nodes {
-		if err := node.Restart(); err != nil {
-			return nil, fmt.Errorf("restart node-%d: %w\n%s", i+1, err, applicationDiagnostics(cluster.nodes))
-		}
-	}
-	for i, node := range cluster.nodes {
-		if err := node.WaitReady(operationCtx); err != nil {
-			return nil, fmt.Errorf("wait for restarted node-%d: %w\n%s", i+1, err, applicationDiagnostics(cluster.nodes))
-		}
-	}
-	systemNATSURL, err := applicationSystemNATSURL(cluster.nodes[0].Logs())
-	if err != nil {
-		return nil, fmt.Errorf("read restarted System NATS URL: %w", err)
+	c.mu.RLock()
+	failedNodeID := cluster.failedNodeID
+	c.mu.RUnlock()
+	if err := cluster.local.Restart(operationCtx, failedNodeID); err != nil {
+		return nil, err
 	}
 	c.mu.Lock()
-	cluster.systemNATSURL = systemNATSURL
+	cluster.systemNATSURL = cluster.local.SystemNATSURL()
 	cluster.failedNodeID = ""
 	c.lastEvent = "reconstructed deployment from durable state"
 	c.mu.Unlock()
-	status, err := c.waitForStatus(operationCtx, func(status ClusterStatus) bool {
+	status, err := waitForClusterStatus(operationCtx, cluster.webAddress, func(status ClusterStatus) bool {
 		return applicationStatusHealthy(status, cluster.artifact.ArtifactDigest)
 	})
 	if err != nil {
-		return nil, fmt.Errorf("wait for reconstructed application status: %w\n%s", err, applicationDiagnostics(cluster.nodes))
+		return nil, fmt.Errorf("wait for reconstructed application status: %w\n%s", err, cluster.local.Diagnostics())
 	}
 	return status, nil
 }
 
-func (c *applicationController) startKnownGood(ctx context.Context, configPath string) (rolloutActionResult, error) {
-	compilation, err := compileApplicationConfiguration(configPath)
+func (c *applicationController) startDebugDemo(ctx context.Context, args []string) (any, error) {
+	operationCtx, cancel := context.WithTimeout(ctx, applicationOperationTimeout)
+	defer cancel()
+	configPath, err := parseDebugDemoArguments(args)
 	if err != nil {
-		return rolloutActionResult{}, fmt.Errorf("compile known-good configuration: %w", err)
+		return nil, err
 	}
-	c.setLastEvent("rollout: building configured artifact " + compilation.Revision)
-	artifactPath := filepath.Join(c.runtimeDir, "application-active")
-	inspection, err := artifact.EmbedFile(c.binaryPath, artifactPath, compilation)
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
+	if c.attached() != nil {
+		return nil, errApplicationAlreadyDeployed
+	}
+	result, err := c.demo.startDebugDemo(operationCtx, configPath)
 	if err != nil {
-		return rolloutActionResult{}, fmt.Errorf("build known-good application artifact: %w", err)
+		return nil, err
 	}
-	c.setLastEvent("rollout: starting three Grovlets")
-	cluster, err := startApplicationCluster(ctx, artifactPath, inspection)
-	if err != nil {
-		return rolloutActionResult{}, err
-	}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			cleanupApplicationNodes(cluster.nodes)
-		}
-	}()
-	transport, err := systemnats.Connect(ctx, cluster.systemNATSURL)
-	if err != nil {
-		return rolloutActionResult{}, fmt.Errorf("connect to application cluster: %w", err)
-	}
-	defer transport.Close()
-	c.setLastEvent("rollout: waiting for service placement")
-	if err := waitForApplicationPlacement(ctx, transport, inspection.ArtifactDigest); err != nil {
-		return rolloutActionResult{}, fmt.Errorf("wait for application placement: %w\n%s", err, applicationDiagnostics(cluster.nodes))
-	}
-	desired := applicationDesiredDeployment(inspection, "node-2")
-	if err := putApplicationDesired(ctx, transport, desired); err != nil {
-		return rolloutActionResult{}, err
-	}
-	record := applicationArtifactRecord(inspection)
-	if err := transport.PutDeploymentArtifact(ctx, "node-1", record); err != nil {
-		return rolloutActionResult{}, fmt.Errorf("record known-good artifact: %w", err)
-	}
-	c.setLastEvent("rollout: activating " + inspection.Config.Revision)
-	active := applicationRollout(1, record.ClusterID, record.ArtifactDigest, "", systemnats.RolloutActive)
-	if err := transport.PutRollout(ctx, "node-2", active); err != nil {
-		return rolloutActionResult{}, fmt.Errorf("activate known-good rollout: %w", err)
-	}
+	return result, nil
+}
+
+// attached returns the cluster the console is attached to, or nil.
+func (c *applicationController) attached() *applicationCluster {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cluster
+}
+
+// attach makes cluster the one the console shows; nil detaches.
+func (c *applicationController) attach(cluster *applicationCluster) {
 	c.mu.Lock()
 	c.cluster = cluster
-	c.lastEvent = "deployed " + inspection.Config.Revision
 	c.mu.Unlock()
-	status, err := c.waitForStatus(ctx, func(status ClusterStatus) bool {
-		return applicationStatusHealthy(status, inspection.ArtifactDigest) && status.Rollout != nil && status.Rollout.Phase == string(systemnats.RolloutActive)
-	})
-	if err != nil {
-		c.mu.Lock()
-		c.cluster = nil
-		c.mu.Unlock()
-		return rolloutActionResult{}, fmt.Errorf("wait for known-good application status: %w\n%s", err, applicationDiagnostics(cluster.nodes))
-	}
-	cleanup = false
-	return rolloutActionResult{
-		State: "active", WebURL: "http://" + cluster.webAddress,
-		Transitions: []ClusterStatus{status}, Status: status,
-	}, nil
-}
-
-func (c *applicationController) rejectBrokenCandidate(ctx context.Context, configPath string) (rolloutActionResult, error) {
-	c.mu.RLock()
-	cluster := c.cluster
-	c.mu.RUnlock()
-	if cluster == nil {
-		return rolloutActionResult{}, errApplicationNotDeployed
-	}
-	compilation, validation, err := compileInvalidCandidateConfiguration(configPath)
-	if err != nil {
-		return rolloutActionResult{}, err
-	}
-	c.setLastEvent("rollout: building candidate " + compilation.Revision)
-	candidatePath := filepath.Join(c.runtimeDir, "application-candidate")
-	inspection, err := artifact.EmbedFile(c.binaryPath, candidatePath, compilation)
-	if err != nil {
-		return rolloutActionResult{}, fmt.Errorf("build candidate application artifact: %w", err)
-	}
-	transport, err := systemnats.Connect(ctx, cluster.systemNATSURL)
-	if err != nil {
-		return rolloutActionResult{}, fmt.Errorf("connect to application cluster: %w", err)
-	}
-	defer transport.Close()
-	candidate := applicationArtifactRecord(inspection)
-	c.setLastEvent("rollout: recording candidate " + inspection.Config.Revision)
-	if err := transport.PutDeploymentArtifact(ctx, "node-1", candidate); err != nil {
-		return rolloutActionResult{}, fmt.Errorf("record candidate artifact: %w", err)
-	}
-	pending := applicationRollout(2, candidate.ClusterID, cluster.artifact.ArtifactDigest, candidate.ArtifactDigest, systemnats.RolloutPending)
-	if err := transport.PutRollout(ctx, "node-3", pending); err != nil {
-		return rolloutActionResult{}, fmt.Errorf("record pending candidate: %w", err)
-	}
-	pendingStatus, err := c.waitForStatus(ctx, func(status ClusterStatus) bool {
-		return status.Rollout != nil && status.Rollout.Phase == string(systemnats.RolloutPending) &&
-			status.CandidateArtifact != nil && status.CandidateArtifact.ArtifactDigest == candidate.ArtifactDigest
-	})
-	if err != nil {
-		return rolloutActionResult{}, fmt.Errorf("observe pending candidate: %w", err)
-	}
-	targetServiceID := activeApplication.Scenario.RecoveryServiceID
-	targetComponent, _ := activeApplication.componentByID(targetServiceID)
-	c.setLastEvent("rollout: starting candidate " + targetComponent.Name)
-	candidateNode, err := nodeproc.Start(
-		candidatePath,
-		"--node-id", "node-2-candidate",
-		"--advertise-endpoint", "nats-subject://system/node-2-candidate",
-		"--system-nats-url", cluster.systemNATSURL,
-		"--system-nats-subject", "_GROVE.system.application.candidate."+targetComponent.Kind,
-		"--component", targetComponent.Kind,
-	)
-	if err != nil {
-		return rolloutActionResult{}, fmt.Errorf("start %s candidate: %w", targetComponent.Name, err)
-	}
-	defer candidateNode.Cleanup()
-	candidateCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	readyErr := candidateNode.WaitReady(candidateCtx)
-	cancel()
-	if readyErr == nil {
-		return rolloutActionResult{}, fmt.Errorf("invalid %s candidate became ready", targetComponent.Name)
-	}
-	currentPlacement, err := transport.RequestPlacement(ctx, "node-3")
-	if err != nil {
-		return rolloutActionResult{}, fmt.Errorf("read known-good placement: %w", err)
-	}
-	routes := applicationUpgradeRoutes(currentPlacement.Placements, candidate.ArtifactDigest)
-	failure := systemnats.RolloutFailure{
-		Code: "candidate_startup_failed", Component: targetComponent.Name,
-		Field: validation.Field, Message: validation.Message,
-	}
-	c.setLastEvent("rollout: candidate unhealthy; rolling back")
-	_, err = systemnats.NewDeployments().RollbackFailedUpgrade(ctx, transport, pending, routes, failure)
-	if err != nil {
-		return rolloutActionResult{}, fmt.Errorf("rollback failed candidate: %w", err)
-	}
-	status, err := c.waitForStatus(ctx, func(status ClusterStatus) bool {
-		return applicationStatusHealthy(status, cluster.artifact.ArtifactDigest) && status.Rollout != nil &&
-			status.Rollout.Phase == string(systemnats.RolloutRolledBack) && status.Rollout.Failure != nil
-	})
-	if err != nil {
-		return rolloutActionResult{}, fmt.Errorf("observe candidate rollback: %w", err)
-	}
-	c.mu.Lock()
-	c.lastEvent = "rejected " + inspection.Config.Revision + ": " + failure.Field + " " + failure.Message
-	c.mu.Unlock()
-	return rolloutActionResult{
-		State: "rolled-back", WebURL: "http://" + cluster.webAddress,
-		Transitions: []ClusterStatus{pendingStatus, status}, Status: status,
-	}, nil
-}
-
-func compileApplicationConfiguration(path string) (artifact.Compilation, error) {
-	source, err := os.ReadFile(path)
-	if err != nil {
-		return artifact.Compilation{}, fmt.Errorf("read configuration %q: %w", path, err)
-	}
-	configuration, err := activeApplication.Configuration.Compile(source)
-	if err != nil {
-		return artifact.Compilation{}, err
-	}
-	if err := validateApplicationConfiguration(configuration); err != nil {
-		return artifact.Compilation{}, err
-	}
-	return artifact.Compilation{
-		ProtocolVersion: artifact.CompilerProtocolVersion,
-		Revision:        configuration.Revision,
-		Encoding:        configuration.Encoding,
-		Payload:         configuration.Payload,
-		CanonicalYAML:   configuration.CanonicalYAML,
-		Facts:           configuration.Facts,
-	}, nil
-}
-
-type candidateValidation struct {
-	Field   string
-	Message string
-}
-
-func compileInvalidCandidateConfiguration(path string) (artifact.Compilation, candidateValidation, error) {
-	source, err := os.ReadFile(path)
-	if err != nil {
-		return artifact.Compilation{}, candidateValidation{}, fmt.Errorf("read configuration %q: %w", path, err)
-	}
-	if activeApplication.Scenario == nil || activeApplication.Scenario.InvalidConfig == nil {
-		return artifact.Compilation{}, candidateValidation{}, errCandidateMustFail
-	}
-	configuration, field, message, err := activeApplication.Scenario.InvalidConfig(source)
-	if err != nil {
-		return artifact.Compilation{}, candidateValidation{}, err
-	}
-	if field == "" || message == "" {
-		return artifact.Compilation{}, candidateValidation{}, errCandidateMustFail
-	}
-	if err := validateApplicationConfiguration(configuration); err != nil {
-		return artifact.Compilation{}, candidateValidation{}, err
-	}
-	return artifact.Compilation{
-		ProtocolVersion: artifact.CompilerProtocolVersion,
-		Revision:        configuration.Revision,
-		Encoding:        configuration.Encoding,
-		Payload:         configuration.Payload,
-		CanonicalYAML:   configuration.CanonicalYAML,
-		Facts:           configuration.Facts,
-	}, candidateValidation{Field: field, Message: message}, nil
-}
-
-func startApplicationCluster(
-	ctx context.Context,
-	artifactPath string,
-	inspection artifact.Inspection,
-) (*applicationCluster, error) {
-	nodeCount := activeApplication.scenarioNodeCount()
-	if nodeCount < 1 {
-		return nil, fmt.Errorf("start application cluster: %w", errApplicationScenarioNodes)
-	}
-	routePorts, err := reserveApplicationPorts(nodeCount)
-	if err != nil {
-		return nil, fmt.Errorf("reserve application route ports: %w", err)
-	}
-	webPorts, err := reserveApplicationPorts(1)
-	if err != nil {
-		return nil, fmt.Errorf("reserve application Web port: %w", err)
-	}
-	cluster := &applicationCluster{
-		webAddress: "127.0.0.1:" + strconv.Itoa(webPorts[0]),
-		artifact:   inspection,
-	}
-	extras := make([][]string, nodeCount)
-	for _, placement := range activeApplication.scenarioInitialPlacements() {
-		index := applicationNodeIndex(placement.NodeID)
-		component, ok := activeApplication.componentByID(placement.ServiceID)
-		if !ok || index < 0 || index >= len(extras) {
-			cleanupApplicationNodes(cluster.nodes)
-			return nil, fmt.Errorf("invalid application scenario placement: service %d on %q", placement.ServiceID, placement.NodeID)
-		}
-		extras[index] = append(extras[index], "--component", component.Kind)
-		for _, option := range placement.Options {
-			extras[index] = append(extras[index], "--component-option", component.Kind+"="+option)
-		}
-		if component.HTTPHandler != nil {
-			extras[index] = append(extras[index], "--component-listen", component.Kind+"="+cluster.webAddress)
-		}
-	}
-	for i, extra := range extras {
-		seed := 0
-		if i == 0 && len(extras) > 1 {
-			seed = 1
-		}
-		nodeID := fmt.Sprintf("node-%d", i+1)
-		args := []string{
-			"--node-id", nodeID,
-			"--advertise-endpoint", "nats-subject://system/" + nodeID,
-			"--system-nats-listen", "127.0.0.1:0",
-			"--system-nats-route-listen", "127.0.0.1:" + strconv.Itoa(routePorts[i]),
-			"--system-nats-seed", "nats-route://127.0.0.1:" + strconv.Itoa(routePorts[seed]),
-			"--system-nats-membership", "--system-nats-recovery",
-			"--system-nats-subject", "_GROVE.system.application." + nodeID,
-		}
-		node, err := nodeproc.Start(artifactPath, append(args, extra...)...)
-		if err != nil {
-			cleanupApplicationNodes(cluster.nodes)
-			return nil, fmt.Errorf("start application %s: %w", nodeID, err)
-		}
-		cluster.nodes = append(cluster.nodes, node)
-	}
-	for _, node := range cluster.nodes {
-		if err := node.WaitReady(ctx); err != nil {
-			cleanupApplicationNodes(cluster.nodes)
-			return nil, fmt.Errorf("wait for application Grovlets: %w\n%s", err, applicationDiagnostics(cluster.nodes))
-		}
-	}
-	cluster.systemNATSURL, err = applicationSystemNATSURL(cluster.nodes[0].Logs())
-	if err != nil {
-		cleanupApplicationNodes(cluster.nodes)
-		return nil, fmt.Errorf("read application System NATS URL: %w\n%s", err, applicationDiagnostics(cluster.nodes))
-	}
-	return cluster, nil
-}
-
-func reserveApplicationPorts(count int) ([]int, error) {
-	listeners := make([]net.Listener, 0, count)
-	ports := make([]int, 0, count)
-	for range count {
-		listener, err := net.Listen("tcp4", "127.0.0.1:0")
-		if err != nil {
-			for _, opened := range listeners {
-				_ = opened.Close()
-			}
-			return nil, err
-		}
-		listeners = append(listeners, listener)
-		ports = append(ports, listener.Addr().(*net.TCPAddr).Port)
-	}
-	var closeErr error
-	for _, listener := range listeners {
-		closeErr = errors.Join(closeErr, listener.Close())
-	}
-	return ports, closeErr
-}
-
-func applicationSystemNATSURL(logs string) (string, error) {
-	event, err := nodeproc.ReadyEvent(logs)
-	if err != nil {
-		return "", err
-	}
-	return event.SystemNATSURL, nil
-}
-
-func waitForApplicationPlacement(ctx context.Context, transport *systemnats.Transport, digest string) error {
-	want := make(map[grove.ServiceID]string, len(activeApplication.scenarioInitialPlacements()))
-	for _, placement := range activeApplication.scenarioInitialPlacements() {
-		want[placement.ServiceID] = placement.NodeID
-	}
-	ticker := time.NewTicker(applicationConditionInterval)
-	defer ticker.Stop()
-	var lastCluster systemnats.ClusterView
-	var lastPlacement systemnats.PlacementView
-	var lastErr error
-	for {
-		attemptCtx, cancel := context.WithTimeout(ctx, time.Second)
-		cluster, clusterErr := transport.RequestClusterView(attemptCtx, "node-3")
-		placement, placementErr := transport.RequestPlacement(attemptCtx, "node-3")
-		if clusterErr == nil {
-			lastCluster = cluster
-		}
-		if placementErr == nil {
-			lastPlacement = placement
-		}
-		ready := clusterErr == nil && cluster.Ready && len(cluster.Nodes) == activeApplication.scenarioNodeCount() &&
-			placementErr == nil && placement.Ready && len(placement.Placements) == len(want)
-		for _, node := range cluster.Nodes {
-			ready = ready && node.Health == systemnats.HealthHealthy
-		}
-		for _, record := range placement.Placements {
-			wantNode, expected := want[record.ServiceID]
-			ready = ready && expected && record.NodeID == wantNode && record.ArtifactDigest == digest
-			view, err := transport.RequestComponents(attemptCtx, record.NodeID)
-			if err != nil {
-				lastErr = errors.Join(lastErr, err)
-				ready = false
-				continue
-			}
-			found := false
-			for _, component := range view.Components {
-				if component.ServiceID == record.ServiceID && component.State == systemnats.ComponentHealthy {
-					found = true
-					break
-				}
-			}
-			ready = ready && found
-		}
-		cancel()
-		if ready {
-			return nil
-		}
-		lastErr = errors.Join(clusterErr, placementErr, lastErr)
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			return fmt.Errorf("cluster=%#v placement=%#v: %w", lastCluster, lastPlacement, errors.Join(lastErr, ctx.Err()))
-		}
-	}
-}
-
-func putApplicationDesired(ctx context.Context, transport *systemnats.Transport, desired systemnats.DesiredDeployment) error {
-	ticker := time.NewTicker(applicationConditionInterval)
-	defer ticker.Stop()
-	var lastErr error
-	for {
-		attemptCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
-		err := transport.PutDesired(attemptCtx, "node-1", desired)
-		cancel()
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			return fmt.Errorf("record desired deployment: %w", errors.Join(lastErr, ctx.Err()))
-		}
-	}
-}
-
-func applicationDesiredDeployment(inspection artifact.Inspection, inventoryNodeID string) systemnats.DesiredDeployment {
-	targetServiceID := activeApplication.Scenario.RecoveryServiceID
-	components := make([]systemnats.DesiredComponent, 0, len(activeApplication.scenarioInitialPlacements()))
-	for _, placement := range activeApplication.scenarioInitialPlacements() {
-		nodeID := placement.NodeID
-		if placement.ServiceID == targetServiceID {
-			nodeID = inventoryNodeID
-		}
-		components = append(components, systemnats.DesiredComponent{ServiceID: placement.ServiceID, NodeID: nodeID})
-	}
-	return systemnats.DesiredDeployment{
-		ApplicationID: inspection.Manifest.ApplicationID, Version: inspection.Manifest.CodeVersion,
-		ArtifactDigest: inspection.ArtifactDigest,
-		Components:     components,
-	}
-}
-
-func applicationArtifactRecord(inspection artifact.Inspection) systemnats.DeploymentArtifact {
-	return systemnats.DeploymentArtifact{
-		ApplicationID: inspection.Manifest.ApplicationID, CodeVersion: inspection.Manifest.CodeVersion,
-		CodeDigest: inspection.CodeDigest, ConfigRevision: inspection.Config.Revision,
-		ConfigDigest: inspection.Config.Digest, ArtifactDigest: inspection.ArtifactDigest,
-		ClusterID: inspection.Config.Facts["cluster.name"], NodeZone: inspection.Config.Facts["node.zone"],
-	}
-}
-
-func applicationRollout(generation uint64, clusterID, current, candidate string, phase systemnats.RolloutPhase) systemnats.Rollout {
-	nodes := make([]systemnats.RolloutNodeProgress, activeApplication.scenarioNodeCount())
-	for i := range nodes {
-		nodes[i] = systemnats.RolloutNodeProgress{
-			NodeID: fmt.Sprintf("node-%d", i+1), CurrentArtifactDigest: current,
-			CandidateArtifactDigest: candidate, Phase: phase,
-		}
-	}
-	return systemnats.Rollout{
-		ApplicationID: activeApplicationName(), ClusterID: clusterID,
-		RolloutID: activeApplicationName() + "-" + strconv.FormatUint(generation, 10), Generation: generation,
-		CurrentArtifactDigest: current, CandidateArtifactDigest: candidate, Phase: phase, Nodes: nodes,
-	}
-}
-
-func applicationUpgradeRoutes(current []systemnats.PlacementRecord, candidateDigest string) []systemnats.UpgradeRoute {
-	routes := make([]systemnats.UpgradeRoute, len(current))
-	for i, route := range current {
-		nodeID := "node-1-candidate"
-		if route.ServiceID == activeApplication.Scenario.RecoveryServiceID {
-			nodeID = "node-2-candidate"
-		}
-		routes[i] = systemnats.UpgradeRoute{
-			Current: route,
-			Candidate: systemnats.PlacementRecord{
-				ServiceID: route.ServiceID, NodeID: nodeID,
-				InvocationSubject: "_GROVE.system.application.candidate." + strconv.FormatUint(uint64(route.ServiceID), 10),
-				ArtifactDigest:    candidateDigest,
-			},
-		}
-	}
-	return routes
-}
-
-func applicationPlacementNode(placements []systemnats.PlacementRecord, serviceID grove.ServiceID) string {
-	for _, placement := range placements {
-		if placement.ServiceID == serviceID {
-			return placement.NodeID
-		}
-	}
-	return ""
-}
-
-func applicationNodeIndex(nodeID string) int {
-	if !strings.HasPrefix(nodeID, "node-") {
-		return -1
-	}
-	index, err := strconv.Atoi(strings.TrimPrefix(nodeID, "node-"))
-	if err != nil || index <= 0 {
-		return -1
-	}
-	return index - 1
-}
-
-func waitForApplicationRecovery(
-	ctx context.Context,
-	transport *systemnats.Transport,
-	serviceID grove.ServiceID,
-	failedNodeID string,
-	artifactDigest string,
-) (string, error) {
-	ticker := time.NewTicker(applicationConditionInterval)
-	defer ticker.Stop()
-	var lastCluster systemnats.ClusterView
-	var lastPlacement systemnats.PlacementView
-	var lastErr error
-	for {
-		attemptCtx, cancel := context.WithTimeout(ctx, time.Second)
-		cluster, clusterErr := transport.RequestClusterView(attemptCtx, "node-3")
-		placement, placementErr := transport.RequestPlacement(attemptCtx, "node-3")
-		cancel()
-		if clusterErr == nil {
-			lastCluster = cluster
-		}
-		if placementErr == nil {
-			lastPlacement = placement
-		}
-		healthyNodes := make(map[string]bool, len(cluster.Nodes))
-		failedObserved := false
-		clusterRecovered := clusterErr == nil && cluster.Ready && len(cluster.Nodes) == activeApplication.scenarioNodeCount()
-		for _, node := range cluster.Nodes {
-			if node.NodeID == failedNodeID {
-				failedObserved = node.Health == systemnats.HealthUnavailable
-				continue
-			}
-			healthyNodes[node.NodeID] = node.Health == systemnats.HealthHealthy
-			clusterRecovered = clusterRecovered && node.Health == systemnats.HealthHealthy
-		}
-		var recovered systemnats.PlacementRecord
-		if placementErr == nil && placement.Ready {
-			for _, record := range placement.Placements {
-				if record.ServiceID == serviceID && record.NodeID != failedNodeID &&
-					record.ArtifactDigest == artifactDigest && healthyNodes[record.NodeID] {
-					recovered = record
-					break
-				}
-			}
-		}
-		if clusterRecovered && failedObserved && recovered.NodeID != "" {
-			componentCtx, componentCancel := context.WithTimeout(ctx, time.Second)
-			view, err := transport.RequestComponents(componentCtx, recovered.NodeID)
-			componentCancel()
-			if err == nil {
-				for _, component := range view.Components {
-					if component.ServiceID == serviceID && component.State == systemnats.ComponentHealthy {
-						return recovered.NodeID, nil
-					}
-				}
-			} else {
-				lastErr = errors.Join(lastErr, err)
-			}
-		}
-		lastErr = errors.Join(lastErr, clusterErr, placementErr)
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			return "", fmt.Errorf("cluster=%#v placement=%#v: %w", lastCluster, lastPlacement, errors.Join(lastErr, ctx.Err()))
-		}
-	}
 }
 
 func (c *applicationController) status(ctx context.Context) (ClusterStatus, error) {
-	c.mu.RLock()
-	cluster := c.cluster
-	c.mu.RUnlock()
+	cluster := c.attached()
 	if cluster == nil {
 		return ClusterStatus{Health: "not-deployed", Nodes: []NodeStatus{}, Placements: []PlacementStatus{}}, nil
 	}
+	return readClusterStatus(ctx, cluster.webAddress)
+}
+
+// readClusterStatus reads the cluster status that the application's ingress
+// serves at webAddress.
+func readClusterStatus(ctx context.Context, webAddress string) (ClusterStatus, error) {
 	var status ClusterStatus
-	if err := readApplicationJSON(ctx, "http://"+cluster.webAddress+"/grove/status", &status); err != nil {
+	if err := readApplicationJSON(ctx, "http://"+webAddress+"/grove/status", &status); err != nil {
 		return ClusterStatus{}, err
 	}
 	return status, nil
 }
 
-func (c *applicationController) waitForStatus(ctx context.Context, accept func(ClusterStatus) bool) (ClusterStatus, error) {
+// waitForClusterStatus polls the status served at webAddress until accept
+// returns true.
+func waitForClusterStatus(ctx context.Context, webAddress string, accept func(ClusterStatus) bool) (ClusterStatus, error) {
 	ticker := time.NewTicker(applicationConditionInterval)
 	defer ticker.Stop()
 	var last ClusterStatus
 	var lastErr error
 	for {
 		attemptCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		status, err := c.status(attemptCtx)
+		status, err := readClusterStatus(attemptCtx, webAddress)
 		cancel()
 		if err == nil {
 			last = status
@@ -944,45 +364,6 @@ func readApplicationJSON(ctx context.Context, url string, output any) error {
 		return fmt.Errorf("GET %s: %s: %s", url, response.Status, body)
 	}
 	return json.NewDecoder(response.Body).Decode(output)
-}
-
-func applicationStatusHealthy(status ClusterStatus, digest string) bool {
-	if !status.Ready || status.Health != "healthy" || len(status.Nodes) != activeApplication.scenarioNodeCount() || len(status.Placements) != len(activeApplication.scenarioInitialPlacements()) ||
-		status.ActiveArtifact == nil || status.ActiveArtifact.ArtifactDigest != digest {
-		return false
-	}
-	for _, node := range status.Nodes {
-		if node.Health != string(systemnats.HealthHealthy) {
-			return false
-		}
-	}
-	for _, placement := range status.Placements {
-		if placement.Health != string(systemnats.ComponentHealthy) {
-			return false
-		}
-	}
-	return true
-}
-
-// waitForApplicationProbe proves that the recovered placement can serve the
-// application call boundary, not merely that its component was observed as
-// healthy by the control plane.
-func waitForApplicationProbe(ctx context.Context, webAddress, probeID string) (any, error) {
-	ticker := time.NewTicker(applicationConditionInterval)
-	defer ticker.Stop()
-	var lastErr error
-	for {
-		result, err := activeApplication.Scenario.Probe(ctx, webAddress, probeID)
-		if err == nil {
-			return result, nil
-		}
-		lastErr = err
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			return nil, fmt.Errorf("wait for application probe %q: %w", probeID, errors.Join(lastErr, ctx.Err()))
-		}
-	}
 }
 
 func (c *applicationController) readModel(ctx context.Context) (console.Model, error) {
@@ -1057,61 +438,20 @@ func (c *applicationController) setLastEvent(event string) {
 	c.mu.Unlock()
 }
 
-func cleanupApplicationNodes(nodes []*nodeproc.Process) {
-	for _, node := range nodes {
-		_ = node.Cleanup()
-	}
-}
-
-func gracefullyStopApplicationNodes(nodes []*nodeproc.Process) {
-	for _, node := range nodes {
-		// A configured application node may spend up to gracefulLeaveTimeout
-		// relocating services and evacuating its JetStream peers. Keep the
-		// supervising console alive slightly longer so q cannot kill the child
-		// halfway through that protocol and then remove it from discovery.
-		ctx, cancel := context.WithTimeout(context.Background(), gracefulLeaveTimeout+5*time.Second)
-		_ = node.Stop(ctx)
-		cancel()
-		_ = node.Cleanup()
-	}
-}
-
-func applicationDiagnostics(nodes []*nodeproc.Process) string {
-	var output strings.Builder
-	for i, node := range nodes {
-		fmt.Fprintf(&output, "node-%d logs:\n%s", i+1, node.Logs())
-		if !strings.HasSuffix(node.Logs(), "\n") {
-			output.WriteByte('\n')
-		}
-	}
-	return output.String()
-}
-
+// close detaches the console. Nodes this process hosts in a discovered
+// cluster leave it gracefully; a demo cluster is torn down.
 func (c *applicationController) close() {
 	c.mu.Lock()
 	cluster := c.cluster
-	discovery := c.discovery
-	localNodeIDs := c.localNodeIDs
 	c.cluster = nil
-	c.discovery = nil
-	c.localNodeIDs = nil
 	clear(c.debugSessions)
 	c.mu.Unlock()
-	if cluster != nil {
-		if discovery != nil {
-			gracefullyStopApplicationNodes(cluster.nodes)
-		} else {
-			cleanupApplicationNodes(cluster.nodes)
-		}
+	if c.host.hosting() {
+		c.host.leave()
+		return
 	}
-	if discovery != nil {
-		for _, nodeID := range localNodeIDs {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = discovery.removeNode(ctx, nodeID)
-			cancel()
-		}
+	if cluster != nil && cluster.local != nil {
+		_ = cluster.local.Cleanup()
 	}
-	if discovery != nil {
-		discovery.close()
-	}
+	c.host.close()
 }
