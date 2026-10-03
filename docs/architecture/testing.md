@@ -55,8 +55,8 @@ cluster.AssertPlacements(charge, n2)
 ```
 
 Two guards keep it honest:
-- `grovetest/reuse_test.go` fails if `testcluster.go` stops calling the
-  functions above.
+- a delegation rule in the root `boundary_test.go` fails if the TestCluster
+  stops calling the functions above.
 - `grovetest/conformance_test.go` replays a scenario through both the
   TestCluster and production reconciliation, and requires identical placements
   and epochs.
@@ -101,10 +101,33 @@ Under full-suite load, a few layer-4 tests sometimes time out while the
 cluster is still starting. On a failure, rerun that test alone before
 treating it as a regression.
 
-## Boundaries
+## Architecture rules
 
-`boundary_test.go` at the repository root enforces the dependency rules
-between production and test code:
-- production never imports `grovetest`, `internal/testapp` or
-  `internal/testbin`;
-- placement and rollout logic never import NATS.
+Every architecture rule is a row in a table in the root `boundary_test.go`.
+The rules check non-test code. A test that breaks a rule names the package,
+the dependency or the call that broke it.
+
+| Table | A row says | Example |
+|---|---|---|
+| `importRules` | packages matching `From` never depend on `Forbidden`, even transitively | rollout orchestration does not depend on NATS |
+| `pureRules` | a package depends only on the standard library and `Allowed` | placement decisions are pure |
+| `delegationRules` | packages matching `Packages` call each function in `Uses` | the TestCluster runs production rules |
+| `callRules` | only `Owners` call the functions in `Names` | only the rollout owner writes deployment intent |
+
+`TestPresentationReadsThroughInspection` in the same file keeps the console,
+TUI and CLI reading through `internal/inspect`.
+
+A rule also fails when it stops matching anything, for example after a rename,
+so a rule cannot silently guard nothing. To add a boundary:
+1. Add a row to the matching table.
+2. Break the rule once on purpose and check that the test fails.
+
+One rule is about tests rather than production code, so it lives with what it
+protects: `internal/testbin/testbin_test.go` requires real-process tests to
+build binaries through `internal/testbin`.
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs `gofmt`, `go vet ./...` and
+`go test -short ./...` on every push and pull request. The full suite runs
+nightly and from the workflow's *Run workflow* button.

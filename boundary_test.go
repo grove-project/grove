@@ -1,14 +1,10 @@
 package grove_test
 
 import (
-	"bytes"
-	"encoding/json"
-	"go/ast"
-	"go/parser"
-	"go/token"
+	"maps"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -45,18 +41,6 @@ var importRules = []importRule{
 		Forbidden: []string{modulePath + "/internal/testapp/..."},
 	},
 	{
-		// Placement decisions are pure so production and grovetest share them
-		// (docs/architecture/placement.md).
-		Name: "placement decisions do not depend on storage, transport or runtime",
-		From: []string{modulePath + "/internal/placement"},
-		Forbidden: []string{
-			"github.com/nats-io/...",
-			modulePath + "/internal/systemnats",
-			modulePath + "/internal/controlplane",
-			modulePath + "/runtime/...",
-		},
-	},
-	{
 		// Rollout orchestration sequences control-plane records through a
 		// Store port; the System NATS adapter implements it, so the
 		// orchestration is tested without a server.
@@ -83,6 +67,82 @@ var importRules = []importRule{
 		Name:      "Grove does not depend on Grove Shop",
 		From:      []string{modulePath + "/..."},
 		Forbidden: []string{"github.com/grove-project/groveshop/..."},
+	},
+}
+
+// pureRule allows Package to depend, directly or transitively, only on the
+// standard library and Allowed. It is an allowlist: a new dependency fails
+// until someone decides it belongs.
+type pureRule struct {
+	Name    string
+	Package string
+	Allowed []string
+}
+
+// pureRules keep Grove's decision logic free of storage, transport and
+// runtime, so production and the grovetest TestCluster run the same rules.
+var pureRules = []pureRule{
+	{
+		// Placement decisions (docs/architecture/placement.md).
+		Name:    "placement decisions are pure",
+		Package: modulePath + "/internal/placement",
+		Allowed: []string{modulePath},
+	},
+	{
+		// Control-plane records and rules; internal/systemnats adapts them.
+		Name:    "the control-plane domain is independent of NATS",
+		Package: modulePath + "/internal/controlplane",
+		Allowed: []string{modulePath, modulePath + "/internal/placement"},
+	},
+}
+
+// delegationRule requires the non-test code of every package matching
+// Packages to use each of Uses, written "import/path.Name". It keeps a
+// consumer delegating a decision to its owner instead of growing a copy.
+type delegationRule struct {
+	Name     string
+	Packages []string
+	Uses     []string
+}
+
+const (
+	placementPath    = modulePath + "/internal/placement"
+	controlPlanePath = modulePath + "/internal/controlplane"
+)
+
+// delegationRules name, for each decision, the consumers that must call its
+// owner.
+var delegationRules = []delegationRule{
+	{
+		Name:     "control-plane reconciliation and leasing delegate to placement",
+		Packages: []string{controlPlanePath},
+		Uses: []string{
+			placementPath + ".Place", placementPath + ".FencedEpoch",
+			placementPath + ".DecideClaim", placementPath + ".LeaseHolds",
+		},
+	},
+	{
+		Name:     "the System NATS adapter applies control-plane lease rules",
+		Packages: []string{modulePath + "/internal/systemnats"},
+		Uses:     []string{controlPlanePath + ".DecideClaim", controlPlanePath + ".LeaseHolds"},
+	},
+	{
+		Name:     "Grovlet recovery and liveness delegate to placement and health",
+		Packages: []string{modulePath + "/runtime"},
+		Uses: []string{
+			placementPath + ".Recover", placementPath + ".LiveNodes", controlPlanePath + ".Members",
+		},
+	},
+	{
+		// The TestCluster simulates only store, network, processes and clock
+		// (docs/architecture/testing.md).
+		Name:     "the TestCluster runs production rules",
+		Packages: []string{modulePath + "/grovetest"},
+		Uses: []string{
+			controlPlanePath + ".PlanHandlerPlacementsWith", controlPlanePath + ".EvaluateHealth",
+			controlPlanePath + ".Members", placementPath + ".LiveNodes", placementPath + ".DecideClaim",
+			placementPath + ".LeaseHolds", placementPath + ".Selector",
+		},
 	},
 }
 
@@ -142,39 +202,6 @@ func TestOrchestrationOwners(t *testing.T) {
 	}
 }
 
-// namedCalls returns the positions of calls in the Go file at path to any
-// of names.
-func namedCalls(t *testing.T, path string, names []string) []string {
-	t.Helper()
-	fileSet := token.NewFileSet()
-	file, err := parser.ParseFile(fileSet, path, nil, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-	var calls []string
-	ast.Inspect(file, func(node ast.Node) bool {
-		call, ok := node.(*ast.CallExpr)
-		if !ok {
-			return true
-		}
-		selector, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return true
-		}
-		qualified := selector.Sel.Name
-		if ident, ok := selector.X.(*ast.Ident); ok {
-			qualified = ident.Name + "." + selector.Sel.Name
-		}
-		for _, name := range names {
-			if name == selector.Sel.Name && !strings.Contains(name, ".") || name == qualified {
-				calls = append(calls, fileSet.Position(call.Pos()).String()+" "+qualified)
-			}
-		}
-		return true
-	})
-	return calls
-}
-
 // presentationFiles build what the console, its TUI and the grove CLI show.
 // They read cluster state only through internal/inspect.
 var presentationFiles = []string{
@@ -221,32 +248,6 @@ func TestPresentationReadsThroughInspection(t *testing.T) {
 			}
 		}
 	}
-}
-
-// stringLiterals returns the positions and values of string literals in the
-// Go file at path.
-func stringLiterals(t *testing.T, path string) []string {
-	t.Helper()
-	fileSet := token.NewFileSet()
-	file, err := parser.ParseFile(fileSet, path, nil, 0)
-	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
-	}
-	var literals []string
-	ast.Inspect(file, func(node ast.Node) bool {
-		if literal, ok := node.(*ast.BasicLit); ok && literal.Kind == token.STRING {
-			literals = append(literals, fileSet.Position(literal.Pos()).String()+" "+literal.Value)
-		}
-		return true
-	})
-	return literals
-}
-
-type listedPackage struct {
-	ImportPath string
-	Dir        string
-	GoFiles    []string
-	Deps       []string
 }
 
 // TestArchitectureBoundaries enforces importRules over every package in the
@@ -303,58 +304,58 @@ func TestImportPatternMatching(t *testing.T) {
 	}
 }
 
-func listModulePackages(t *testing.T) []listedPackage {
-	t.Helper()
-	var stdout, stderr bytes.Buffer
-	cmd := exec.Command("go", "list", "-json=ImportPath,Dir,GoFiles,Deps", "./...")
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		t.Fatalf("go list ./...: %v\n%s", err, stderr.String())
+// TestPureRules enforces pureRules.
+func TestPureRules(t *testing.T) {
+	packages := listModulePackages(t)
+	standard := standardPackages(t)
+	for _, rule := range pureRules {
+		t.Run(rule.Name, func(t *testing.T) {
+			pkg, ok := findPackage(packages, rule.Package)
+			if !ok {
+				t.Fatalf("package %s not found; the rule guards nothing", rule.Package)
+			}
+			for _, dep := range pkg.Deps {
+				if !standard[dep] && !slices.Contains(rule.Allowed, dep) {
+					t.Errorf("%s depends on %s; it may depend only on the standard library and %s", rule.Package, dep, rule.Allowed)
+				}
+			}
+		})
 	}
-	var packages []listedPackage
-	decoder := json.NewDecoder(&stdout)
-	for decoder.More() {
-		var pkg listedPackage
-		if err := decoder.Decode(&pkg); err != nil {
-			t.Fatalf("decode go list output: %v", err)
-		}
-		packages = append(packages, pkg)
-		// go test caches results by the files the test itself touches, not
-		// the ones go list reads. Stat every source so editing an import
-		// re-runs the guard instead of replaying a cached pass.
-		_, _ = os.Stat(pkg.Dir)
-		for _, file := range pkg.GoFiles {
-			_, _ = os.Stat(filepath.Join(pkg.Dir, file))
-		}
-	}
-	if len(packages) == 0 {
-		t.Fatal("go list produced no packages")
-	}
-	return packages
 }
 
-func matchesAnyKnown(pattern string, known map[string]bool) bool {
-	for path := range known {
-		if matches(path, pattern) {
-			return true
-		}
+// TestDelegationRules enforces delegationRules.
+func TestDelegationRules(t *testing.T) {
+	packages := listModulePackages(t)
+	for _, rule := range delegationRules {
+		t.Run(rule.Name, func(t *testing.T) {
+			checked := 0
+			for _, pkg := range packages {
+				if !matchesAny(pkg.ImportPath, rule.Packages) {
+					continue
+				}
+				checked++
+				used := make(map[string]bool)
+				for _, file := range pkg.GoFiles {
+					maps.Copy(used, qualifiedUses(t, filepath.Join(pkg.Dir, file)))
+				}
+				for _, name := range rule.Uses {
+					if !used[name] {
+						t.Errorf("%s does not use %s; it must delegate that decision instead of keeping its own copy", pkg.ImportPath, name)
+					}
+				}
+			}
+			if checked == 0 {
+				t.Error("rule matches no package; it guards nothing")
+			}
+		})
 	}
-	return false
 }
 
-func matchesAny(path string, patterns []string) bool {
-	for _, pattern := range patterns {
-		if matches(path, pattern) {
-			return true
+func findPackage(packages []listedPackage, importPath string) (listedPackage, bool) {
+	for _, pkg := range packages {
+		if pkg.ImportPath == importPath {
+			return pkg, true
 		}
 	}
-	return false
-}
-
-func matches(path, pattern string) bool {
-	if prefix, ok := strings.CutSuffix(pattern, "/..."); ok {
-		return path == prefix || strings.HasPrefix(path, prefix+"/")
-	}
-	return path == pattern
+	return listedPackage{}, false
 }
