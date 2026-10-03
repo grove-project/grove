@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -77,6 +78,9 @@ type Server struct {
 	once         sync.Once
 	retireMu     sync.Mutex
 	peerPrepared bool
+	// storeDir is the primary's JetStream store when this server founded the
+	// cluster; its retired witness is recorded next to it.
+	storeDir string
 }
 
 // StartServer starts an embedded System NATS server on host and port and waits
@@ -125,6 +129,9 @@ func StartClusterServer(ctx context.Context, cfg ClusterConfig) (*Server, error)
 		return nil, err
 	}
 	if cfg.JetStreamStoreDir != "" {
+		if len(routes) == 0 && cfg.RoutePort != 0 && witnessRetired(cfg.JetStreamStoreDir) {
+			return startRestartedFounderServer(ctx, cfg)
+		}
 		if len(routes) == 0 {
 			return startBootstrapClusterServer(ctx, cfg)
 		}
@@ -247,7 +254,68 @@ func startBootstrapClusterServer(ctx context.Context, cfg ClusterConfig) (*Serve
 		return nil, &Error{Operation: "wait for bootstrapped System NATS metadata leader", Err: err}
 	}
 	primary.peer = peer.server
+	primary.storeDir = cfg.JetStreamStoreDir
 	return primary, nil
+}
+
+// startRestartedFounderServer restarts a founding node whose bootstrap witness
+// has already left the metadata group. Starting the witness again would add
+// a fourth voter that has to be released once more (grove#51), so the primary
+// starts alone and waits for the other voters to route back to it. JetStream
+// clustering needs a configured route, so it names its own fixed route,
+// which NATS recognizes and ignores.
+func startRestartedFounderServer(ctx context.Context, cfg ClusterConfig) (*Server, error) {
+	ownRoute := &url.URL{
+		Scheme: "nats-route",
+		Host:   net.JoinHostPort(cfg.RouteHost, fmt.Sprintf("%d", cfg.RoutePort)),
+	}
+	primary, err := startServer(ctx, &server.Options{
+		ServerName: cfg.Name,
+		Host:       cfg.Host,
+		Port:       randomPort(cfg.Port),
+		Cluster: server.ClusterOpts{
+			Name: systemClusterName,
+			Host: cfg.RouteHost,
+			Port: cfg.RoutePort,
+		},
+		Routes:             []*url.URL{ownRoute},
+		JetStream:          true,
+		StoreDir:           cfg.JetStreamStoreDir,
+		Tags:               jwt.TagList{logicalNodeTag(cfg.Name)},
+		JetStreamUniqueTag: logicalNodeTagPrefix,
+		NoLog:              true,
+		NoSigs:             true,
+	}, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := waitForJetStream(ctx, primary.URL()); err != nil {
+		primary.Shutdown()
+		return nil, &Error{Operation: "wait for restarted System NATS metadata leader", Err: err}
+	}
+	primary.storeDir = cfg.JetStreamStoreDir
+	return primary, nil
+}
+
+// witnessRetiredMarker records that a founder's bootstrap witness left the
+// metadata group, so a restart must not bring it back.
+func witnessRetiredMarker(storeDir string) string {
+	return filepath.Join(filepath.Dir(storeDir), filepath.Base(storeDir)+"-witness-retired")
+}
+
+func witnessRetired(storeDir string) bool {
+	_, err := os.Stat(witnessRetiredMarker(storeDir))
+	return err == nil
+}
+
+// recordWitnessRetired marks the founder's witness retired and deletes its
+// store. The marker is written first: a crash before the delete still leaves
+// the witness out of the next start.
+func recordWitnessRetired(storeDir string) error {
+	if err := os.WriteFile(witnessRetiredMarker(storeDir), nil, 0o600); err != nil {
+		return err
+	}
+	return os.RemoveAll(peerStoreDir(storeDir))
 }
 
 func startJoinedClusterServer(ctx context.Context, cfg ClusterConfig, routes []*url.URL) (*Server, error) {
@@ -542,6 +610,11 @@ func (s *Server) PrepareRetire(ctx context.Context) error {
 	}
 	shutdownServer(s.peer)
 	s.peerPrepared = true
+	if s.storeDir != "" {
+		// Best effort: without the record a restart brings the witness back
+		// and releases it again, which is slower but still correct.
+		_ = recordWitnessRetired(s.storeDir)
+	}
 	return nil
 }
 

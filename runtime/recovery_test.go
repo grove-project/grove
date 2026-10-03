@@ -23,12 +23,12 @@ func TestSelectRecoveryUsesFirstHealthyNode(t *testing.T) {
 		want,
 	}}
 
-	got, ok := selectRecovery("node-a", cluster, placement)
-	if !ok || got != want {
-		t.Fatalf("selectRecovery() = %#v, %t; want %#v, true", got, ok, want)
+	got := selectRecoveries("node-a", cluster, placement)
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("selectRecoveries() = %#v; want [%#v]", got, want)
 	}
-	if got, ok := selectRecovery("node-c", cluster, placement); ok {
-		t.Errorf("non-coordinator selection = %#v, true; want no decision", got)
+	if got := selectRecoveries("node-c", cluster, placement); len(got) != 0 {
+		t.Errorf("non-coordinator selection = %#v; want none", got)
 	}
 }
 
@@ -43,12 +43,12 @@ func TestSelectRecoveryWaitsForPriorHealth(t *testing.T) {
 	placement := systemnats.PlacementView{Ready: true, Placements: []systemnats.PlacementRecord{{
 		ServiceID: 2, NodeID: "node-b", InvocationSubject: "inventory.node-b", ArtifactDigest: recoveryArtifactDigest,
 	}}}
-	if got, ok := selectRecovery("node-a", cluster, placement); ok {
-		t.Errorf("startup selection = %#v, true; want no decision before node-b was healthy", got)
+	if got := selectRecoveries("node-a", cluster, placement); len(got) != 0 {
+		t.Errorf("startup selection = %#v; want none before node-b was healthy", got)
 	}
 	cluster.Nodes[1].LastSeen = "before"
-	if _, ok := selectRecovery("node-a", cluster, placement); !ok {
-		t.Error("selection after observed failure = false; want true")
+	if got := selectRecoveries("node-a", cluster, placement); len(got) != 1 {
+		t.Errorf("selection after observed failure = %#v; want node-b's record", got)
 	}
 }
 

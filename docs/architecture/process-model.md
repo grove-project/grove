@@ -1,6 +1,6 @@
 # Process Model
 
-Placement answers **where** a service runs. Execution answers **inside which process** it runs. Grove decides them separately.
+Placement answers **where** a service runs ([placement.md](placement.md)). Execution answers **inside which process** it runs. Grove decides them separately.
 
 By default every service placed on a node runs in that node's single **application runtime** process, next to the Grovlet that supervises it:
 

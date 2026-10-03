@@ -207,10 +207,7 @@ func PlanHandlerPlacements(
 			Exclusive: meta[id].Exclusive, Capability: meta[id].Capability, Epoch: current.Epoch,
 		}
 		if next.Exclusive {
-			// Epochs only grow, even if the placement key was deleted and
-			// recreated: the lease remembers the highest epoch ever claimed.
-			floor := max(current.Epoch, leaseEpochs[next.Capability])
-			next.Epoch = placement.NextEpoch(current.NodeIDs(), target, floor)
+			next.Epoch = placement.FencedEpoch(current.NodeIDs(), target, current.Epoch, leaseEpochs[next.Capability])
 		}
 		for _, nodeID := range target {
 			next.Nodes = append(next.Nodes, HandlerNode{NodeID: nodeID, InvocationSubject: subjects[nodeID][id]})

@@ -168,8 +168,9 @@ type TestCluster struct {
 
 	mu         sync.Mutex
 	nodes      []*TestNode
-	store      map[HandlerID][]string // authoritative placements
-	epochs     map[HandlerID]uint64   // fencing epoch per exclusive handler
+	store      map[HandlerID][]string             // authoritative placements
+	epochs     map[HandlerID]uint64               // fencing epoch per exclusive handler
+	leases     map[string]placement.ObservedLease // stored lease per capability
 	partitions map[[2]string]bool
 	calls      map[HandlerID]map[string]int
 	events     []string
@@ -187,6 +188,7 @@ func NewTestCluster(tb testing.TB, opts ...ClusterOption) *TestCluster {
 		detectAfter: defaultFailureDetection,
 		store:       make(map[HandlerID][]string),
 		epochs:      make(map[HandlerID]uint64),
+		leases:      make(map[string]placement.ObservedLease),
 		partitions:  make(map[[2]string]bool),
 		calls:       make(map[HandlerID]map[string]int),
 	}
@@ -290,14 +292,14 @@ func (c *TestCluster) Isolate(n *TestNode) {
 	c.logf("%s isolated", n.id)
 }
 
-// Reconnect restores an isolated node's connectivity. Its old leases stay
-// fenced: it resumes with whatever ownership the cluster now grants.
+// Reconnect restores an isolated node's connectivity. As in production, its
+// leases resume only while it is still the owner at the same epoch and nobody
+// claimed them meanwhile; otherwise they stay fenced.
 func (c *TestCluster) Reconnect(n *TestNode) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	n.isolated = false
 	n.detected = false
-	n.renewedAt = c.clock.Now()
 	c.logf("%s reconnected", n.id)
 }
 
@@ -361,7 +363,6 @@ func (c *TestCluster) reconcileLocked() bool {
 		if n.state != NodeRunning || n.isolated {
 			continue
 		}
-		n.renewedAt = c.clock.Now()
 		info := NodeInfo{ID: n.id, Handlers: make(map[HandlerID]HandlerInfo, len(n.regs))}
 		for _, r := range n.regs {
 			info.Handlers[r.id] = r.info
@@ -372,13 +373,18 @@ func (c *TestCluster) reconcileLocked() bool {
 	changed := !equalPlacements(c.store, desired)
 	if changed {
 		for id, owners := range desired {
-			if c.exclusiveLocked(id) {
-				c.epochs[id] = placement.NextEpoch(c.store[id], owners, c.epochs[id])
+			if c.exclusiveLocked(id) && !equalStrings(c.store[id], owners) {
+				stored, placed := c.epochs[id]
+				if _, exists := c.store[id]; !exists || !placed {
+					stored = 0
+				}
+				c.epochs[id] = placement.FencedEpoch(c.store[id], owners, stored, c.claimedEpochLocked(id))
 			}
 		}
 		c.store = clonePlacements(desired)
 		c.logf("placements published: %s", formatPlacements(c.store))
 	}
+	c.renewLeasesLocked()
 	for _, n := range c.nodes {
 		if n.state == NodeRunning && !n.isolated && !equalPlacements(n.observed, c.store) {
 			n.observed = clonePlacements(c.store)
@@ -495,7 +501,12 @@ func (c *TestCluster) diagnosticsLocked() string {
 		}
 		fmt.Fprintf(&b, "    %s state=%s gen=%d handlers=%v observed=%s\n", n.id, n.state, n.generation, handlers, formatPlacements(n.observed))
 	}
-	fmt.Fprintf(&b, "  placements: %s\n  calls: %v\n  events:\n", formatPlacements(c.store), c.calls)
+	fmt.Fprintf(&b, "  placements: %s\n  leases:", formatPlacements(c.store))
+	for _, capability := range sortedKeys(c.leases) {
+		l := c.leases[capability].Lease
+		fmt.Fprintf(&b, " %s=%s@%d/%d", capability, l.Holder, l.Epoch, l.Beat)
+	}
+	fmt.Fprintf(&b, "\n  calls: %v\n  events:\n", c.calls)
 	start := 0
 	if len(c.events) > 20 {
 		start = len(c.events) - 20
@@ -544,22 +555,106 @@ func (c *TestCluster) Epoch(h HandlerID) uint64 {
 	return c.epochs[h]
 }
 
+// claimedEpochLocked is the highest epoch a lease on h's capability was
+// claimed at, which fences h even if its placement was deleted.
+func (c *TestCluster) claimedEpochLocked(h HandlerID) uint64 {
+	for _, n := range c.nodes {
+		for _, r := range n.regs {
+			if r.id == h && r.info.Exclusive {
+				return c.leases[capabilityName(r)].Lease.Epoch
+			}
+		}
+	}
+	return 0
+}
+
+// ownershipLocked is h's placement as the lease policy sees it.
+func (c *TestCluster) ownershipLocked(h HandlerID) placement.Ownership {
+	return placement.Ownership{Nodes: c.store[h], Epoch: c.epochs[h]}
+}
+
+// renewLeasesLocked renews every active lease of a reachable running node, as
+// production renews on each reconcile tick: a holder whose placement moved, or
+// whose stored lease another holder replaced, loses it instead.
+func (c *TestCluster) renewLeasesLocked() {
+	now := c.clock.Now()
+	for _, n := range c.nodes {
+		if n.state != NodeRunning || n.isolated {
+			continue
+		}
+		for _, capability := range sortedKeys(n.held) {
+			held := n.held[capability]
+			if !held.Active() {
+				continue
+			}
+			stored := c.leases[capability].Lease
+			if !c.ownershipLocked(held.Handler).OwnedBy(n.id, held.Epoch) ||
+				stored.Holder != n.id || stored.Epoch != held.Epoch || stored.Beat != held.Beat {
+				held.Lost = true
+				continue
+			}
+			renewal := held.Renewal(n.id)
+			c.leases[capability] = placement.ObservedLease{Lease: renewal, FirstSeen: now}
+			held.Beat, held.RenewedAt = renewal.Beat, now
+		}
+	}
+}
+
 // AcquireExclusive implements grove.ExclusiveProvider for handlers running on
-// n. The lease is granted only to the placed owner, is fenced by epoch and
-// node generation, and expires if n cannot renew it.
+// n with production's fencing policy, placement.DecideClaim: only the placed
+// owner may claim, at its placement's epoch, and only once a previous
+// holder's lease has gone unrenewed for the lease TTL. Where production would
+// block until then, the test clock advances to that moment while reachable
+// nodes keep renewing. A node that is not the owner gets an unheld lease.
 func (n *TestNode) AcquireExclusive(_ context.Context, capability string) (grove.Lease, error) {
 	c := n.cluster
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, r := range n.regs {
-		if !r.info.Exclusive || capabilityName(r) != capability {
-			continue
-		}
-		if owners := c.store[r.id]; len(owners) == 1 && owners[0] == n.id {
-			return &testLease{node: n, handler: r.id, epoch: c.epochs[r.id], generation: n.generation}, nil
+	var owned *registration
+	for i, r := range n.regs {
+		if r.info.Exclusive && capabilityName(r) == capability {
+			owned = &n.regs[i]
 		}
 	}
-	return nil, fmt.Errorf("%s: capability %q: not the owner", n.id, capability)
+	if owned == nil || n.state != NodeRunning || n.isolated {
+		return deniedLease{}, nil
+	}
+	for range maxConvergeRounds {
+		observed, seen := c.leases[capability]
+		request := placement.ClaimRequest{
+			NodeID:   n.id,
+			Owner:    c.ownershipLocked(owned.id),
+			Placed:   len(c.store[owned.id]) != 0,
+			Held:     n.held[capability],
+			Observed: observed,
+			Seen:     seen,
+			Now:      c.clock.Now(),
+			TTL:      c.leaseTTL,
+		}
+		claim := placement.DecideClaim(request)
+		switch claim.Decision {
+		case placement.ClaimDenied:
+			return deniedLease{}, nil
+		case placement.ClaimHeld:
+			return &testLease{node: n, held: n.held[capability], generation: n.generation}, nil
+		case placement.ClaimWait:
+			c.clock.Advance(placement.ClaimWaitUntil(request).Sub(c.clock.Now()))
+			c.renewLeasesLocked()
+			c.logf("%s waited for %s's lease on %q to expire", n.id, observed.Lease.Holder, capability)
+			continue
+		}
+		now := c.clock.Now()
+		c.leases[capability] = placement.ObservedLease{Lease: claim.Lease, FirstSeen: now}
+		held := &placement.HeldLease{
+			Capability: capability, Handler: owned.id, Epoch: claim.Lease.Epoch,
+			Beat: claim.Lease.Beat, RenewedAt: now,
+		}
+		n.held[capability] = held
+		c.logf("%s claimed %q at epoch %d", n.id, capability, held.Epoch)
+		return &testLease{node: n, held: held, generation: n.generation}, nil
+	}
+	c.tb.Fatalf("%s: claim on %q did not settle\n%s", n.id, capability, c.diagnosticsLocked())
+	return deniedLease{}, nil
 }
 
 func capabilityName(r registration) string {
@@ -569,30 +664,45 @@ func capabilityName(r registration) string {
 	return r.id.String()
 }
 
+type deniedLease struct{}
+
+func (deniedLease) Held() bool { return false }
+func (deniedLease) Release()   {}
+
+// testLease is a claim held by one node process. It ends with that process
+// (a crash or restart), and otherwise holds exactly as long as production's
+// placement.LeaseHolds says.
 type testLease struct {
 	node       *TestNode
-	handler    HandlerID
-	epoch      uint64
+	held       *placement.HeldLease
 	generation int
-	released   bool
 }
 
-// Held reports whether this exact owner, at this epoch and node generation,
-// is still the cluster's owner and its lease has not expired.
+// Held reports whether the owner process is still running and the lease
+// still holds under the production policy.
 func (l *testLease) Held() bool {
 	n, c := l.node, l.node.cluster
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	owners := c.store[l.handler]
-	return !l.released && n.state == NodeRunning && !n.isolated && n.generation == l.generation &&
-		c.epochs[l.handler] == l.epoch && len(owners) == 1 && owners[0] == n.id &&
-		c.clock.Now().Before(n.renewedAt.Add(c.leaseTTL))
+	if n.state != NodeRunning || n.generation != l.generation {
+		return false
+	}
+	return placement.LeaseHolds(*l.held, c.ownershipLocked(l.held.Handler), n.id, c.clock.Now(), c.leaseTTL)
 }
 
 func (l *testLease) Release() {
 	l.node.cluster.mu.Lock()
-	l.released = true
+	l.held.Released = true
 	l.node.cluster.mu.Unlock()
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // TestNode is one logical Grove node.
@@ -605,7 +715,7 @@ type TestNode struct {
 	crashedAt  time.Time
 	detected   bool
 	isolated   bool
-	renewedAt  time.Time
+	held       map[string]*placement.HeldLease // this process's claims by capability
 	regs       []registration
 	registry   *grove.Registry
 	dispatcher *grove.Dispatcher
@@ -658,7 +768,7 @@ func (n *TestNode) start() {
 	n.observed = nil
 	n.selector = placement.Selector{}
 	n.isolated = false
-	n.renewedAt = n.cluster.clock.Now()
+	n.held = make(map[string]*placement.HeldLease)
 	n.registry = &grove.Registry{}
 	for _, r := range n.regs {
 		if err := n.registry.Register(r.id.Service, r.id.Method, r.handler); err != nil {

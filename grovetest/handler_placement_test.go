@@ -158,3 +158,55 @@ func TestExclusiveWithoutRuntimeOwnsLocally(t *testing.T) {
 		t.Fatal("released ownership still enabled")
 	}
 }
+
+// A successor claims only after the previous holder's lease has gone
+// unrenewed for the lease TTL, as in production; the test clock advances to
+// that moment instead of blocking.
+func TestSuccessorWaitsOutPreviousOwnersLease(t *testing.T) {
+	cluster := grovetest.NewTestCluster(t)
+	var owned []*grove.Ownership
+	n1, n2 := cluster.AddNode(), cluster.AddNode()
+	registerPayment(n1, &owned)
+	registerPayment(n2, &owned)
+	cluster.Start()
+	if _, err := whoAmI(t, n2, paymentReconcile); err != nil {
+		t.Fatal(err)
+	}
+
+	cluster.StopNode(n1)
+	cluster.Converge()
+	stoppedAt := cluster.Clock().Now()
+	if got, err := whoAmI(t, n2, paymentReconcile); err != nil || got != n2.ID() {
+		t.Fatalf("Reconcile served by %q err=%v; want node-2", got, err)
+	}
+	if !owned[len(owned)-1].Enabled() {
+		t.Fatal("successor does not own the capability")
+	}
+	if waited := cluster.Clock().Now().Sub(stoppedAt); waited <= 0 || waited > cluster.LeaseTTL() {
+		t.Fatalf("successor claimed after %v; want a wait within the lease TTL %v", waited, cluster.LeaseTTL())
+	}
+}
+
+// An owner cut off from the cluster keeps acting only until its own lease
+// runs out, exactly as production's renewal-based lease does.
+func TestIsolatedOwnerActsUntilItsLeaseExpires(t *testing.T) {
+	cluster := grovetest.NewTestCluster(t)
+	var owned []*grove.Ownership
+	n1, n2 := cluster.AddNode(), cluster.AddNode()
+	registerPayment(n1, &owned)
+	registerPayment(n2, &owned)
+	cluster.Start()
+	if _, err := whoAmI(t, n2, paymentReconcile); err != nil {
+		t.Fatal(err)
+	}
+	held := owned[0]
+	cluster.Isolate(n1)
+	cluster.Clock().Advance(cluster.LeaseTTL() / 2)
+	if !held.Enabled() {
+		t.Fatal("isolated owner stopped before its lease expired")
+	}
+	cluster.Clock().Advance(cluster.LeaseTTL() / 2)
+	if held.Enabled() {
+		t.Fatal("isolated owner still acting after its lease expired")
+	}
+}
