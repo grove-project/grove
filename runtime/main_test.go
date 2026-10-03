@@ -64,7 +64,6 @@ func TestStandaloneGrovletReportsBootstrapReadiness(t *testing.T) {
 		"--advertise-endpoint", "nats-subject://system/candidate-inventory",
 		"--system-nats-url", server.URL(),
 		"--system-nats-subject", "_GROVE.system.candidate.inventory",
-		"--component", "inventory",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -178,14 +177,36 @@ func TestParseConfig(t *testing.T) {
 	}, io.Discard); !errors.Is(err, errSystemNATSRequired) {
 		t.Errorf("endpoint without connection error = %v; want %v", err, errSystemNATSRequired)
 	}
-	if _, err := parseConfig([]string{
+	// Without membership a node is a standalone candidate: it hosts one
+	// component, in an isolated worker, and only it may set a route subject.
+	standalone := []string{
 		"--runtime-dir", runtimeDir,
+		"--node-id", "node-a",
+		"--advertise-endpoint", "nats-subject://system/node-a",
 		"--system-nats-url", "nats://127.0.0.1:4222",
 		"--system-nats-subject", "_GROVE.system.invoke.node-a",
-		"--component", "orders",
-		"--component", "inventory",
-	}, io.Discard); !errors.Is(err, errApplicationPlacementCluster) {
-		t.Errorf("components without placement cluster error = %v; want %v", err, errApplicationPlacementCluster)
+	}
+	candidate, err := parseConfig(append(slices.Clone(standalone),
+		"--component", "orders", "--route-subject", "_GROVE.system.invoke.node-b"), io.Discard)
+	if err != nil || candidate.routeSubject != "_GROVE.system.invoke.node-b" || !slices.Equal(candidate.componentKinds, []string{"orders"}) {
+		t.Errorf("standalone candidate = %#v, %v", candidate, err)
+	}
+	for _, rejected := range []struct {
+		args []string
+		want error
+	}{
+		{append(slices.Clone(standalone), "--component", "orders", "--component", "inventory"), errApplicationPlacementCluster},
+		{append(slices.Clone(standalone), "--route-subject", "_GROVE.system.invoke.node-b"), errRouteSubjectCandidate},
+		{[]string{
+			"--runtime-dir", runtimeDir,
+			"--system-nats-url", "nats://127.0.0.1:4222",
+			"--system-nats-subject", "_GROVE.system.invoke.node-a",
+			"--component", "orders",
+		}, errCandidateComponent},
+	} {
+		if _, err := parseConfig(rejected.args, io.Discard); !errors.Is(err, rejected.want) {
+			t.Errorf("parseConfig(%q) error = %v; want %v", rejected.args, err, rejected.want)
+		}
 	}
 	if _, err := parseConfig([]string{
 		"--runtime-dir", runtimeDir,
@@ -197,7 +218,7 @@ func TestParseConfig(t *testing.T) {
 		"--system-nats-membership",
 		"--system-nats-subject", "_GROVE.system.invoke.node-a",
 		"--component", "orders",
-		"--component", "orders", "--route-subject", "_GROVE.system.invoke.node-b",
+		"--component", "orders",
 	}, io.Discard); !errors.Is(err, ErrApplicationDefinitionInvalid) {
 		t.Errorf("duplicate component error = %v; want %v", err, ErrApplicationDefinitionInvalid)
 	}
@@ -1054,6 +1075,18 @@ func TestGrovletServicePlacementConvergesAndRoutes(t *testing.T) {
 	if created.Reservation.ID != "reservation-order-placement" {
 		t.Errorf("placement-routed reservation ID = %q; want reservation-order-placement", created.Reservation.ID)
 	}
+	// A handler error crosses nodes as a handler error.
+	_, err = grove.Call[groveshop.CreateOrderRequest, groveshop.Order](
+		ctx,
+		client,
+		groveshop.ServiceOrders,
+		groveshop.MethodCreateOrder,
+		groveshop.CreateOrderRequest{OrderID: "invalid-placement", SKU: "coffee-beans"},
+	)
+	var responseErr *grove.ResponseError
+	if !errors.As(err, &responseErr) || responseErr.Code != grove.ErrorHandler {
+		t.Errorf("placement-routed handler error = %v; want handler ResponseError", err)
+	}
 
 	for i := len(cluster.nodes) - 1; i >= 0; i-- {
 		if err := cluster.nodes[i].Stop(ctx); err != nil {
@@ -1646,120 +1679,6 @@ func waitForGrovletComponentGeneration(
 		case <-ctx.Done():
 			return systemnats.ComponentStatus{}, fmt.Errorf("component generation did not advance: view=%#v: %w", last, ctx.Err())
 		}
-	}
-}
-
-// Orders and Inventory keep one Grove call path when placed in separate real
-// Grovlet processes.
-func TestGrovletCrossNodeServiceInvocation(t *testing.T) {
-	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
-	defer cancel()
-	const (
-		ordersSubject    = "_GROVE.system.invoke.orders-node"
-		inventorySubject = "_GROVE.system.invoke.inventory-node"
-	)
-
-	ordersNode, err := grovetest.StartNode(
-		grovletPath(t),
-		"--node-id", "orders-node",
-		"--advertise-endpoint", "nats-subject://system/orders-node",
-		"--system-nats-listen", "127.0.0.1:0",
-		"--system-nats-subject", ordersSubject,
-		"--component", "orders", "--route-subject", inventorySubject,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := ordersNode.Cleanup(); err != nil {
-			t.Errorf("cleanup Orders node: %v", err)
-		}
-	})
-	if err := ordersNode.WaitReady(ctx); err != nil {
-		t.Fatal(err)
-	}
-	ordersReady := readyEventFromLogs(t, ordersNode.Logs())
-	serverURL := ordersReady.SystemNATSURL
-	if ordersReady.NodeID != "orders-node" || ordersReady.AdvertisedEndpoint != "nats-subject://system/orders-node" {
-		t.Errorf("Orders readiness identity = (%q, %q); want orders-node endpoint", ordersReady.NodeID, ordersReady.AdvertisedEndpoint)
-	}
-
-	inventoryNode, err := grovetest.StartNode(
-		grovletPath(t),
-		"--node-id", "inventory-node",
-		"--advertise-endpoint", "nats-subject://system/inventory-node",
-		"--system-nats-url", serverURL,
-		"--system-nats-subject", inventorySubject,
-		"--component", "inventory",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := inventoryNode.Cleanup(); err != nil {
-			t.Errorf("cleanup Inventory node: %v", err)
-		}
-	})
-	if err := inventoryNode.WaitReady(ctx); err != nil {
-		t.Fatal(err)
-	}
-	inventoryReady := readyEventFromLogs(t, inventoryNode.Logs())
-	if inventoryReady.NodeID != "inventory-node" || inventoryReady.AdvertisedEndpoint != "nats-subject://system/inventory-node" {
-		t.Errorf("Inventory readiness identity = (%q, %q); want inventory-node endpoint", inventoryReady.NodeID, inventoryReady.AdvertisedEndpoint)
-	}
-	if inventoryReady.NodeID == ordersReady.NodeID || inventoryReady.AdvertisedEndpoint == ordersReady.AdvertisedEndpoint {
-		t.Error("same-host Grovlets did not retain distinct identities and endpoints")
-	}
-
-	transport, err := systemnats.Connect(ctx, serverURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(transport.Close)
-	client, err := transport.RoutedClient(ordersSubject)
-	if err != nil {
-		t.Fatal(err)
-	}
-	created, err := grove.Call[groveshop.CreateOrderRequest, groveshop.Order](
-		ctx,
-		client,
-		groveshop.ServiceOrders,
-		groveshop.MethodCreateOrder,
-		groveshop.CreateOrderRequest{
-			OrderID:         "order-cross-node",
-			SKU:             "coffee-beans",
-			Quantity:        2,
-			AmountCents:     2400,
-			ShippingAddress: "12 Grove Lane",
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if created.Status != groveshop.OrderCompleted {
-		t.Errorf("cross-node order status = %q; want %q", created.Status, groveshop.OrderCompleted)
-	}
-	if created.Reservation.ID != "reservation-order-cross-node" {
-		t.Errorf("cross-node reservation ID = %q; want reservation-order-cross-node", created.Reservation.ID)
-	}
-
-	_, err = grove.Call[groveshop.CreateOrderRequest, groveshop.Order](
-		ctx,
-		client,
-		groveshop.ServiceOrders,
-		groveshop.MethodCreateOrder,
-		groveshop.CreateOrderRequest{OrderID: "invalid-cross-node", SKU: "coffee-beans"},
-	)
-	var responseErr *grove.ResponseError
-	if !errors.As(err, &responseErr) || responseErr.Code != grove.ErrorHandler {
-		t.Errorf("cross-node handler error = %v; want handler ResponseError", err)
-	}
-
-	if err := inventoryNode.Stop(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err := ordersNode.Stop(ctx); err != nil {
-		t.Fatal(err)
 	}
 }
 

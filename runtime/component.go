@@ -28,6 +28,10 @@ type componentSpec struct {
 	// mode selects the execution process. Placement decided that this node
 	// hosts the component; mode decides which process on the node runs it.
 	mode systemnats.ExecutionMode
+	// routeSubject, set only for a standalone candidate, sends every Grove
+	// call the component makes to one invocation subject instead of
+	// through placement.
+	routeSubject string
 }
 
 type componentProcess interface {
