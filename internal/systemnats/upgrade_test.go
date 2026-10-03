@@ -10,8 +10,23 @@ import (
 	"time"
 
 	"github.com/grove-project/grove/internal/bootstrap"
+	"github.com/grove-project/grove/internal/rollout"
 	"github.com/grove-project/grove/internal/systemnats"
 )
+
+// RolloutStore is the System NATS adapter for the rollout owner.
+var _ rollout.Store = (*systemnats.RolloutStore)(nil)
+
+// rolloutOperator rolls out through the deployment endpoints transport's
+// node serves as nodeID.
+func rolloutOperator(t *testing.T, transport *systemnats.Transport, nodeID string) *rollout.Operator {
+	t.Helper()
+	store, err := systemnats.NewRolloutStore(transport, nodeID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rollout.New(store)
+}
 
 func TestBootstrapReadinessRequiresExactArtifact(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -88,7 +103,7 @@ func TestHealthyUpgradeCommitsCandidateOwnership(t *testing.T) {
 		{Current: currentRoutes[1], Candidate: candidateRoutes[1]},
 		{Current: currentRoutes[0], Candidate: candidateRoutes[0]},
 	}
-	committed, err := deployments[2].CommitHealthyUpgrade(ctx, transports[2], pending, routes)
+	committed, err := rolloutOperator(t, transports[2], "node-3").Commit(ctx, pending, routes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +174,7 @@ func TestFailedUpgradeRestoresKnownGoodOwnership(t *testing.T) {
 		{Current: currentRoutes[1], Candidate: candidateRoutes[1]},
 		{Current: currentRoutes[0], Candidate: candidateRoutes[0]},
 	}
-	if _, err := deployments[2].RollbackFailedUpgrade(ctx, transports[2], pending, routes, systemnats.RolloutFailure{}); !errors.Is(err, systemnats.ErrUpgradeInvalid) {
+	if _, err := rolloutOperator(t, transports[2], "node-3").Rollback(ctx, pending, routes, systemnats.RolloutFailure{}); !errors.Is(err, systemnats.ErrUpgradeInvalid) {
 		t.Errorf("empty rollback failure error = %v; want %v", err, systemnats.ErrUpgradeInvalid)
 	}
 	illegal := pending
@@ -185,7 +200,7 @@ func TestFailedUpgradeRestoresKnownGoodOwnership(t *testing.T) {
 		Code: "candidate_startup_failed", Component: "Inventory",
 		Field: "inventory.reservation_buffer", Message: "must be zero or greater",
 	}
-	rolledBack, err := deployments[2].RollbackFailedUpgrade(ctx, transports[2], pending, routes, failure)
+	rolledBack, err := rolloutOperator(t, transports[2], "node-3").Rollback(ctx, pending, routes, failure)
 	if err != nil {
 		t.Fatal(err)
 	}

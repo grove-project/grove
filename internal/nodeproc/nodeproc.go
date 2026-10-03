@@ -2,8 +2,9 @@
 //
 // A Process starts an application binary as a Grovlet with its own runtime
 // directory, follows the node's lifecycle event stream (see Event) and
-// captures its output. The operator console, the grove CLI and the grovetest
-// harness all launch local nodes through it.
+// captures its output. internal/localcluster builds local clusters from
+// Processes for the operator console and the grove CLI, and grovetest wraps
+// them for tests.
 package nodeproc
 
 import (

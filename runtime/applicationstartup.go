@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/grove-project/grove/internal/artifact"
+	"github.com/grove-project/grove/internal/localcluster"
 	"github.com/grove-project/grove/internal/nodeproc"
 	"github.com/grove-project/grove/internal/systemnats"
 )
@@ -23,84 +24,83 @@ var (
 	errApplicationNodeCount          = errors.New("invalid node count")
 )
 
-func (c *applicationController) prepareConfiguredApplicationStartup(
-	ctx context.Context,
-	inspection artifact.Inspection,
-) error {
+type applicationJoinResult struct {
+	State   string   `json:"state"`
+	NodeIDs []string `json:"node_ids"`
+}
+
+// applicationHost owns the nodes a configured application process hosts in
+// its discovered cluster: finding the cluster, founding a new one, joining
+// an existing one, and leaving it gracefully. Node processes are launched
+// through internal/localcluster. Its methods are called with the console's
+// operation lock held.
+type applicationHost struct {
+	binaryPath string
+	discovery  *applicationDiscovery
+	local      *localcluster.Cluster
+}
+
+// applicationStartupOffer is what discovery found for this process's
+// artifact: nothing (start is offered), a same-artifact cluster (join is
+// offered) or a cluster running another artifact.
+type applicationStartupOffer struct {
+	discovered    bool
+	join          bool
+	nodes         int
+	systemNATSURL string
+	webAddress    string
+}
+
+func newApplicationHost(binaryPath string) *applicationHost {
+	return &applicationHost{binaryPath: binaryPath, local: localcluster.New()}
+}
+
+// prepare starts discovery for inspection's application and cluster and
+// reports what it found.
+func (h *applicationHost) prepare(ctx context.Context, inspection artifact.Inspection) (applicationStartupOffer, error) {
 	clusterID := inspection.Config.Facts["cluster.name"]
 	discovery, err := newApplicationDiscovery(inspection.Manifest.ApplicationID, clusterID)
 	if err != nil {
-		return err
+		return applicationStartupOffer{}, err
 	}
-	c.discovery = discovery
-	c.startup = inspection
+	h.discovery = discovery
 	record, exists, err := discovery.discover(ctx)
+	if err != nil || !exists {
+		return applicationStartupOffer{}, err
+	}
+	if record.ApplicationID != inspection.Manifest.ApplicationID || record.ClusterID != clusterID {
+		return applicationStartupOffer{}, errApplicationDiscoveryInvalid
+	}
+	reachable, err := reachableApplicationDiscoveryNode(ctx, record)
 	if err != nil {
-		return err
+		return applicationStartupOffer{}, err
 	}
-	if exists {
-		if record.ApplicationID != inspection.Manifest.ApplicationID || record.ClusterID != clusterID {
-			return errApplicationDiscoveryInvalid
-		}
-		reachable, err := reachableApplicationDiscoveryNode(ctx, record)
-		if err != nil {
-			return err
-		}
-		c.mu.Lock()
-		c.cluster = &applicationCluster{
-			systemNATSURL: reachable.SystemNATSURL,
-			webAddress:    record.WebAddress,
-			artifact:      inspection,
-		}
-		if record.ArtifactDigest == inspection.ArtifactDigest {
-			c.joinAvailable = true
-			c.startupNodes = len(record.Nodes)
-			c.lastEvent = "matching " + activeApplication.Name + " cluster discovered; Join is the default action"
-		} else {
-			c.lastEvent = activeApplication.Name + " cluster discovered with a different artifact; rollout is required"
-		}
-		c.mu.Unlock()
-		return nil
-	}
-	c.mu.Lock()
-	c.startAvailable = true
-	c.lastEvent = "No " + activeApplication.Name + " cluster discovered"
-	c.mu.Unlock()
-	return nil
+	return applicationStartupOffer{
+		discovered: true, join: record.ArtifactDigest == inspection.ArtifactDigest, nodes: len(record.Nodes),
+		systemNATSURL: reachable.SystemNATSURL, webAddress: record.WebAddress,
+	}, nil
 }
 
-func (c *applicationController) applicationStartAvailable() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.startAvailable
-}
-
-func (c *applicationController) startDiscoveredApplicationCluster(ctx context.Context, args []string) (any, error) {
-	webAddress, count, err := parseStartArguments(args)
-	if err != nil {
-		return nil, err
-	}
-	c.operationMu.Lock()
-	defer c.operationMu.Unlock()
-	c.mu.RLock()
-	discovery := c.discovery
-	inspection := c.startup
-	startAvailable := c.startAvailable
-	c.mu.RUnlock()
-	if discovery == nil || inspection.Config == nil || !startAvailable {
+// start founds a new cluster for inspection with count nodes hosted here,
+// its ingress on webAddress. joined is called after each node joins with
+// the System NATS URL to reach the cluster through. It returns the IDs of
+// the nodes that joined, even on error.
+func (h *applicationHost) start(
+	ctx context.Context,
+	inspection artifact.Inspection,
+	webAddress string,
+	count int,
+	joined func(nodeID, systemNATSURL string),
+) ([]string, error) {
+	if h.discovery == nil {
 		return nil, errors.New("a new application cluster is not available to start")
 	}
-	if _, exists, err := discovery.discover(ctx); err != nil {
+	if _, exists, err := h.discovery.discover(ctx); err != nil {
 		return nil, err
 	} else if exists {
 		return nil, errors.New("a compatible application cluster was discovered; start is no longer available")
 	}
-	if webAddress == "" {
-		if webAddress, err = defaultIngressAddress(); err != nil {
-			return nil, err
-		}
-	}
-	node, ready, err := c.startDiscoveredApplicationNode(ctx, "node-1", "", webAddress)
+	node, ready, err := h.startNode(ctx, "node-1", "", webAddress)
 	if err != nil {
 		return nil, fmt.Errorf("bootstrap application cluster: %w", err)
 	}
@@ -117,34 +117,162 @@ func (c *applicationController) startDiscoveredApplicationCluster(ctx context.Co
 		NextNode:        2,
 		Nodes:           []applicationDiscoveryNode{founder},
 	}
-	if err := discovery.publish(discovered); err != nil {
+	if err := h.discovery.publish(discovered); err != nil {
 		_ = node.Cleanup()
 		return nil, err
 	}
-	c.mu.Lock()
-	c.cluster = &applicationCluster{
-		nodes: []*nodeproc.Process{node}, systemNATSURL: ready.SystemNATSURL,
-		webAddress: webAddress, artifact: inspection,
-	}
-	c.startAvailable = false
-	c.startupNodes = 0
-	c.localNodeIDs = []string{"node-1"}
-	c.mu.Unlock()
+	h.local.Add(founder.NodeID, node, ready.SystemNATSURL)
+	joined(founder.NodeID, ready.SystemNATSURL)
 	// The remaining nodes join through the founder exactly as a later Join
 	// would, so the cluster reaches the size it needs to serve.
-	started, err := c.addApplicationNodes(ctx, discovery, discovered, founder.RouteURL, count-1)
-	started = append([]string{"node-1"}, started...)
-	c.setLastEvent("bootstrapped " + activeApplication.Name + " cluster with " + strings.Join(started, ", "))
+	started, err := h.addNodes(ctx, discovered, founder.RouteURL, count-1, joined)
+	started = append([]string{founder.NodeID}, started...)
 	if err != nil {
-		return nil, fmt.Errorf("bootstrap application cluster after %s: %w", strings.Join(started, ", "), err)
+		return started, fmt.Errorf("bootstrap application cluster after %s: %w", strings.Join(started, ", "), err)
 	}
-	return applicationJoinResult{State: "started", NodeIDs: started}, nil
+	return started, nil
+}
+
+// join adds count nodes hosted here to the discovered cluster running
+// inspection's artifact. joined and the result are as for start.
+func (h *applicationHost) join(
+	ctx context.Context,
+	inspection artifact.Inspection,
+	count int,
+	joined func(nodeID, systemNATSURL string),
+) ([]string, error) {
+	if h.discovery == nil {
+		return nil, errApplicationJoinUnavailable
+	}
+	record, exists, err := h.discovery.discover(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, errApplicationJoinUnavailable
+	}
+	if record.ApplicationID != inspection.Manifest.ApplicationID ||
+		record.ClusterID != inspection.Config.Facts["cluster.name"] {
+		return nil, errApplicationDiscoveryInvalid
+	}
+	if record.ArtifactDigest != inspection.ArtifactDigest {
+		return nil, errApplicationRolloutRequired
+	}
+	seed, err := reachableApplicationDiscoveryNode(ctx, record)
+	if err != nil {
+		return nil, err
+	}
+	return h.addNodes(ctx, record, seed.RouteURL, count, joined)
+}
+
+// addNodes starts count nodes here, one at a time, each joining through
+// seedRoute under the next unused node ID. Discovery is republished after
+// every node so other processes always see the current membership. It
+// returns the IDs of the nodes that joined, even on error.
+func (h *applicationHost) addNodes(
+	ctx context.Context,
+	record applicationDiscoveryRecord,
+	seedRoute string,
+	count int,
+	joined func(nodeID, systemNATSURL string),
+) ([]string, error) {
+	added := make([]string, 0, count)
+	for range count {
+		nodeID := "node-" + strconv.Itoa(record.NextNode)
+		node, ready, err := h.startNode(ctx, nodeID, seedRoute, record.WebAddress)
+		if err != nil {
+			return added, fmt.Errorf("join application cluster as %s: %w", nodeID, err)
+		}
+		record.NextNode++
+		record.Revision++
+		record.Nodes = append(slices.Clone(record.Nodes), applicationDiscoveryNode{
+			NodeID: nodeID, SystemNATSURL: ready.SystemNATSURL, RouteURL: ready.SystemNATSRouteURL,
+		})
+		if err := h.discovery.publish(record); err != nil {
+			_ = node.Cleanup()
+			return added, err
+		}
+		h.local.Add(nodeID, node, ready.SystemNATSURL)
+		joined(nodeID, ready.SystemNATSURL)
+		added = append(added, nodeID)
+	}
+	return added, nil
+}
+
+// startNode starts one node of the discovered cluster. Only the founding
+// node, which has no seed route, is told the ingress address; it records it
+// for the rest of the cluster.
+func (h *applicationHost) startNode(ctx context.Context, nodeID, seedRoute, webAddress string) (*nodeproc.Process, nodeproc.Event, error) {
+	spec := localcluster.NodeSpec{
+		NodeID: nodeID, Subject: "_GROVE.system.application." + nodeID, SeedRoute: seedRoute,
+		Membership: true, Recovery: true, RetireOnStop: true,
+	}
+	if seedRoute == "" {
+		spec.IngressAddress = webAddress
+	}
+	node, ready, err := localcluster.StartNode(ctx, h.binaryPath, spec)
+	if err != nil {
+		return nil, nodeproc.Event{}, err
+	}
+	if ready.SystemNATSRouteURL == "" {
+		_ = node.Cleanup()
+		return nil, nodeproc.Event{}, fmt.Errorf("read %s readiness: ready lifecycle event has no System NATS route URL", nodeID)
+	}
+	return node, ready, nil
+}
+
+// hosting reports whether this process hosts nodes of a discovered cluster.
+func (h *applicationHost) hosting() bool {
+	return h.local.Len() != 0
+}
+
+// leave stops the hosted nodes gracefully, removes them from discovery and
+// stops discovery.
+func (h *applicationHost) leave() {
+	// A configured application node may spend up to gracefulLeaveTimeout
+	// relocating services and evacuating its JetStream peers. Keep the
+	// supervising console alive slightly longer so q cannot kill the child
+	// halfway through that protocol and then remove it from discovery.
+	h.local.Leave(gracefulLeaveTimeout + 5*time.Second)
+	if h.discovery != nil {
+		for _, nodeID := range h.local.NodeIDs() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = h.discovery.removeNode(ctx, nodeID)
+			cancel()
+		}
+	}
+	h.close()
+}
+
+// close stops discovery.
+func (h *applicationHost) close() {
+	if h.discovery != nil {
+		h.discovery.close()
+	}
+}
+
+func reachableApplicationDiscoveryNode(
+	ctx context.Context,
+	record applicationDiscoveryRecord,
+) (applicationDiscoveryNode, error) {
+	var lastErr error
+	for _, node := range record.Nodes {
+		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
+		transport, err := systemnats.Connect(probeCtx, node.SystemNATSURL)
+		cancel()
+		if err == nil {
+			transport.Close()
+			return node, nil
+		}
+		lastErr = errors.Join(lastErr, fmt.Errorf("%s: %w", node.NodeID, err))
+	}
+	return applicationDiscoveryNode{}, fmt.Errorf("%w: %w", errApplicationClusterUnreachable, lastErr)
 }
 
 // defaultIngressAddress is the ingress address offered when the operator does
 // not choose one: a free loopback port.
 func defaultIngressAddress() (string, error) {
-	ports, err := reserveApplicationPorts(1)
+	ports, err := localcluster.ReservePorts(1)
 	if err != nil {
 		return "", fmt.Errorf("reserve ingress port: %w", err)
 	}
@@ -183,10 +311,101 @@ func parseJoinArguments(args []string) (int, error) {
 	return *count, nil
 }
 
+// prepareConfiguredApplicationStartup discovers this artifact's cluster and
+// offers Start or Join accordingly.
+func (c *applicationController) prepareConfiguredApplicationStartup(
+	ctx context.Context,
+	inspection artifact.Inspection,
+) error {
+	c.mu.Lock()
+	c.startup = inspection
+	c.mu.Unlock()
+	offer, err := c.host.prepare(ctx, inspection)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !offer.discovered {
+		c.startAvailable = true
+		c.lastEvent = "No " + activeApplication.Name + " cluster discovered"
+		return nil
+	}
+	c.cluster = &applicationCluster{
+		systemNATSURL: offer.systemNATSURL,
+		webAddress:    offer.webAddress,
+		artifact:      inspection,
+	}
+	if offer.join {
+		c.joinAvailable = true
+		c.startupNodes = offer.nodes
+		c.lastEvent = "matching " + activeApplication.Name + " cluster discovered; Join is the default action"
+	} else {
+		c.lastEvent = activeApplication.Name + " cluster discovered with a different artifact; rollout is required"
+	}
+	return nil
+}
+
+func (c *applicationController) applicationStartAvailable() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.startAvailable
+}
+
 func (c *applicationController) applicationJoinAvailable() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.joinAvailable
+}
+
+// hostedNodeJoined returns the callback that attaches the console to the
+// cluster this process hosts nodes in, as each node joins it.
+func (c *applicationController) hostedNodeJoined(inspection artifact.Inspection, webAddress string) func(string, string) {
+	return func(_, systemNATSURL string) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.cluster == nil {
+			c.cluster = &applicationCluster{webAddress: webAddress, artifact: inspection}
+		}
+		c.cluster.local = c.host.local
+		c.cluster.systemNATSURL = systemNATSURL
+	}
+}
+
+func (c *applicationController) startDiscoveredApplicationCluster(ctx context.Context, args []string) (any, error) {
+	webAddress, count, err := parseStartArguments(args)
+	if err != nil {
+		return nil, err
+	}
+	c.operationMu.Lock()
+	defer c.operationMu.Unlock()
+	c.mu.RLock()
+	inspection := c.startup
+	startAvailable := c.startAvailable
+	c.mu.RUnlock()
+	if inspection.Config == nil || !startAvailable {
+		return nil, errors.New("a new application cluster is not available to start")
+	}
+	if webAddress == "" {
+		if webAddress, err = defaultIngressAddress(); err != nil {
+			return nil, err
+		}
+	}
+	joined := c.hostedNodeJoined(inspection, webAddress)
+	started, err := c.host.start(ctx, inspection, webAddress, count, func(nodeID, systemNATSURL string) {
+		joined(nodeID, systemNATSURL)
+		c.mu.Lock()
+		c.startAvailable = false
+		c.startupNodes = 0
+		c.mu.Unlock()
+	})
+	if len(started) != 0 {
+		c.setLastEvent("bootstrapped " + activeApplication.Name + " cluster with " + strings.Join(started, ", "))
+	}
+	if err != nil {
+		return nil, err
+	}
+	return applicationJoinResult{State: "started", NodeIDs: started}, nil
 }
 
 func (c *applicationController) joinApplicationCluster(ctx context.Context, args []string) (any, error) {
@@ -197,32 +416,13 @@ func (c *applicationController) joinApplicationCluster(ctx context.Context, args
 	c.operationMu.Lock()
 	defer c.operationMu.Unlock()
 	c.mu.RLock()
-	discovery := c.discovery
-	inspection := c.cluster
+	cluster := c.cluster
 	joinAvailable := c.joinAvailable
 	c.mu.RUnlock()
-	if discovery == nil || inspection == nil || !joinAvailable {
+	if cluster == nil || !joinAvailable {
 		return nil, errApplicationJoinUnavailable
 	}
-	record, exists, err := discovery.discover(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if !exists {
-		return nil, errApplicationJoinUnavailable
-	}
-	if record.ApplicationID != inspection.artifact.Manifest.ApplicationID ||
-		record.ClusterID != inspection.artifact.Config.Facts["cluster.name"] {
-		return nil, errApplicationDiscoveryInvalid
-	}
-	if record.ArtifactDigest != inspection.artifact.ArtifactDigest {
-		return nil, errApplicationRolloutRequired
-	}
-	seed, err := reachableApplicationDiscoveryNode(ctx, record)
-	if err != nil {
-		return nil, err
-	}
-	joined, err := c.addApplicationNodes(ctx, discovery, record, seed.RouteURL, count)
+	joined, err := c.host.join(ctx, cluster.artifact, count, c.hostedNodeJoined(cluster.artifact, cluster.webAddress))
 	if len(joined) != 0 {
 		c.mu.Lock()
 		c.joinAvailable = false
@@ -234,110 +434,4 @@ func (c *applicationController) joinApplicationCluster(ctx context.Context, args
 		return nil, err
 	}
 	return applicationJoinResult{State: "joined", NodeIDs: joined}, nil
-}
-
-// addApplicationNodes starts count nodes in this process, one at a time, each
-// joining through seedRoute under the next unused node ID. Discovery is
-// republished after every node so other processes always see the current
-// membership. It returns the IDs of the nodes that joined, even on error.
-func (c *applicationController) addApplicationNodes(
-	ctx context.Context,
-	discovery *applicationDiscovery,
-	record applicationDiscoveryRecord,
-	seedRoute string,
-	count int,
-) ([]string, error) {
-	joined := make([]string, 0, count)
-	for range count {
-		nodeID := "node-" + strconv.Itoa(record.NextNode)
-		node, ready, err := c.startDiscoveredApplicationNode(ctx, nodeID, seedRoute, record.WebAddress)
-		if err != nil {
-			return joined, fmt.Errorf("join application cluster as %s: %w", nodeID, err)
-		}
-		record.NextNode++
-		record.Revision++
-		record.Nodes = append(slices.Clone(record.Nodes), applicationDiscoveryNode{
-			NodeID: nodeID, SystemNATSURL: ready.SystemNATSURL, RouteURL: ready.SystemNATSRouteURL,
-		})
-		if err := discovery.publish(record); err != nil {
-			_ = node.Cleanup()
-			return joined, err
-		}
-		c.mu.Lock()
-		c.cluster.nodes = append(c.cluster.nodes, node)
-		c.cluster.systemNATSURL = ready.SystemNATSURL
-		c.localNodeIDs = append(c.localNodeIDs, nodeID)
-		c.mu.Unlock()
-		joined = append(joined, nodeID)
-	}
-	return joined, nil
-}
-
-func reachableApplicationDiscoveryNode(
-	ctx context.Context,
-	record applicationDiscoveryRecord,
-) (applicationDiscoveryNode, error) {
-	var lastErr error
-	for _, node := range record.Nodes {
-		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
-		transport, err := systemnats.Connect(probeCtx, node.SystemNATSURL)
-		cancel()
-		if err == nil {
-			transport.Close()
-			return node, nil
-		}
-		lastErr = errors.Join(lastErr, fmt.Errorf("%s: %w", node.NodeID, err))
-	}
-	return applicationDiscoveryNode{}, fmt.Errorf("%w: %w", errApplicationClusterUnreachable, lastErr)
-}
-
-func (c *applicationController) startDiscoveredApplicationNode(
-	ctx context.Context,
-	nodeID string,
-	seedRoute string,
-	webAddress string,
-) (*nodeproc.Process, lifecycleEvent, error) {
-	args := []string{
-		"--node-id", nodeID,
-		"--advertise-endpoint", "nats-subject://system/" + nodeID,
-		"--system-nats-listen", "127.0.0.1:0",
-		"--system-nats-route-listen", "127.0.0.1:0",
-		"--system-nats-membership",
-		"--system-nats-recovery",
-		"--system-nats-retire-on-stop",
-		"--system-nats-subject", "_GROVE.system.application." + nodeID,
-	}
-	if seedRoute != "" {
-		args = append(args, "--system-nats-seed", seedRoute)
-	}
-	// The node hosts whatever the runtime decides; only the founding node is
-	// told the ingress address, which it records for the rest of the cluster.
-	if seedRoute == "" {
-		args = append(args, "--ingress-address", webAddress)
-	}
-	node, err := nodeproc.Start(c.binaryPath, args...)
-	if err != nil {
-		return nil, lifecycleEvent{}, err
-	}
-	if err := node.WaitReady(ctx); err != nil {
-		_ = node.Cleanup()
-		return nil, lifecycleEvent{}, err
-	}
-	ready, err := applicationReadyEvent(node.Logs())
-	if err != nil {
-		_ = node.Cleanup()
-		return nil, lifecycleEvent{}, fmt.Errorf("read %s readiness: %w", nodeID, err)
-	}
-	return node, ready, nil
-}
-
-func applicationReadyEvent(logs string) (lifecycleEvent, error) {
-	event, err := nodeproc.ReadyEvent(logs)
-	if err != nil {
-		return lifecycleEvent{}, err
-	}
-	if event.SystemNATSRouteURL == "" {
-		return lifecycleEvent{}, errors.New("ready lifecycle event has no System NATS route URL")
-	}
-	return event, nil
 }

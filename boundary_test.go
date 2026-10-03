@@ -3,6 +3,9 @@ package grove_test
 import (
 	"bytes"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,11 +45,108 @@ var importRules = []importRule{
 		Forbidden: []string{modulePath + "/internal/testapp/..."},
 	},
 	{
+		// Rollout orchestration sequences control-plane records through a
+		// Store port; the System NATS adapter implements it, so the
+		// orchestration is tested without a server.
+		Name:      "rollout orchestration does not depend on NATS",
+		From:      []string{modulePath + "/internal/rollout"},
+		Forbidden: []string{modulePath + "/internal/systemnats", "github.com/nats-io/..."},
+	},
+	{
 		// Grove Shop is a standalone application that consumes Grove.
 		Name:      "Grove does not depend on Grove Shop",
 		From:      []string{modulePath + "/..."},
 		Forbidden: []string{"github.com/grove-project/groveshop/..."},
 	},
+}
+
+// callRule allows calls to the functions or methods named Names only from
+// packages matching Owners. A name qualified as "pkg.Func" matches calls
+// through that package identifier; a bare name matches any method call of
+// that name. Only non-test code is checked: tests may set up state directly.
+type callRule struct {
+	Name   string
+	Names  []string
+	Owners []string
+}
+
+// callRules give each orchestration responsibility one production owner.
+var callRules = []callRule{
+	{
+		// Every artifact, desired-deployment and rollout record is written by
+		// the rollout owner, through the System NATS adapter that stores it.
+		Name:   "deployment intent is written only by the rollout owner",
+		Names:  []string{"PutRollout", "PutDeploymentArtifact", "PutDesired", "PutArtifact"},
+		Owners: []string{modulePath + "/internal/rollout", modulePath + "/internal/systemnats"},
+	},
+	{
+		// Local node processes are launched by the local cluster owner;
+		// grovetest wraps the same process abstraction for tests.
+		Name:   "local node processes are launched only by the local cluster owner",
+		Names:  []string{"nodeproc.Start", "nodeproc.New"},
+		Owners: []string{modulePath + "/internal/localcluster", modulePath + "/grovetest"},
+	},
+}
+
+// TestOrchestrationOwners enforces callRules over every non-test source file
+// in the module. A rule whose owners never make the call fails too, so a
+// renamed function cannot leave a rule silently guarding nothing.
+func TestOrchestrationOwners(t *testing.T) {
+	packages := listModulePackages(t)
+	for _, rule := range callRules {
+		t.Run(rule.Name, func(t *testing.T) {
+			ownerCalls := 0
+			for _, pkg := range packages {
+				owner := matchesAny(pkg.ImportPath, rule.Owners)
+				for _, file := range pkg.GoFiles {
+					path := filepath.Join(pkg.Dir, file)
+					for _, call := range namedCalls(t, path, rule.Names) {
+						if owner {
+							ownerCalls++
+							continue
+						}
+						t.Errorf("%s: only %s may call %s", call, rule.Owners, rule.Names)
+					}
+				}
+			}
+			if ownerCalls == 0 {
+				t.Errorf("no owner calls %s; the rule guards nothing", rule.Names)
+			}
+		})
+	}
+}
+
+// namedCalls returns the positions of calls in the Go file at path to any
+// of names.
+func namedCalls(t *testing.T, path string, names []string) []string {
+	t.Helper()
+	fileSet := token.NewFileSet()
+	file, err := parser.ParseFile(fileSet, path, nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	var calls []string
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		qualified := selector.Sel.Name
+		if ident, ok := selector.X.(*ast.Ident); ok {
+			qualified = ident.Name + "." + selector.Sel.Name
+		}
+		for _, name := range names {
+			if name == selector.Sel.Name && !strings.Contains(name, ".") || name == qualified {
+				calls = append(calls, fileSet.Position(call.Pos()).String()+" "+qualified)
+			}
+		}
+		return true
+	})
+	return calls
 }
 
 type listedPackage struct {

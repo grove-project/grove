@@ -72,17 +72,12 @@ func TestBrokenInventoryCandidateRollsBack(t *testing.T) {
 
 	current := artifactControlRecord(currentInspection)
 	candidate := artifactControlRecord(candidateInspection)
-	for _, record := range []systemnats.DeploymentArtifact{current, candidate} {
-		if err := transport.PutDeploymentArtifact(ctx, "node-1", record); err != nil {
-			t.Fatal(err)
-		}
-	}
-	active := rolloutRecord(1, current.ArtifactDigest, "", systemnats.RolloutActive)
-	if err := transport.PutRollout(ctx, "node-2", active); err != nil {
+	operator := rolloutOperator(t, transport)
+	if _, err := operator.Activate(ctx, current, rolloutGeneration(1)); err != nil {
 		t.Fatal(err)
 	}
-	pending := rolloutRecord(2, current.ArtifactDigest, candidate.ArtifactDigest, systemnats.RolloutPending)
-	if err := transport.PutRollout(ctx, "node-3", pending); err != nil {
+	pending, err := operator.Propose(ctx, current.ArtifactDigest, candidate, rolloutGeneration(2))
+	if err != nil {
 		t.Fatal(err)
 	}
 	wantArtifacts := []systemnats.DeploymentArtifact{current, candidate}
@@ -136,7 +131,7 @@ func TestBrokenInventoryCandidateRollsBack(t *testing.T) {
 		Field:     "inventory.reservation_buffer",
 		Message:   "must be zero or greater",
 	}
-	rolledBack, err := systemnats.NewDeployments().RollbackFailedUpgrade(ctx, transport, pending, routes, failure)
+	rolledBack, err := operator.Rollback(ctx, pending, routes, failure)
 	if err != nil {
 		t.Fatalf("rollback broken candidate: %v\n%s", err, grovletLogs(currentNodes))
 	}

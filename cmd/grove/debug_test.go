@@ -22,6 +22,7 @@ import (
 	"github.com/google/go-dap"
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/grovetest"
+	"github.com/grove-project/grove/internal/nodeproc"
 	"github.com/grove-project/grove/internal/systemnats"
 	groveshop "github.com/grove-project/grove/internal/testapp"
 )
@@ -185,8 +186,8 @@ func startDebugCluster(t *testing.T, ctx context.Context) debugCluster {
 			t.Fatalf("wait for debug Grovlets: %v\n%s", err, grovletLogs(cluster.nodes))
 		}
 	}
-	var err error
-	cluster.systemNATSURL, err = commandTestSystemNATSURL(cluster.nodes[0].Logs())
+	ready, err := nodeproc.ReadyEvent(cluster.nodes[0].Logs())
+	cluster.systemNATSURL = ready.SystemNATSURL
 	if err != nil {
 		cleanupGrovetestNodes(cluster.nodes)
 		t.Fatalf("read debug System NATS URL: %v\n%s", err, grovletLogs(cluster.nodes))
@@ -202,7 +203,7 @@ func waitForDebugTopology(ctx context.Context, transport *systemnats.Transport) 
 		groveshop.ServicePayment:   "node-4",
 		groveshop.ServiceShipping:  "node-5",
 	}
-	ticker := time.NewTicker(testConditionInterval)
+	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	var lastPlacement systemnats.PlacementView
 	var lastErr error
@@ -243,7 +244,7 @@ func waitForDebugTopology(ctx context.Context, transport *systemnats.Transport) 
 }
 
 func waitForDebugStates(ctx context.Context, transport *systemnats.Transport, want map[grove.ServiceID]systemnats.ComponentState) error {
-	ticker := time.NewTicker(testConditionInterval)
+	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	last := make(map[grove.ServiceID]systemnats.ComponentState)
 	for {
@@ -317,7 +318,7 @@ func startDebugCommand(t *testing.T, ctx context.Context, statePath, service, li
 }
 
 func (c *runningDebugCommand) waitReady(ctx context.Context, fragments ...string) error {
-	ticker := time.NewTicker(testConditionInterval)
+	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		output := c.output.String()
@@ -407,7 +408,7 @@ type testDAPClient struct {
 
 func connectDAPClient(t *testing.T, ctx context.Context, address string) *testDAPClient {
 	t.Helper()
-	ticker := time.NewTicker(testConditionInterval)
+	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
 	var lastErr error
 	for {
