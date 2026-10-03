@@ -382,3 +382,60 @@ func TestRecordedPlacementsReadsControlState(t *testing.T) {
 		}
 	}
 }
+
+// After a full cluster restart the placement stream can lose a JetStream API
+// request without replying. RecordedPlacements retries that attempt instead
+// of spending the caller's whole deadline on it, which made a restarted node
+// fail to resolve the cluster ingress and never become ready.
+func TestRecordedPlacementsRetriesUnansweredRequest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	server, err := systemnats.StartServer(ctx, "127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Shutdown)
+	responder, err := nats.Connect(server.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(responder.Close)
+	var requests sync.Mutex
+	count := 0
+	// Stand in for JetStream: drop the first stream info request, then answer
+	// that the bucket does not exist.
+	if _, err := responder.Subscribe("$JS.API.STREAM.INFO.KV_"+systemnats.PlacementBucket, func(msg *nats.Msg) {
+		requests.Lock()
+		count++
+		first := count == 1
+		requests.Unlock()
+		if first {
+			return
+		}
+		_ = msg.Respond([]byte(`{"type":"io.nats.jetstream.api.v1.stream_info_response","error":{"code":404,"err_code":10059,"description":"stream not found"}}`))
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := responder.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	transport, err := systemnats.Connect(ctx, server.URL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(transport.Close)
+
+	started := time.Now()
+	records, err := systemnats.RecordedPlacements(ctx, transport)
+	if err != nil || len(records) != 0 {
+		t.Fatalf("RecordedPlacements() = %#v, %v; want none after a retried request", records, err)
+	}
+	requests.Lock()
+	defer requests.Unlock()
+	if count != 2 {
+		t.Errorf("stream info requests = %d; want 2", count)
+	}
+	if elapsed := time.Since(started); elapsed > 5*time.Second {
+		t.Errorf("RecordedPlacements took %v; want one bounded retry", elapsed)
+	}
+}
