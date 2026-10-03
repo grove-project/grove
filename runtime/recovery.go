@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/grove-project/grove"
+	"github.com/grove-project/grove/internal/placement"
 	"github.com/grove-project/grove/internal/systemnats"
 )
 
@@ -139,65 +140,30 @@ func isIngressService(serviceID grove.ServiceID) bool {
 	return ok && component.HTTPHandler != nil
 }
 
-// selectRecoveries returns every placement on a node observed to have failed,
-// for the coordinating (first healthy) node only. It uses the last-known
-// placement records, so recovery can start components while the control
-// plane has no leader.
+// selectRecoveries returns the placements placement.Recover moves to this
+// node. It uses the last-known placement records, so recovery can start
+// components while the control plane has no leader.
 func selectRecoveries(
 	nodeID string,
 	cluster systemnats.ClusterView,
-	placement systemnats.PlacementView,
+	view systemnats.PlacementView,
 ) []systemnats.PlacementRecord {
-	if !cluster.Ready {
+	members, ready := clusterMembers(cluster)
+	if !ready {
 		return nil
 	}
-	healthByNode := make(map[string]systemnats.ClusterNode, len(cluster.Nodes))
-	coordinator := ""
-	for _, node := range cluster.Nodes {
-		healthByNode[node.NodeID] = node
-		if node.Health == systemnats.HealthHealthy && (coordinator == "" || node.NodeID < coordinator) {
-			coordinator = node.NodeID
-		}
+	owners := make(map[grove.ServiceID]string, len(view.Placements))
+	for _, record := range view.Placements {
+		owners[record.ServiceID] = record.NodeID
 	}
-	if coordinator == "" || coordinator != nodeID {
-		return nil
-	}
+	moves := placement.Recover(members, owners)
 	var records []systemnats.PlacementRecord
-	for _, record := range placement.Placements {
-		node, exists := healthByNode[record.NodeID]
-		if exists && node.Health == systemnats.HealthUnavailable && node.LastSeen != "" {
+	for _, record := range view.Placements {
+		if moves[record.ServiceID] == nodeID {
 			records = append(records, record)
 		}
 	}
 	return records
-}
-
-func selectRecovery(
-	nodeID string,
-	cluster systemnats.ClusterView,
-	placement systemnats.PlacementView,
-) (systemnats.PlacementRecord, bool) {
-	if !cluster.Ready || !placement.Ready {
-		return systemnats.PlacementRecord{}, false
-	}
-	healthByNode := make(map[string]systemnats.ClusterNode, len(cluster.Nodes))
-	coordinator := ""
-	for _, node := range cluster.Nodes {
-		healthByNode[node.NodeID] = node
-		if node.Health == systemnats.HealthHealthy && (coordinator == "" || node.NodeID < coordinator) {
-			coordinator = node.NodeID
-		}
-	}
-	if coordinator == "" || coordinator != nodeID {
-		return systemnats.PlacementRecord{}, false
-	}
-	for _, record := range placement.Placements {
-		node, exists := healthByNode[record.NodeID]
-		if exists && node.Health == systemnats.HealthUnavailable && node.LastSeen != "" {
-			return record, true
-		}
-	}
-	return systemnats.PlacementRecord{}, false
 }
 
 func findComponent(view systemnats.ComponentView, serviceID grove.ServiceID) (systemnats.ComponentStatus, bool) {
