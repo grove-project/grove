@@ -657,10 +657,10 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 		}
 
 		settled := func(nodes int) error {
-			if voters := int(runtime.metadataVoters.Load()); voters > nodes {
-				return systemnats.ClusterSettlingError(voters, nodes)
+			if runtime.server == nil {
+				return nil
 			}
-			return nil
+			return controlPlaneSettled(int(runtime.metadataVoters.Load()), nodes)
 		}
 		health, err := systemnats.NewHealth(cfg.nodeID, membership, systemnats.HealthConfig{
 			MinNodes: systemnats.MinClusterNodes,
@@ -1015,7 +1015,11 @@ func (r *systemNATSRuntime) startControlPlaneEvents(ctx context.Context, cfg con
 				}
 			}
 			nextLeader, nextVoters := r.server.MetadataState()
-			r.metadataVoters.Store(int32(nextVoters))
+			if nextVoters != 0 {
+				// Keep the last known size through a failed read, so a
+				// momentary gap does not count as a settled control plane.
+				r.metadataVoters.Store(int32(nextVoters))
+			}
 			if nextVoters != 0 && nextVoters != voters {
 				if voters != 0 {
 					emit(lifecycleEvent{Event: "metadata_voters", Voters: nextVoters, Detail: fmt.Sprintf("changed from %d", voters)})
@@ -1039,6 +1043,22 @@ func (r *systemNATSRuntime) startControlPlaneEvents(ctx context.Context, cfg con
 			leader = nextLeader
 		}
 	}()
+}
+
+// controlPlaneSettled reports whether the JetStream metadata group has no more
+// voters than joined nodes. Zero voters means the embedded server has not
+// reported its metadata group yet. That is unknown, not settled: after a
+// cluster restart the founder's bootstrap witness rejoins as an extra voter
+// once the group forms, and serving placement before then would withdraw it
+// again until the witness is released.
+func controlPlaneSettled(voters, nodes int) error {
+	if voters == 0 {
+		return fmt.Errorf("%w: control-plane voters not yet observed", systemnats.ErrClusterSettling)
+	}
+	if voters > nodes {
+		return systemnats.ClusterSettlingError(voters, nodes)
+	}
+	return nil
 }
 
 // startWitnessRelease retires the bootstrap metadata witness once three

@@ -1096,6 +1096,33 @@ func waitForGrovletPlacementObservers(
 	}
 }
 
+// requireGrovletPlacementServed checks that every node keeps reporting a ready
+// placement view for the whole window.
+func requireGrovletPlacementServed(ctx context.Context, cluster membershipGrovlets, window time.Duration) error {
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.Now().Add(window)
+	for time.Now().Before(deadline) {
+		for i, nodeID := range cluster.nodeIDs {
+			requestCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+			view, err := cluster.transports[i].RequestPlacement(requestCtx, nodeID)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("request %s placement: %w", nodeID, err)
+			}
+			if !view.Ready {
+				return fmt.Errorf("%s withdrew placement: %s", nodeID, view.Error)
+			}
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
 func waitForGrovletDesired(
 	ctx context.Context,
 	cluster membershipGrovlets,
@@ -1558,6 +1585,11 @@ func TestGrovletClusterRestartReconstructsDesiredDeployment(t *testing.T) {
 	}
 	if _, err := waitForGrovletPlacement(ctx, cluster, placement); err != nil {
 		t.Fatalf("wait for restored placement: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	// Restored placement is not withdrawn again while the restarted founder's
+	// bootstrap witness rejoins and is released.
+	if err := requireGrovletPlacementServed(ctx, cluster, 3*time.Second); err != nil {
+		t.Fatalf("restored placement: %v\n%s", err, clusterLogs(cluster.nodes))
 	}
 	if _, err := waitForGrovletComponentState(ctx, cluster.transports[0], "node-1", groveshop.ServiceOrders, systemnats.ComponentHealthy); err != nil {
 		t.Fatalf("wait for reconstructed Orders: %v\n%s", err, clusterLogs(cluster.nodes))
