@@ -88,6 +88,13 @@ var importRules = []importRule{
 		Forbidden: []string{modulePath + "/internal/systemnats", "github.com/nats-io/..."},
 	},
 	{
+		// The SDK and the console action model are what applications import;
+		// they build on nothing else in Grove (docs/architecture/packages.md).
+		Name:      "the SDK and the console action model stand alone",
+		From:      []string{modulePath, modulePath + "/console"},
+		Forbidden: []string{modulePath + "/..."},
+	},
+	{
 		// Grove Shop is a standalone application that consumes Grove.
 		Name:      "Grove does not depend on Grove Shop",
 		From:      []string{modulePath + "/..."},
@@ -428,4 +435,93 @@ func findPackage(packages []listedPackage, importPath string) (listedPackage, bo
 		}
 	}
 	return listedPackage{}, false
+}
+
+// packageMap is the doc that names every package and what it owns.
+const packageMap = "docs/architecture/packages.md"
+
+// TestPackagesAreDocumented keeps package ownership written down: every
+// package has a row in packageMap and a package comment that names it
+// ("Package name ..." or, for a binary, "Command name ..."), and every row
+// names a package that exists.
+func TestPackagesAreDocumented(t *testing.T) {
+	content, err := os.ReadFile(packageMap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := make(map[string]bool)
+	for _, match := range packageRow.FindAllStringSubmatch(string(content), -1) {
+		rows[match[1]] = true
+	}
+	packages := listModulePackages(t)
+	known := make(map[string]bool, len(packages))
+	for _, pkg := range packages {
+		row := strings.TrimPrefix(pkg.ImportPath, modulePath+"/")
+		if pkg.ImportPath == modulePath {
+			row = "grove"
+		}
+		known[row] = true
+		if !rows[row] {
+			t.Errorf("%s has no row in %s; say what it owns", pkg.ImportPath, packageMap)
+		}
+		prefix := "Package " + pkg.Name + " "
+		if pkg.Name == "main" {
+			prefix = "Command " + filepath.Base(pkg.ImportPath) + " "
+		}
+		if !strings.HasPrefix(pkg.Doc, prefix) {
+			t.Errorf("%s package comment is %q; it must start %q", pkg.ImportPath, pkg.Doc, prefix)
+		}
+	}
+	for row := range rows {
+		if !known[row] {
+			t.Errorf("%s has a row for %s, which is not a package in the module", packageMap, row)
+		}
+	}
+}
+
+// packageRow matches the package cell that starts a table row in packageMap.
+var packageRow = regexp.MustCompile("(?m)^\\| `([a-z0-9/]+)`")
+
+// retiredTerms are spellings the glossary retired, with what to write
+// instead.
+var retiredTerms = map[string]string{
+	"Grovelet": "Grovlet",
+}
+
+// TestRetiredTermsStayRetired keeps retired spellings out of the docs and Go
+// sources. Only the glossary, which lists them, may contain them.
+func TestRetiredTermsStayRetired(t *testing.T) {
+	checked := 0
+	err := filepath.WalkDir(".", func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if strings.HasPrefix(entry.Name(), ".") && path != "." {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if path == "docs/glossary.md" || path == "boundary_test.go" ||
+			!strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, ".md") {
+			return nil
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		checked++
+		for term, instead := range retiredTerms {
+			if strings.Contains(string(content), term) {
+				t.Errorf("%s uses the retired term %q; write %q (docs/glossary.md)", path, term, instead)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checked == 0 {
+		t.Fatal("no docs or Go sources found")
+	}
 }

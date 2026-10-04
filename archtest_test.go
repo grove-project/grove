@@ -71,6 +71,8 @@ func stringLiterals(t *testing.T, path string) []string {
 
 type listedPackage struct {
 	ImportPath string
+	Name       string
+	Doc        string
 	Dir        string
 	GoFiles    []string
 	Deps       []string
@@ -79,7 +81,7 @@ type listedPackage struct {
 func listModulePackages(t *testing.T) []listedPackage {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	cmd := exec.Command("go", "list", "-json=ImportPath,Dir,GoFiles,Deps", "./...")
+	cmd := exec.Command("go", "list", "-json=ImportPath,Name,Doc,Dir,GoFiles,Deps", "./...")
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

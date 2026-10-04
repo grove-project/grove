@@ -26,6 +26,7 @@ type workerConfig struct {
 	placementNodeID string
 	parentFD        int
 	listenAddress   string
+	routeSubject    string
 	options         []string
 }
 
@@ -61,6 +62,9 @@ func startWorkerProcess(ctx context.Context, systemNATSURL, placementNodeID stri
 	}
 	if spec.listenAddress != "" {
 		args = append(args, "--listen", spec.listenAddress)
+	}
+	if spec.routeSubject != "" {
+		args = append(args, "--route-subject", spec.routeSubject)
 	}
 	if len(spec.options) != 0 {
 		args = append(args, "--")
@@ -199,6 +203,11 @@ func runWorker(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return err
 	}
 	defer process.Close()
+	if cfg.routeSubject != "" {
+		if err := process.routeTo(cfg.routeSubject); err != nil {
+			return err
+		}
+	}
 	running, err := process.host(componentLaunch{
 		Kind:          cfg.component,
 		Subject:       cfg.subject,
@@ -241,6 +250,7 @@ func parseWorkerConfig(args []string, stderr io.Writer) (workerConfig, error) {
 	flags.StringVar(&cfg.placementNodeID, "placement-node-id", "", "parent placement observer node ID")
 	flags.IntVar(&cfg.parentFD, "parent-fd", 0, "parent-lifetime file descriptor")
 	flags.StringVar(&cfg.listenAddress, "listen", "", "application component HTTP listen address")
+	flags.StringVar(&cfg.routeSubject, "route-subject", "", "invocation subject that receives every Grove call the component makes")
 	if err := flags.Parse(args); err != nil {
 		return workerConfig{}, fmt.Errorf("parse worker flags: %w", err)
 	}

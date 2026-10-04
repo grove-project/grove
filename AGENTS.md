@@ -20,6 +20,10 @@ That guide is the authoritative editorial standard for user-facing Grove docs. I
 
 If a documentation task conflicts with these principles, preserve the principles unless the task explicitly changes the documentation standard.
 
+## Terms and package ownership
+
+Use the terms as [`docs/glossary.md`](docs/glossary.md) defines them, in docs, code comments, logs and the console. [`docs/architecture/packages.md`](docs/architecture/packages.md) says which package owns each responsibility. Put new code in the package that owns its responsibility, and give a new package a row there and a package comment; `boundary_test.go` fails otherwise.
+
 ## One task at a time
 Implement exactly one task. Do not implement future functionality unless explicitly required. Prefer the smallest implementation satisfying the current task. If a task requires an unplanned architectural change, stop and report it rather than silently redesigning Grove.
 

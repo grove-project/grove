@@ -10,7 +10,7 @@ The first implemented storage primitive is [Grove Files](files.md): ordinary loc
 
 ## Use the hardware already in the cluster
 
-Grovelets may already have local NVMe and spare memory. Grove can pool those resources into distributed storage instead of requiring a second fleet of dedicated storage nodes for every workload.
+Grovlets may already have local NVMe and spare memory. Grove can pool those resources into distributed storage instead of requiring a second fleet of dedicated storage nodes for every workload.
 
 This changes the cost model. The savings are not primarily from cheaper SSDs; they come from reducing duplicated infrastructure: separate storage servers, control planes, networking, deployment, monitoring, upgrades, and operational tooling.
 
@@ -45,7 +45,7 @@ Erasure coding trades disk capacity for CPU, network traffic, and reconstruction
 
 The same runtime controls service placement and data placement. Grove should optimize them together.
 
-Data should preferentially live on, or be cached near, the Grovelets running the services that use it. When Grove moves a service it can prefetch hot data, establish a local cache or replica, preserve required durability elsewhere, and then activate the service.
+Data should preferentially live on, or be cached near, the Grovlets running the services that use it. When Grove moves a service it can prefetch hot data, establish a local cache or replica, preserve required durability elsewhere, and then activate the service.
 
 Storage placement must respect the same topology and eligibility constraints as service placement. Locality is an optimization, never a reason to weaken durability or failure-domain guarantees.
 
@@ -79,10 +79,10 @@ The same mechanism is especially useful across cloud and edge boundaries. Keys h
 
 ## Distributed memory as an adaptive cache
 
-Unused Grovelet RAM can participate in a cluster-wide adaptive cache. The preferred access path can become:
+Unused Grovlet RAM can participate in a cluster-wide adaptive cache. The preferred access path can become:
 
 ```text
-local Grovelet RAM
+local Grovlet RAM
         ↓ miss
 local NVMe
         ↓ miss
@@ -95,7 +95,7 @@ Because Grove controls scheduling, it can preferentially put cached data on the 
 
 ## Edge storage
 
-Dedicated enterprise storage at every customer edge is expensive and operationally difficult. A Grovelet can use ordinary local NVMe for low-latency edge access while Grove establishes the required durability across other eligible nodes or cloud infrastructure through outbound connectivity.
+Dedicated enterprise storage at every customer edge is expensive and operationally difficult. A Grovlet can use ordinary local NVMe for low-latency edge access while Grove establishes the required durability across other eligible nodes or cloud infrastructure through outbound connectivity.
 
 This follows Grove's general edge model: edge nodes remain part of the same logical cluster without requiring inbound Internet ports.
 
@@ -109,7 +109,7 @@ Spare compute capacity can therefore be traded for lower storage-capacity requir
 
 ## Failure and repair
 
-When a disk or Grovelet fails, Grove knows both the affected data and the current application pressure across the cluster.
+When a disk or Grovlet fails, Grove knows both the affected data and the current application pressure across the cluster.
 
 Repair decisions can account for disk capacity, CPU load, network load, service placement, topology, and failure domains. A node with plenty of free disk but a latency-sensitive workload may deliberately be avoided during reconstruction.
 

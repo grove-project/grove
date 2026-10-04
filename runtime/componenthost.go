@@ -86,6 +86,18 @@ func (p *applicationProcess) withProviders(ctx context.Context) context.Context 
 	return ctx
 }
 
+// routeTo sends every Grove call the process's components make to one
+// invocation subject instead of through placement. A standalone candidate
+// uses it to call the candidate components it is paired with.
+func (p *applicationProcess) routeTo(subject string) error {
+	client, err := p.transport.RoutedClient(subject)
+	if err != nil {
+		return err
+	}
+	p.client = client
+	return nil
+}
+
 func (p *applicationProcess) Close() {
 	p.transport.Close()
 }
