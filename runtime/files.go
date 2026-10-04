@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/grove-project/grove/internal/files"
 	"github.com/grove-project/grove/internal/systemnats"
@@ -22,10 +24,11 @@ type filesService struct {
 // startFiles serves Grove Files for this Grovlet. Liveness comes from the
 // same health view handler placement uses.
 func (r *systemNATSRuntime) startFiles(ctx context.Context, cfg config, health *systemnats.Health) error {
+	catalog := r.transport.FilesCatalog()
 	node, err := files.NewNode(files.Config{
 		NodeID:  cfg.nodeID,
 		Dir:     filepath.Join(cfg.runtimeDir, "files"),
-		Catalog: r.transport.FilesCatalog(),
+		Catalog: catalog,
 		Peers:   r.transport.FilesPeers(),
 		Live:    liveNodesFromHealth(health),
 		Events: func(event files.Event) {
@@ -53,9 +56,30 @@ func (r *systemNATSRuntime) startFiles(ctx context.Context, cfg config, health *
 		return err
 	}
 	service := &filesService{node: node, cancel: cancel, done: make(chan struct{})}
+	var group sync.WaitGroup
+	group.Add(2)
 	go func() {
-		defer close(service.done)
+		defer group.Done()
 		_ = node.Run(filesCtx)
+	}()
+	go func() {
+		defer group.Done()
+		// The catalog bucket appears on the first file write, after
+		// membership last resized the control state; grow it from then on.
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-filesCtx.Done():
+				return
+			case <-ticker.C:
+				_ = catalog.ReconcileReplicas(filesCtx, r.membership)
+			}
+		}
+	}()
+	go func() {
+		group.Wait()
+		close(service.done)
 	}()
 	r.files = service
 	return nil

@@ -190,6 +190,33 @@ func (c *FilesCatalog) List(ctx context.Context) ([]files.Record, error) {
 	return records, nil
 }
 
+// ReconcileReplicas grows the catalog bucket's replication with membership,
+// as the membership watcher does for the buckets that exist when it
+// changes. It does nothing until a file write created the bucket.
+func (c *FilesCatalog) ReconcileReplicas(ctx context.Context, membership *Membership) error {
+	if membership == nil {
+		return nil
+	}
+	view := membership.Snapshot()
+	if !view.Ready {
+		return nil
+	}
+	kv, err := c.bucket(ctx, false)
+	if err != nil || kv == nil {
+		return err
+	}
+	js, err := jetstream.New(c.transport.connection)
+	if err != nil {
+		return err
+	}
+	records := make(map[string]MembershipRecord, len(view.Members))
+	for _, member := range view.Members {
+		records[member.NodeID] = member
+	}
+	_, err = reconcileControlStateReplicas(ctx, js, records, false)
+	return err
+}
+
 // ServeFiles answers other nodes' replicate and blob requests for node.
 // Each request runs in its own goroutine, so a long transfer does not hold
 // up the next.

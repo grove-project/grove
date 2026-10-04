@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,6 +13,8 @@ import (
 	"github.com/grove-project/grove"
 	"github.com/grove-project/grove/internal/files"
 	"github.com/grove-project/grove/internal/systemnats"
+	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 )
 
 // Grove Files across real Grovlet processes: an application process syncs a
@@ -25,6 +26,7 @@ func TestGroveFilesAcrossGrovletProcesses(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()
 	cluster := startMembershipGrovlets(t, ctx)
+	waitForFormedCluster(t, ctx, cluster)
 	const path = "state/e2e.bin"
 	data := bytes.Repeat([]byte("grove files across processes "), 20_000) // ~580 KB: several chunks
 
@@ -41,20 +43,19 @@ func TestGroveFilesAcrossGrovletProcesses(t *testing.T) {
 	if err := os.WriteFile(file.LocalPath(), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Until the cluster has formed, node-1 knows no live peer, so a quorum
-	// sync fails explicitly and is retried.
-	var version grove.Version
-	waitUntil(t, ctx, cluster, "a quorum sync commits", func() bool {
-		var err error
-		version, err = file.Sync(app)
-		if err != nil && !errors.Is(err, grove.ErrDurability) {
-			t.Fatalf("sync: %v\n%s", err, clusterLogs(cluster.nodes))
-		}
-		return err == nil
-	})
+	version, err := file.Sync(app)
+	if err != nil {
+		t.Fatalf("sync: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
 	if err := file.WaitReplicated(app, version); err != nil {
 		t.Fatalf("wait replicated: %v\n%s", err, clusterLogs(cluster.nodes))
 	}
+	// The catalog bucket appeared with the first write; it grows to every
+	// control-plane voter like the other control-state buckets.
+	natsURL := readyEventFromLogs(t, cluster.nodes[2].Logs()).SystemNATSURL
+	waitUntil(t, ctx, cluster, "the files catalog is replicated on three nodes", func() bool {
+		return filesCatalogReplicas(ctx, natsURL) == 3
+	})
 	digest := sha256.Sum256(data)
 	if version.SHA256 != hex.EncodeToString(digest[:]) {
 		t.Fatalf("version checksum %s", version.SHA256)
@@ -122,6 +123,7 @@ func TestGroveFilesAcrossGrovletProcesses(t *testing.T) {
 		cluster.transports[i] = transport
 		t.Cleanup(transport.Close)
 	}
+	waitForFormedCluster(t, ctx, cluster)
 	catalog := cluster.transports[2].FilesCatalog()
 	waitUntil(t, ctx, cluster, "catalog rebuilt from disk with every node holding the version", func() bool {
 		record, _, err := catalog.Get(ctx, files.FileIDFor(path))
@@ -149,4 +151,46 @@ func waitUntil(t *testing.T, ctx context.Context, cluster membershipGrovlets, wh
 		case <-ticker.C:
 		}
 	}
+}
+
+func filesCatalogReplicas(ctx context.Context, url string) int {
+	connection, err := nats.Connect(url)
+	if err != nil {
+		return 0
+	}
+	defer connection.Close()
+	js, err := jetstream.New(connection)
+	if err != nil {
+		return 0
+	}
+	stream, err := js.Stream(ctx, "KV_"+systemnats.FilesBucket)
+	if err != nil {
+		return 0
+	}
+	info, err := stream.Info(ctx)
+	if err != nil {
+		return 0
+	}
+	return info.Config.Replicas
+}
+
+// waitForFormedCluster waits until every node sees three healthy members and
+// the bootstrap witness has handed its metadata vote back, so control state
+// is settled before the test writes files.
+func waitForFormedCluster(t *testing.T, ctx context.Context, cluster membershipGrovlets) {
+	t.Helper()
+	if _, err := waitForGrovletHealth(ctx, cluster, []int{0, 1, 2}, func(view systemnats.ClusterView) bool {
+		if !view.Ready || len(view.Nodes) != 3 {
+			return false
+		}
+		for _, node := range view.Nodes {
+			if node.Health != systemnats.HealthHealthy {
+				return false
+			}
+		}
+		return true
+	}); err != nil {
+		t.Fatalf("cluster did not form: %v\n%s", err, clusterLogs(cluster.nodes))
+	}
+	waitForMetadataVoters(t, ctx, readyEventFromLogs(t, cluster.nodes[0].Logs()).SystemNATSURL, 3)
 }

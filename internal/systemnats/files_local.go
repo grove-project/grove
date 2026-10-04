@@ -157,12 +157,14 @@ func (t *Transport) ServeLocalFiles(ctx context.Context, nodeID string, node *fi
 			}
 			return register(handle)
 		case "acquire":
+			// An undecided claim, including one the catalog could not answer
+			// yet, is retried by the application process.
 			handle, done, err := node.TryAcquire(ctx, request.Path, options...)
 			switch {
-			case err != nil:
-				return fileErrorReply(err)
 			case !done:
 				return fileReply{Status: "pending"}
+			case err != nil:
+				return fileErrorReply(err)
 			}
 			return register(handle)
 		}
