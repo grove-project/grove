@@ -2,7 +2,7 @@
 
 Grove is a distributed runtime for Go applications. The core idea is to keep the programming model familiar while allowing the same application artifact to grow from a single local process into a distributed cluster spanning cloud and edge environments.
 
-This document defines the main Grove concepts and how they relate to each other.
+This document defines the main Grove concepts and how they relate to each other. The [glossary](glossary.md) gives each term's exact definition and its name in code.
 
 ## The mental model
 
@@ -10,25 +10,26 @@ The most important hierarchy is:
 
 ```text
 Grove Application
-└── Services
+└── Services (declared as components)
+    └── Handlers
 
 Grove Cluster
 ├── Node
 │   └── Grovlet
-│       ├── Worker
+│       ├── Application runtime
 │       │   ├── Service instance
 │       │   └── Service instance
-│       └── Worker
+│       └── Worker (isolated service)
 │           └── Service instance
 └── Node
     └── Grovlet
-        └── Worker
+        └── Application runtime
             └── Service instance
 ```
 
-Developers mostly think in **services**.
+Developers mostly think in **services** and their **handlers**.
 
-Grove uses **workers** as execution environments, **Grovlets** as node-local supervisors, and the **cluster** as the global coordination boundary.
+Grove runs services in **application processes**: by default one shared **application runtime** per node, plus a dedicated **worker** process for any service isolated explicitly. **Grovlets** supervise those processes on each node, and the **cluster** is the global coordination boundary.
 
 Traffic is addressed to services rather than infrastructure:
 
@@ -55,7 +56,7 @@ East-west traffic
    Service
 ```
 
-Ingress and Grove RPC are therefore two sides of the same service-addressing model. Neither requires application code to know which worker, Grovlet, node, process, container, or machine currently hosts the destination.
+Ingress and Grove RPC are therefore two sides of the same service-addressing model. Neither requires application code to know which process, Grovlet, node, container, or machine currently hosts the destination.
 
 ---
 
@@ -95,9 +96,11 @@ Define application logic that Grove can place, invoke, observe, restart, upgrade
 
 ### Important property
 
-A service is a **logical component**, not an operating-system process.
+A service is a logical unit, not an operating-system process.
 
-A running copy of a service is a **service instance**. Multiple service instances may execute inside the same worker.
+An application declares each service to the runtime as a **component** (`runtime.Component`): its service ID, name, registration hook, and optionally an HTTP handler for ingress and a list of declared handlers. "Component" is the declaration, "service" is what it provides.
+
+A running copy of a service is a **service instance**. Many service instances share one application runtime process.
 
 ---
 
@@ -120,30 +123,37 @@ Provide the concrete runtime execution of a logical service while allowing Grove
 
 ---
 
-## Worker
+## Handler
 
-A worker is a local execution environment managed by a Grovlet.
+A handler is one method of a service: a function from a request to a response, registered under the service's ID and a method ID. Calls address a service and a method.
 
-It hosts one or more service instances and creates a boundary within which Grove can manage application execution.
+A component may **declare** its handlers. Grove then places each declared handler on its own:
 
-Conceptually, a worker may be implemented using different isolation mechanisms over time, including:
-
-- goroutines inside the Grove process
-- a subprocess
-- a container
-- a microVM
-
-The worker abstraction allows Grove to evolve the execution and isolation mechanism without changing the service programming model.
+- an **automatic** handler runs on every node hosting its component, and calls are spread across them
+- an **exclusive** handler has exactly one active owner in the cluster, which holds a lease on the handler's **capability** and must stop acting when it loses it
 
 ### Role
 
-Provide the execution boundary for service instances.
+Let Grove scale and fence individual operations, not only whole services.
 
-A worker is the level at which Grove can reason about operations such as starting, stopping, monitoring, debugging, replacing, resource isolation, and eventually migration.
+---
+
+## Application runtime and workers
+
+Application code runs in **application processes** that the Grovlet starts and supervises. The Grovlet itself never runs application code.
+
+- The **application runtime** is the one process per node that runs every hosted service by default, as goroutines sharing the process.
+- A **worker** is a dedicated process for one service that was isolated explicitly, for example to contain its failures or debug it on its own.
+
+Both are execution choices, not part of the service's shape. Calls between services in the same process skip the network; all other calls go through Grove RPC. See [the process model](architecture/process-model.md).
+
+### Role
+
+Provide the execution and failure boundary for service instances. A process is the level at which Grove starts, stops, monitors, debugs, and replaces running code. Container or microVM isolation could later be added as other kinds of worker.
 
 ### Developer visibility
 
-Workers are primarily a runtime and operational concept. Application developers should normally think in services rather than workers.
+Application processes are a runtime and operational concept. Application developers normally think in services and handlers.
 
 ---
 
@@ -151,12 +161,13 @@ Workers are primarily a runtime and operational concept. Application developers 
 
 A Grovlet is Grove's node-local supervisor.
 
-Every Grove node runs a Grovlet. The Grovlet owns and manages the workers executing on that node.
+Every Grove node runs a Grovlet. The Grovlet owns and manages the application processes executing on that node.
 
 Typical responsibilities include:
 
-- starting and stopping workers
-- monitoring worker health
+- running the node's System NATS and control-plane participation
+- starting and stopping the application runtime and workers
+- monitoring process and service health
 - reporting node and execution state
 - evaluating local service placement eligibility
 - participating in upgrades and recovery
@@ -167,19 +178,19 @@ Typical responsibilities include:
 
 Turn a machine, VM, container, Kubernetes pod, or edge host into a Grove node capable of participating in the cluster.
 
-### Relationship to workers
+### Relationship to application processes
 
 ```text
 Node
 └── Grovlet
-    ├── Worker A
+    ├── Application runtime
     │   ├── orders
-    │   └── payments
-    └── Worker B
-        └── inventory
+    │   └── inventory
+    └── Worker (isolated)
+        └── payments
 ```
 
-The Grovlet supervises execution. The workers execute application code.
+The Grovlet supervises execution. Application processes execute application code.
 
 ---
 
@@ -199,7 +210,7 @@ Each node runs a Grovlet and contributes compute capacity to the cluster.
 
 ### Role
 
-Provide a physical or virtual place where Grove can run workers and service instances.
+Provide a physical or virtual place where Grove can run application processes and service instances.
 
 ---
 
@@ -235,7 +246,7 @@ The control plane coordinates cluster-wide desired and observed state.
 It tracks concepts such as:
 
 - nodes
-- workers
+- application processes
 - service instances
 - health
 - placement decisions
@@ -258,7 +269,7 @@ System NATS is Grove's internal communication fabric.
 It carries runtime and control traffic such as:
 
 - node heartbeats
-- worker lifecycle events
+- component lifecycle events
 - service health
 - placement coordination
 - upgrade state
@@ -291,13 +302,13 @@ Provide distributed data-plane primitives to Grove applications while keeping th
 
 ---
 
-## Service placement
+## Placement
 
-Service placement determines which nodes are eligible to execute a service and where its instances should run.
+Placement determines which nodes run each service and handler. It works at two levels: **handler placement**, the primary one, decides which nodes serve each declared handler; **service placement** decides which single node owns a service's endpoint, which the ingress and undeclared handlers use. See [placement](architecture/placement.md).
 
-By default, a service with no placement validation can run anywhere in the cluster.
+Today every node hosts every component, so a service can run anywhere in the cluster.
 
-A service may provide explicit placement-validation logic when it has environmental requirements. Each Grovlet evaluates that logic locally.
+Planned: a service may provide explicit placement-validation logic when it has environmental requirements. Each Grovlet would evaluate that logic locally.
 
 Examples include:
 
@@ -307,7 +318,7 @@ Examples include:
 - locality to another dependency
 - a runtime or platform requirement
 
-Only nodes that pass the validation are eligible to host the service.
+Only nodes that pass the validation would be eligible to host the service.
 
 ### Role
 
@@ -321,7 +332,7 @@ This is particularly important for hybrid cloud and edge deployments.
 
 Grove Ingress is the cluster capability that routes external, north-south traffic to application services.
 
-Ingress targets a **service**, not a worker, Grovlet, node, IP address, or process.
+Ingress targets a **service**, not a Grovlet, node, IP address, or process.
 
 ```text
                          External clients
@@ -335,7 +346,7 @@ Ingress targets a **service**, not a worker, Grovlet, node, IP address, or proce
                ▼                                 ▼
           Grove Node A                      Grove Node B
           └── Grovlet                       └── Grovlet
-              └── Worker A                      └── Worker B
+              └── App runtime                   └── App runtime
                   └── orders                        └── orders
 ```
 
@@ -345,7 +356,7 @@ If the `orders` service has instances on several nodes, ingress can route to an 
 
 Provide a built-in path from external clients to logical Grove services.
 
-Ingress belongs conceptually to the **cluster routing layer**, not to a specific worker or Grovlet.
+Ingress belongs conceptually to the **cluster routing layer**, not to a specific process or Grovlet.
 
 ---
 
@@ -360,8 +371,7 @@ The caller does not need to know the destination's:
 - IP address
 - hostname
 - node
-- worker
-- process boundary
+- process
 
 ### Role
 
@@ -443,7 +453,7 @@ It participates in the same logical cluster as cloud nodes while initiating its 
 The same Grove concepts should apply at the edge:
 
 - services
-- workers
+- application processes
 - Grovlet supervision
 - placement
 - diagnostics
@@ -486,7 +496,7 @@ That includes visibility into:
 
 - cluster health
 - node health
-- workers
+- application processes
 - service instances
 - placement decisions
 - connectivity
@@ -507,9 +517,9 @@ The desired experience is not merely more telemetry; Grove should explain what c
 
 Debugging is a built-in Grove operational capability.
 
-A developer should be able to target a logical service and let Grove locate the relevant node and worker execution environment.
+A developer should be able to target a logical service and let Grove locate the node and process running it.
 
-Grovlets can expose a debugging endpoint and proxy protocols such as DAP/Delve to the appropriate worker.
+Grovlets can expose a debugging endpoint and proxy protocols such as DAP/Delve to that process. A debugger pauses the whole process, so isolating a service in its own worker lets it be debugged without pausing its neighbours.
 
 ### Role
 
@@ -578,11 +588,11 @@ A simplified Grove application looks like this:
              │                                                 │
         Grove Node A                                      Grove Node B
         └── Grovlet                                       └── Grovlet
-            ├── Worker A                                      ├── Worker C
-            │   ├── frontend                                  │   └── orders
-            │   └── orders                                    │
-            └── Worker B                                      └── Worker D
-                └── payments                                      └── inventory
+            ├── App runtime                                   └── App runtime
+            │   ├── frontend                                      ├── orders
+            │   └── orders                                        └── inventory
+            └── Worker (isolated)
+                └── payments
              │                                                 │
              └────────────── Grove cluster ────────────────────┘
                               │              │
@@ -595,10 +605,12 @@ The key responsibilities are:
 
 | Concept | Primary responsibility |
 |---|---|
-| **Service** | Application logic and logical identity |
+| **Service** | Application logic and logical identity, declared as a component |
+| **Handler** | One method of a service, placed individually when declared |
 | **Service instance** | One running copy of a service |
-| **Worker** | Execution environment for service instances |
-| **Grovlet** | Node-local supervision and execution management |
+| **Application runtime** | The shared process that runs a node's services by default |
+| **Worker** | A dedicated process for one isolated service |
+| **Grovlet** | Node-local supervision; never runs application code |
 | **Node** | Compute participant in the cluster |
 | **Cluster** | Global coordination and application runtime boundary |
 | **Ingress** | External client → service routing |
@@ -610,7 +622,7 @@ The key responsibilities are:
 
 The shortest useful Grove mental model is:
 
-> **Services describe the application. Workers execute them. Grovlets supervise workers. Nodes provide compute. The cluster coordinates everything. Ingress and RPC route by service identity.**
+> **Services describe the application. Application processes execute them. Grovlets supervise those processes. Nodes provide compute. The cluster coordinates everything. Ingress and RPC route by service identity.**
 
 ---
 
@@ -623,7 +635,7 @@ The same concepts should survive as the application grows.
 ```text
 Application binary
 └── Grovlet
-    └── Worker
+    └── Application runtime
         ├── frontend
         ├── orders
         └── payments
@@ -634,7 +646,7 @@ Application binary
 ```text
 Node A                         Node B
 └── Grovlet                    └── Grovlet
-    └── Worker                     └── Worker
+    └── App runtime                └── App runtime
         ├── frontend                   ├── orders
         └── orders                     └── payments
 ```
@@ -660,4 +672,4 @@ This document intentionally defines the vocabulary and relationships rather than
 
 Detailed mechanisms such as consensus behavior, NATS KV semantics, storage coding, migration internals, upgrade state machines, and debugger transport belong in the architecture and ADR documentation.
 
-Start here to understand **what the pieces are**. Continue into the architecture docs to understand **how Grove implements them**.
+Start here to understand **what the pieces are**. The [glossary](glossary.md) defines each term exactly, and [packages](architecture/packages.md) maps each piece to the package that owns it. Continue into the architecture docs to understand **how Grove implements them**.

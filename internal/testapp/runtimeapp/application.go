@@ -1,3 +1,6 @@
+// Package runtimeapp composes the test application's services into a
+// runtime.Definition: components, configuration, artifact manifest, console
+// actions and scenario.
 package runtimeapp
 
 import (

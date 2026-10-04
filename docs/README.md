@@ -67,7 +67,7 @@ Result        recovered
 
 ## Understand Grove
 
-**[Concepts](concepts.md)** defines Grove's mental model: services, workers, Grovlets, nodes, clusters, ingress, RPC, control/data planes, placement, configuration, durable execution, edge, and operations.
+**[Concepts](concepts.md)** defines Grove's mental model: services and handlers, the application runtime and workers, Grovlets, nodes, clusters, ingress, RPC, control/data planes, placement, configuration, durable execution, edge, and operations. The **[glossary](glossary.md)** defines each term and its name in code.
 
 **[Vision](vision/vision.md)** explains why Grove exists and the product principles behind the experience.
 
@@ -75,7 +75,7 @@ Result        recovered
 
 **[Federation](federation/)** explains how independent Grove application clusters discover and communicate while keeping their private Cluster NATS domains isolated.
 
-**[Architecture](architecture/system-architecture.md)** explains how Grove implements the runtime.
+**[Architecture](architecture/system-architecture.md)** explains how Grove implements the runtime, and **[packages](architecture/packages.md)** maps each responsibility to the package that owns it.
 
 **[ADRs](adr/README.md)** capture important architectural decisions and their trade-offs.
 

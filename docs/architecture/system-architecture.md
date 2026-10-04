@@ -24,11 +24,11 @@ The central principle is: what you test locally is what you ship.
 
 Each machine participating in a Grove cluster is a Grove node. A node runs the Grove binary and contains a node supervisor called the Grovlet.
 
-The Grovlet owns local lifecycle management. It starts and stops workers, observes their health, enforces local decisions quickly, and communicates cluster state through the system control plane.
+The Grovlet owns local lifecycle management. It starts and stops the node's application processes, observes their health, enforces local decisions quickly, and communicates cluster state through the system control plane. It never runs application code itself.
 
-A worker is the process boundary for application execution. Application services inside a worker may execute as goroutines, allowing services that belong together to share a process and communicate through efficient local paths.
+Application code runs in application processes. By default a node has one, the application runtime, in which every hosted service executes as goroutines, so services share a process and call each other without a network hop. A single runtime can consume the available CPU cores.
 
-The default design should avoid creating multiple workers without a reason. A single worker can consume the available CPU cores. Additional workers are useful when Grove needs isolation boundaries, independent lifecycle or versioning, resource separation, or failure containment.
+A worker is a dedicated process for one service that was isolated explicitly. Workers are useful when Grove needs an isolation boundary, independent debugging, resource separation, or failure containment. [process-model.md](process-model.md) describes the model, and the [glossary](../glossary.md) defines the terms.
 
 4. Cluster Control Plane
 
@@ -36,7 +36,7 @@ Grove uses an embedded NATS deployment as the system communication and coordinat
 
 System NATS is reserved for Grove itself. It carries cluster control messages and replicated cluster state. NATS JetStream/KV provides a Raft-backed state layer so Grove does not need to introduce a separate etcd-style dependency for the initial architecture.
 
-The replicated system state includes information such as node membership, worker/service desired state, placement, health, ownership, and other control-plane metadata.
+The replicated system state includes information such as node membership, desired deployment state, service and handler placement, health, ownership, and other control-plane metadata.
 
 The control plane determines cluster leadership from the consensus-backed system state rather than inventing an unrelated leader-election mechanism.
 
@@ -46,9 +46,9 @@ The control plane is responsible for reconciliation: compare desired cluster sta
 
 Cluster-level coordination must not be the only mechanism protecting a node.
 
-The Grovlet maintains a fast local health relationship with its worker process. This local heartbeat/watch mechanism is independent of slower distributed failure detection. If a worker becomes unresponsive locally, the Grovlet can terminate and restart it without waiting for a cluster-wide consensus path.
+The Grovlet maintains a fast local health relationship with its application processes. This local heartbeat/watch mechanism is independent of slower distributed failure detection. If an application process becomes unresponsive locally, the Grovlet can terminate and restart it without waiting for a cluster-wide consensus path.
 
-System NATS is used for distributed observation and control, while local OS-level supervision remains the authoritative fast path for detecting a stuck local worker.
+System NATS is used for distributed observation and control, while local OS-level supervision remains the authoritative fast path for detecting a stuck local application process.
 
 This creates two failure-detection tiers:
 
@@ -71,11 +71,11 @@ Ingress is a dedicated Grove runtime component. Any suitable node may expose an 
 
 Ingress resolves the target Grove service and routes the request to an appropriate service instance. Routing should prefer the cheapest available path:
 
-• Same worker/process: direct local invocation or the lowest-overhead local transport available.  
+• Same process: direct local invocation or the lowest-overhead local transport available.  
 • Same node but different process: local IPC or local NATS transport.  
 • Remote node: cluster transport, initially using NATS where appropriate.
 
-Because ingress runs outside the worker process, it cannot directly invoke application goroutines. Requests crossing that process boundary require IPC or messaging.
+When ingress runs outside the destination's process, it cannot directly invoke application goroutines. Requests crossing that process boundary require IPC or messaging.
 
 Grove should maintain enough topology information to route between nodes even when the physical network is not a fully connected mesh. Where direct connectivity is unavailable, nodes may relay traffic through reachable peers and prefer the shortest viable path.
 
@@ -98,7 +98,7 @@ The scheduling flow is therefore:
 
 The architectural invariant is: a service must never be started on a Grovlet that does not satisfy its placement validation.
 
-The control plane should prefer to place services that communicate heavily together in the same worker when safe, then on the same node, and only then across nodes. Storage replicas and data ownership should similarly be biased toward the services that consume the data.
+The control plane should prefer to place services that communicate heavily together in the same application process when safe, then on the same node, and only then across nodes. Storage replicas and data ownership should similarly be biased toward the services that consume the data.
 
 Conceptually, Grove has placement tiers and storage tiers. The control plane can continuously optimize these based on topology, resource availability, communication patterns, durability requirements, and failure domains, but only within the service's current eligible node set.
 
@@ -128,7 +128,7 @@ The control plane coordinates rollout, placement, health validation, replacement
 
 Debugging is a runtime capability rather than an external afterthought.
 
-Grove integrates with Delve so debugging can be enabled or attached at runtime when permitted. The Grove CLI should expose basic debugging and troubleshooting operations with knowledge of the actual cluster topology, service placement, worker state, and version.
+Grove integrates with Delve so debugging can be enabled or attached at runtime when permitted. The Grove CLI should expose basic debugging and troubleshooting operations with knowledge of the actual cluster topology, service placement, process state, and version.
 
 This enables the same operational model during local development, end-to-end testing, customer deployments, and production troubleshooting.
 
@@ -142,7 +142,7 @@ For example, a durable-execution engine comparable in purpose to Temporal could 
 
 The initial architecture intentionally separates several concepts:
 
-• Grovlet vs worker — node supervision is separate from application execution.  
+• Grovlet vs application processes — node supervision is separate from application execution.  
 • System plane vs data plane — Grove coordination is separate from application traffic.  
 • Consensus metadata vs application data — cluster correctness does not imply one universal storage engine.  
 • Local failure detection vs distributed failure detection — local enforcement must remain fast even during cluster communication problems.  
@@ -153,13 +153,16 @@ The initial architecture intentionally separates several concepts:
 
 Grove binary  
   ├─ Grovlet  
-  │   ├─ local worker supervision  
+  │   ├─ application process supervision  
   │   ├─ local heartbeat / watchdog  
   │   ├─ service placement validation  
   │   └─ node-side control-plane agent  
   │  
-  ├─ Worker  
+  ├─ Application runtime  
   │   └─ application services as goroutines  
+  │  
+  ├─ Worker (isolated service, optional)  
+  │   └─ one application service  
   │  
   ├─ Ingress  
   │   └─ service resolution and request routing  
@@ -180,8 +183,8 @@ Grove binary
 
 The following areas are intentionally not considered final yet:
 
-• Exact local Grovlet-to-worker heartbeat mechanism and timeout policy.  
-• Exact local IPC transport between ingress/runtime components and workers.  
+• Exact local Grovlet-to-application-process heartbeat mechanism and timeout policy.  
+• Exact local IPC transport between ingress/runtime components and application processes.  
 • How much application traffic should use NATS versus specialized direct transports.  
 • Precise cluster-leader responsibilities versus distributed reconciliation responsibilities.  
 • Storage replication protocol and consistency levels beyond the initial NATS-backed implementation.  
@@ -205,17 +208,17 @@ Existing Kubernetes workloads can be represented to Grove as bridged or external
 
 This enables incremental migration rather than a big-bang rewrite:  
 • Legacy Kubernetes application — ordinary Kubernetes workload discovered through the bridge.  
-• Grove-managed Kubernetes application — a service moves into a Grove worker while the Grovlet itself still runs on Kubernetes-provided compute.  
+• Grove-managed Kubernetes application — a service moves into a Grove application process while the Grovlet itself still runs on Kubernetes-provided compute.  
 • Grove-native application — the application is fully managed by Grove and can eventually run independently of Kubernetes if desired.
 
-A deployment may contain all three states simultaneously. For example, one service may run inside a Grove worker while its upstream service and database remain ordinary Kubernetes workloads. Grove routes across the boundary and maintains a unified topology view.
+A deployment may contain all three states simultaneously. For example, one service may run inside a Grove application process while its upstream service and database remain ordinary Kubernetes workloads. Grove routes across the boundary and maintains a unified topology view.
 
 Concrete migration example:  
 frontend → users-service → orders-service → postgres
 
 Initially, all four components are ordinary Kubernetes workloads. After Grove is installed in the cluster, the Grovlet discovers their Services, Pods, endpoints, and relationships and represents them in the Grove topology.
 
-The first migration step can move only orders-service into a Grove worker. frontend and users-service remain ordinary Kubernetes applications, and postgres remains Kubernetes-managed infrastructure. Requests from users-service to orders-service cross the Kubernetes Bridge and are routed into the Grove worker without requiring the rest of the application to migrate.
+The first migration step can move only orders-service into a Grove application process. frontend and users-service remain ordinary Kubernetes applications, and postgres remains Kubernetes-managed infrastructure. Requests from users-service to orders-service cross the Kubernetes Bridge and are routed into the Grove application process without requiring the rest of the application to migrate.
 
 A later step can move users-service into Grove as well. Communication between users-service and orders-service can then use Grove-native routing and benefit from locality-aware placement, while frontend and postgres remain Kubernetes workloads.
 
@@ -223,7 +226,7 @@ Eventually frontend may also migrate. At that point Kubernetes may simply provid
 
 The bridge should also allow Grove operational capabilities to span the migration boundary where practical. Topology inspection, health views, tracing, end-to-end and resilience testing, and troubleshooting should show Grove-native and Kubernetes-hosted legacy components as one application graph instead of creating disconnected operational worlds.
 
-The architectural boundary is important: Kubernetes remains responsible for the resources it owns, while Grove owns Grove application semantics, worker lifecycle, service topology, routing, testing, debugging, and Grove cluster state. The bridge adapts between those models rather than duplicating the entire Kubernetes control plane.
+The architectural boundary is important: Kubernetes remains responsible for the resources it owns, while Grove owns Grove application semantics, application process lifecycle, service topology, routing, testing, debugging, and Grove cluster state. The bridge adapts between those models rather than duplicating the entire Kubernetes control plane.
 
 This provides a deliberate adoption path: install Grove into an existing Kubernetes cluster, integrate existing workloads, migrate services incrementally, and remove the Kubernetes dependency only when and if it no longer provides value.
 

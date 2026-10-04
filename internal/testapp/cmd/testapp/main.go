@@ -1,3 +1,5 @@
+// Command testapp is the Grove test application binary that real-process
+// tests build and start as Grovlets.
 package main
 
 import (
