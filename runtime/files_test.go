@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -53,8 +54,14 @@ func TestGroveFilesAcrossGrovletProcesses(t *testing.T) {
 	// The catalog bucket appeared with the first write; it grows to every
 	// control-plane voter like the other control-state buckets.
 	natsURL := readyEventFromLogs(t, cluster.nodes[2].Logs()).SystemNATSURL
-	waitUntil(t, ctx, cluster, "the files catalog is replicated on three nodes", func() bool {
-		return filesCatalogReplicas(ctx, natsURL) == 3
+	catalogState := ""
+	waitUntil(t, ctx, cluster, "the files catalog is current on three nodes", func() bool {
+		copies, state := filesCatalogReplicas(ctx, natsURL)
+		if state != catalogState {
+			t.Logf("files catalog: %s", state)
+			catalogState = state
+		}
+		return copies == 3
 	})
 	digest := sha256.Sum256(data)
 	if version.SHA256 != hex.EncodeToString(digest[:]) {
@@ -153,25 +160,35 @@ func waitUntil(t *testing.T, ctx context.Context, cluster membershipGrovlets, wh
 	}
 }
 
-func filesCatalogReplicas(ctx context.Context, url string) int {
+func filesCatalogReplicas(ctx context.Context, url string) (int, string) {
 	connection, err := nats.Connect(url)
 	if err != nil {
-		return 0
+		return 0, err.Error()
 	}
 	defer connection.Close()
 	js, err := jetstream.New(connection)
 	if err != nil {
-		return 0
+		return 0, err.Error()
 	}
-	stream, err := js.Stream(ctx, "KV_"+systemnats.FilesBucket)
+	infoCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	stream, err := js.Stream(infoCtx, "KV_"+systemnats.FilesBucket)
 	if err != nil {
-		return 0
+		return 0, err.Error()
 	}
-	info, err := stream.Info(ctx)
-	if err != nil {
-		return 0
+	// Count the copies that can serve the catalog: the leader and every
+	// current follower.
+	info := stream.CachedInfo()
+	if info.Cluster == nil || info.Cluster.Leader == "" {
+		return 0, fmt.Sprintf("replicas %d, no leader", info.Config.Replicas)
 	}
-	return info.Config.Replicas
+	copies := 1
+	for _, peer := range info.Cluster.Replicas {
+		if peer.Current && !peer.Offline {
+			copies++
+		}
+	}
+	return copies, fmt.Sprintf("replicas %d, leader %s, %d current copies", info.Config.Replicas, info.Cluster.Leader, copies)
 }
 
 // waitForFormedCluster waits until every node sees three healthy members and

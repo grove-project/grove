@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/grove-project/grove/internal/controlplane"
 	"github.com/grove-project/grove/internal/files"
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
@@ -41,13 +42,40 @@ const (
 // FilesCatalog stores the Grove Files catalog in JetStream KV. Writes are
 // compare-and-set on the KV revision.
 type FilesCatalog struct {
-	transport *Transport
-	mu        sync.Mutex
-	kv        jetstream.KeyValue
+	transport  *Transport
+	membership *Membership
+	mu         sync.Mutex
+	kv         jetstream.KeyValue
 }
 
 // FilesCatalog returns the Grove Files catalog on this transport.
 func (t *Transport) FilesCatalog() *FilesCatalog { return &FilesCatalog{transport: t} }
+
+// FollowMembership sizes the catalog bucket's replication from membership.
+// The bucket is created already replicated to every control-plane voter, so
+// the catalog never hangs on the one node that wrote the first file, and
+// ReconcileReplicas grows it as members join.
+func (c *FilesCatalog) FollowMembership(membership *Membership) *FilesCatalog {
+	c.membership = membership
+	return c
+}
+
+// replicas is the replica count the bucket should have now, and the
+// membership it follows from (nil before membership is ready).
+func (c *FilesCatalog) replicas() (int, map[string]MembershipRecord) {
+	if c.membership == nil {
+		return controlStateBootstrapReplicas, nil
+	}
+	view := c.membership.Snapshot()
+	if !view.Ready {
+		return controlStateBootstrapReplicas, nil
+	}
+	records := make(map[string]MembershipRecord, len(view.Members))
+	for _, member := range view.Members {
+		records[member.NodeID] = member
+	}
+	return controlplane.ControlStateReplicas(records), records
+}
 
 // bucket opens the catalog bucket, creating it only when create is set. It
 // returns nil without error when the bucket does not exist yet.
@@ -68,7 +96,16 @@ func (c *FilesCatalog) bucket(ctx context.Context, create bool) (jetstream.KeyVa
 		return nil, nil
 	}
 	if errors.Is(err, jetstream.ErrBucketNotFound) {
-		kv, err = openOrCreateKeyValue(ctx, js, filesKeyValueConfig(controlStateBootstrapReplicas))
+		replicas, _ := c.replicas()
+		kv, err = js.CreateKeyValue(ctx, filesKeyValueConfig(replicas))
+		if err != nil && !errors.Is(err, jetstream.ErrBucketExists) && replicas > controlStateBootstrapReplicas {
+			// Too few peers answer right now: start small and let
+			// ReconcileReplicas grow it.
+			kv, err = js.CreateKeyValue(ctx, filesKeyValueConfig(controlStateBootstrapReplicas))
+		}
+		if errors.Is(err, jetstream.ErrBucketExists) {
+			kv, err = js.KeyValue(ctx, FilesBucket)
+		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("open grove files catalog: %w", err)
@@ -193,12 +230,9 @@ func (c *FilesCatalog) List(ctx context.Context) ([]files.Record, error) {
 // ReconcileReplicas grows the catalog bucket's replication with membership,
 // as the membership watcher does for the buckets that exist when it
 // changes. It does nothing until a file write created the bucket.
-func (c *FilesCatalog) ReconcileReplicas(ctx context.Context, membership *Membership) error {
-	if membership == nil {
-		return nil
-	}
-	view := membership.Snapshot()
-	if !view.Ready {
+func (c *FilesCatalog) ReconcileReplicas(ctx context.Context) error {
+	_, records := c.replicas()
+	if records == nil {
 		return nil
 	}
 	kv, err := c.bucket(ctx, false)
@@ -208,10 +242,6 @@ func (c *FilesCatalog) ReconcileReplicas(ctx context.Context, membership *Member
 	js, err := jetstream.New(c.transport.connection)
 	if err != nil {
 		return err
-	}
-	records := make(map[string]MembershipRecord, len(view.Members))
-	for _, member := range view.Members {
-		records[member.NodeID] = member
 	}
 	_, err = reconcileControlStateReplicas(ctx, js, records, false)
 	return err

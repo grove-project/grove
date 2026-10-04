@@ -24,7 +24,7 @@ type filesService struct {
 // startFiles serves Grove Files for this Grovlet. Liveness comes from the
 // same health view handler placement uses.
 func (r *systemNATSRuntime) startFiles(ctx context.Context, cfg config, health *systemnats.Health) error {
-	catalog := r.transport.FilesCatalog()
+	catalog := r.transport.FilesCatalog().FollowMembership(r.membership)
 	node, err := files.NewNode(files.Config{
 		NodeID:  cfg.nodeID,
 		Dir:     filepath.Join(cfg.runtimeDir, "files"),
@@ -64,16 +64,24 @@ func (r *systemNATSRuntime) startFiles(ctx context.Context, cfg config, health *
 	}()
 	go func() {
 		defer group.Done()
-		// The catalog bucket appears on the first file write, after
-		// membership last resized the control state; grow it from then on.
+		// The catalog bucket appears on the first file write, sized for the
+		// members then; grow it as more join.
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
+		reported := ""
 		for {
 			select {
 			case <-filesCtx.Done():
 				return
 			case <-ticker.C:
-				_ = catalog.ReconcileReplicas(filesCtx, r.membership)
+			}
+			err := catalog.ReconcileReplicas(filesCtx)
+			if err != nil && err.Error() != reported && cfg.emit != nil {
+				cfg.emit(lifecycleEvent{Event: "file_catalog_replicas_failed", NodeID: cfg.nodeID, Detail: err.Error()})
+			}
+			reported = ""
+			if err != nil {
+				reported = err.Error()
 			}
 		}
 	}()

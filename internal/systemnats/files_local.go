@@ -161,6 +161,8 @@ func (t *Transport) ServeLocalFiles(ctx context.Context, nodeID string, node *fi
 			// yet, is retried by the application process.
 			handle, done, err := node.TryAcquire(ctx, request.Path, options...)
 			switch {
+			case !done && err != nil:
+				return fileReply{Status: "pending", Error: err.Error()}
 			case !done:
 				return fileReply{Status: "pending"}
 			case err != nil:
@@ -280,6 +282,7 @@ func (s *RemoteFileStore) Open(ctx context.Context, path string, opts ...grove.F
 func (s *RemoteFileStore) Acquire(ctx context.Context, path string, opts ...grove.FileOption) (grove.OwnedFile, error) {
 	ticker := time.NewTicker(s.ttl / 6)
 	defer ticker.Stop()
+	last := ""
 	for {
 		reply, err := s.call(ctx, fileRequest{Op: "acquire", Path: path, Options: grove.ApplyFileOptions(opts...)})
 		if err == nil && reply.Status == "ok" {
@@ -288,10 +291,13 @@ func (s *RemoteFileStore) Acquire(ctx context.Context, path string, opts ...grov
 		if err != nil && ctx.Err() == nil {
 			return nil, err
 		}
+		if reply.Error != "" {
+			last = " (last attempt: " + reply.Error + ")"
+		}
 		select {
 		case <-ticker.C:
 		case <-ctx.Done():
-			return nil, fmt.Errorf("%w: %s: %w", grove.ErrFileOwned, path, ctx.Err())
+			return nil, fmt.Errorf("%w: %s%s: %w", grove.ErrFileOwned, path, last, ctx.Err())
 		}
 	}
 }

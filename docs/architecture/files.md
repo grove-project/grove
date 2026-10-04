@@ -13,7 +13,7 @@ explains how the runtime keeps it.
 | Lifecycle: materialize, snapshot, sync, ownership, replicate, recover, reconcile, prune | `internal/files` (`Node`) | reaches metadata through the `Catalog` port and other nodes through the `Peers` port |
 | Node disk layout and integrity | `internal/files` (`Disk`) | every write is temp file, fsync, rename |
 | Ownership policy | `internal/placement` (`DecideClaim`, `LeaseHolds`) | the same fencing policy as exclusive handlers |
-| Catalog store | `internal/systemnats` (`FilesCatalog`) | JetStream KV bucket `GROVE_FILES` |
+| Catalog store | `internal/systemnats` (`FilesCatalog`) | JetStream KV bucket `GROVE_FILES`, created on the first file write at the control-state replica count and grown with membership |
 | Transfer | `internal/systemnats` (`ServeFiles`, `FilesPeers`) | NATS request/reply, at most 512 KiB per message |
 | Application process access | `internal/systemnats` (`ServeLocalFiles`, `RemoteFileStore`) | the Grovlet holds handles; the app process gets the local path |
 | Grovlet wiring | `runtime/files.go` | `<runtime-dir>/files`, liveness from the health view |
