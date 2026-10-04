@@ -61,6 +61,10 @@ Two guards keep it honest:
   TestCluster and production reconciliation, and requires identical placements
   and epochs.
 
+Grove Files has its own in-process cluster, `grovetest.FilesCluster`, which
+runs production `internal/files` nodes on real directories over an in-memory
+catalog and network ([files.md](files.md)).
+
 The TestCluster does not model service placement records and recovery,
 desired-state reconciliation, rollout, or execution modes. Test those in
 layers 1 and 4.

@@ -42,6 +42,8 @@ type grovlet struct {
 	membershipLoop, deploymentsLoop, desiredLoop, placementLoop, healthLoop *background
 	// Supervision loops, stopped before the components.
 	eventsLoop, witnessLoop, recoveryLoop, reconcileLoop, handlersLoop *background
+	// Grove Files, stopped after the components that use it.
+	filesLoop *background
 }
 
 // background is one goroutine the Grovlet runs until it stops.
@@ -296,6 +298,9 @@ func (g *grovlet) superviseComponents(ctx context.Context, cfg config, state con
 			return err
 		}
 	}
+	if err := g.startFiles(ctx, cfg, state.health); err != nil {
+		return err
+	}
 	if err := g.components.start(ctx, state.initialServiceIDs); err != nil {
 		return err
 	}
@@ -513,7 +518,7 @@ func (g *grovlet) stop() {
 		cancel()
 		g.candidate = nil
 	}
-	for _, loop := range []*background{g.handlersLoop, g.healthLoop, g.placementLoop, g.desiredLoop, g.deploymentsLoop, g.membershipLoop} {
+	for _, loop := range []*background{g.filesLoop, g.handlersLoop, g.healthLoop, g.placementLoop, g.desiredLoop, g.deploymentsLoop, g.membershipLoop} {
 		loop.stop()
 	}
 	if g.transport != nil {

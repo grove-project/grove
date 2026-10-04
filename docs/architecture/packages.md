@@ -7,6 +7,7 @@ and a test there fails if a package is missing from this page.
 
 ```text
 application binary ─► runtime ─┬─► systemnats ─► controlplane ─► placement
+                               ├─► files ─────► placement     (Catalog, Peers ports, implemented by systemnats)
                                ├─► rollout ──► controlplane   (Store port, implemented by systemnats)
                                ├─► inspect ──► controlplane   (Source port, implemented by systemnats)
                                ├─► localcluster ─► nodeproc
@@ -18,7 +19,7 @@ grove CLI (cmd/grove) ─► inspect, localcluster, scenario, systemnats, contro
 
 | Package | Owns | May not depend on |
 |---|---|---|
-| `grove` (module root) | The SDK every service uses: service and method IDs, the handler registry, `Call` and its client, request envelopes and codecs, `Exclusive` ownership | any other package in the module |
+| `grove` (module root) | The SDK every service uses: service and method IDs, the handler registry, `Call` and its client, request envelopes and codecs, `Exclusive` ownership, the Grove Files contract (`Files`, `File`, `OwnedFile`) | any other package in the module |
 | `runtime` | The Grovlet, the application runtime and isolated workers, startup hosting, desired-state reconciliation, recovery, and the operator console host. Applications call `runtime.Main(Definition)`. | — |
 | `console` | The console's action model: actions, inputs, views and the registry applications add actions to | any other package in the module |
 
@@ -28,12 +29,13 @@ grove CLI (cmd/grove) ─► inspect, localcluster, scenario, systemnats, contro
 |---|---|---|
 | `internal/placement` | Every decision about where work runs: `Place`, `FencedEpoch`, `Selector`, `LiveNodes`, `Recover`, `DecideClaim`, `LeaseHolds` | anything but the standard library and `grove` |
 | `internal/controlplane` | The control-plane records (membership, health, desired state, deployments, service and handler placement, leases, component status) and the rules for changing them | anything but the standard library, `grove` and `internal/placement` |
+| `internal/files` | The Grove Files lifecycle: node disk layout and integrity, sync, fenced ownership, replication, recovery and reconciliation, through `Catalog` and `Peers` ports ([files.md](files.md)) | anything but the standard library, `grove` and `internal/placement` |
 
 ## Adapters and orchestration
 
 | Package | Owns | May not depend on |
 |---|---|---|
-| `internal/systemnats` | The embedded System NATS server, JetStream storage of control-plane records, watches, and request/reply transport, including the bootstrap witness | — |
+| `internal/systemnats` | The embedded System NATS server, JetStream storage of control-plane records and the Grove Files catalog, watches, and request/reply transport, including the bootstrap witness | — |
 | `internal/rollout` | Deployment intent: recording artifacts, activating, proposing a candidate, and health-gated commit or rollback, through a `Store` port | NATS, `internal/systemnats` |
 | `internal/inspect` | The read-only view of a cluster, through a `Source` port | NATS, `internal/systemnats` |
 | `internal/localcluster` | Starting, stopping and restarting local clusters of node processes for the console, `grove test` and `grove deploy` | — |
@@ -55,7 +57,7 @@ grove CLI (cmd/grove) ─► inspect, localcluster, scenario, systemnats, contro
 
 | Package | Owns | May not depend on |
 |---|---|---|
-| `grovetest` | The Go test harness: real Grovlet processes (`Node`, `Cluster`) and the in-memory `TestCluster` | — (production may not depend on it) |
+| `grovetest` | The Go test harness: real Grovlet processes (`Node`, `Cluster`), the in-memory `TestCluster` and `FilesCluster` | — (production may not depend on it) |
 | `internal/testbin` | Building test binaries once, on first use, and skipping real-process tests under `-short` | — (only tests import it) |
 | `internal/testapp` | The in-repository test application's services | — (production may not depend on it) |
 | `internal/testapp/runtimeapp` | The test application's `runtime.Definition` | — |

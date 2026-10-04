@@ -56,19 +56,21 @@ func deploymentKeyValueConfig(replicas int) jetstream.KeyValueConfig {
 }
 
 // controlStateBuckets are the replicated control-state buckets. The handler
-// bucket exists only once an application declares handler-level placement.
+// bucket exists only once an application declares handler-level placement,
+// and the files bucket only once an application writes a Grove file.
 var controlStateBuckets = []string{
 	MembershipBucket,
 	PlacementBucket,
 	DesiredBucket,
 	DeploymentBucket,
 	HandlerBucket,
+	FilesBucket,
 }
 
 // optionalControlStream reports whether a missing stream for bucket is
 // expected rather than a failure.
 func optionalControlStream(bucket string, err error) bool {
-	return bucket == HandlerBucket && errors.Is(err, jetstream.ErrStreamNotFound)
+	return (bucket == HandlerBucket || bucket == FilesBucket) && errors.Is(err, jetstream.ErrStreamNotFound)
 }
 
 func openOrCreateKeyValue(

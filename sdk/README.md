@@ -121,6 +121,7 @@ Grove integration tests separately prove registration, routing, transport, durab
 |---|---|
 | End-to-end example | [Grove Shop](EXAMPLE.md) |
 | Persistent state and durable execution | [Durable execution](DURABLE_EXECUTION.md) |
+| Local files Grove versions, replicates and recovers | [Grove Files](FILES.md) |
 | Service registration and dispatch | [Service model](SERVICE_MODEL.md) |
 | Local and remote calls | [Invocation](INVOCATION.md) |
 | Request/response and durable-result encoding | [Serialization](SERIALIZATION.md) |
