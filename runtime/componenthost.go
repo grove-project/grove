@@ -24,6 +24,7 @@ type applicationProcess struct {
 	nodeID    string
 	client    *grove.Client
 	provider  *systemnats.RemoteExclusiveProvider
+	files     *systemnats.RemoteFileStore
 	config    Configuration
 	digest    string
 	artifact  ArtifactStatus
@@ -55,6 +56,7 @@ func newApplicationProcess(ctx context.Context, systemNATSURL, nodeID string) (*
 		transport: transport,
 		nodeID:    nodeID,
 		client:    client,
+		files:     transport.NewRemoteFileStore(ctx, nodeID, systemnats.DefaultLocalFileTTL),
 		config:    applicationConfig,
 		digest:    inspection.Config.Digest,
 		artifact: ArtifactStatus{
@@ -71,6 +73,17 @@ func newApplicationProcess(ctx context.Context, systemNATSURL, nodeID string) (*
 		process.provider = transport.NewRemoteExclusiveProvider(ctx, nodeID, 0)
 	}
 	return process, nil
+}
+
+// withProviders attaches the runtime capabilities application code reaches
+// through its context: Grove Files and, with handler-level placement,
+// exclusive capabilities.
+func (p *applicationProcess) withProviders(ctx context.Context) context.Context {
+	ctx = grove.WithFileStore(ctx, p.files)
+	if p.provider != nil {
+		ctx = grove.WithExclusiveProvider(ctx, p.provider)
+	}
+	return ctx
 }
 
 func (p *applicationProcess) Close() {
@@ -112,10 +125,7 @@ func (p *applicationProcess) host(launch componentLaunch) (*runningComponent, er
 		return nil, errors.New("HTTP component listen configuration is invalid")
 	}
 	componentCtx, cancel := context.WithCancel(p.ctx)
-	registerCtx := componentCtx
-	if p.provider != nil {
-		registerCtx = grove.WithExclusiveProvider(componentCtx, p.provider)
-	}
+	registerCtx := p.withProviders(componentCtx)
 	registry := &grove.Registry{}
 	componentContext := ComponentContext{
 		Context:       registerCtx,
@@ -164,12 +174,9 @@ func (p *applicationProcess) host(launch componentLaunch) (*runningComponent, er
 		running.kill()
 		return nil, err
 	}
-	serve := systemnats.Handler(dispatcher.Dispatch)
-	if p.provider != nil {
-		serve = func(ctx context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
-			return dispatcher.Dispatch(grove.WithExclusiveProvider(ctx, p.provider), request)
-		}
-	}
+	serve := systemnats.Handler(func(ctx context.Context, request grove.RequestEnvelope) grove.ResponseEnvelope {
+		return dispatcher.Dispatch(p.withProviders(ctx), request)
+	})
 	running.endpoint, err = p.transport.ServeEndpoint(p.ctx, launch.Subject, serve)
 	if err != nil {
 		running.kill()

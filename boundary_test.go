@@ -81,6 +81,13 @@ var importRules = []importRule{
 		},
 	},
 	{
+		// Grove Files owns the file lifecycle and reaches cluster metadata and
+		// peers through ports; internal/systemnats adapts them.
+		Name:      "the files lifecycle does not depend on NATS",
+		From:      []string{modulePath + "/internal/files"},
+		Forbidden: []string{modulePath + "/internal/systemnats", "github.com/nats-io/..."},
+	},
+	{
 		// Grove Shop is a standalone application that consumes Grove.
 		Name:      "Grove does not depend on Grove Shop",
 		From:      []string{modulePath + "/..."},
@@ -100,6 +107,19 @@ type pureRule struct {
 // pureRules keep Grove's decision logic free of storage, transport and
 // runtime, so production and the grovetest TestCluster run the same rules.
 var pureRules = []pureRule{
+	{
+		// The application-facing SDK (docs/adr/009-non-intrusive-sdk.md).
+		// It names no NATS, bucket, key or JetStream concept.
+		Name:    "the SDK depends only on the standard library",
+		Package: modulePath,
+	},
+	{
+		// Grove Files decisions, disk layout and lifecycle. File ownership
+		// uses the placement lease policy instead of a second one.
+		Name:    "the files lifecycle depends only on the SDK and placement",
+		Package: modulePath + "/internal/files",
+		Allowed: []string{modulePath, modulePath + "/internal/placement"},
+	},
 	{
 		// Placement decisions (docs/architecture/placement.md).
 		Name:    "placement decisions are pure",
@@ -150,6 +170,11 @@ var delegationRules = []delegationRule{
 		Uses: []string{
 			placementPath + ".Recover", placementPath + ".LiveNodes", controlPlanePath + ".Members",
 		},
+	},
+	{
+		Name:     "file ownership applies the placement lease policy",
+		Packages: []string{modulePath + "/internal/files"},
+		Uses:     []string{placementPath + ".DecideClaim", placementPath + ".LeaseHolds"},
 	},
 	{
 		// The TestCluster simulates only store, network, processes and clock

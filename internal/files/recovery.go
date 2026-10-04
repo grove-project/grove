@@ -14,11 +14,11 @@ import (
 // left to reconciliation, so stale disk state never overrides a live
 // cluster.
 func (n *Node) Recover(ctx context.Context) error {
-	cluster, err := n.ensureCluster(ctx)
-	if err != nil {
+	ids, err := n.disk.FileIDs()
+	if err != nil || len(ids) == 0 {
 		return err
 	}
-	ids, err := n.disk.FileIDs()
+	cluster, err := n.ensureCluster(ctx)
 	if err != nil {
 		return err
 	}
@@ -85,11 +85,11 @@ func (n *Node) recoverFile(ctx context.Context, cluster, id string) error {
 // reaches the current committed version, files whose replicas fell short are
 // topped up by their repair leader, and superseded versions are pruned.
 func (n *Node) Reconcile(ctx context.Context) error {
-	cluster, err := n.ensureCluster(ctx)
-	if err != nil {
+	records, err := n.cfg.Catalog.List(ctx)
+	if err != nil || len(records) == 0 {
 		return err
 	}
-	records, err := n.cfg.Catalog.List(ctx)
+	cluster, err := n.ensureCluster(ctx)
 	if err != nil {
 		return err
 	}

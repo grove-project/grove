@@ -512,6 +512,7 @@ type systemNATSRuntime struct {
 	witnessDone       chan struct{}
 	eventsCancel      context.CancelFunc
 	eventsDone        chan struct{}
+	files             *filesService
 	// metadataVoters is the JetStream metadata group size last observed by
 	// this node's server; zero while unknown.
 	metadataVoters atomic.Int32
@@ -698,6 +699,10 @@ func startSystemNATS(ctx context.Context, cfg config) (*systemNATSRuntime, error
 				runtime.stop()
 				return nil, err
 			}
+		}
+		if err := runtime.startFiles(ctx, cfg, health); err != nil {
+			runtime.stop()
+			return nil, err
 		}
 		if err := runtime.components.start(ctx, initialServiceIDs); err != nil {
 			runtime.stop()
@@ -1137,6 +1142,7 @@ func (r *systemNATSRuntime) stop() {
 		_ = r.components.stopAll(stopCtx)
 		cancel()
 	}
+	r.stopFiles()
 	r.stopHandlerPlacement()
 	if r.healthCancel != nil {
 		r.healthCancel()
