@@ -33,6 +33,9 @@ jobs:
         run: go vet ./...
       - name: go test -short
         run: go test -short ./...
+      - name: SQLite acceptance (Grove Files)
+        working-directory: acceptance/sqlite
+        run: go vet ./... && go test ./...
 
   full:
     name: go test (full suite)

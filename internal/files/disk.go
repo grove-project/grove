@@ -393,19 +393,19 @@ func (d *Disk) SetWorkBase(id, version string) error {
 	return writeJSON(filepath.Join(d.fileDir(id), "work.json"), workState{Format: FormatVersion, Base: version})
 }
 
-// Materialize replaces the work file of id with a copy of version, or with
-// an empty file when version is empty. Local edits made on top of an older
-// version are moved to quarantine rather than lost.
+// Materialize replaces the work directory of id with a copy of version, or
+// with an empty file when version is empty. The previous work directory,
+// with local edits made on top of an older version and any side files the
+// application kept next to the file (such as a database journal), is moved
+// to quarantine rather than lost or applied to the new version.
 func (d *Disk) Materialize(id, logical, version string) error {
+	if err := d.quarantine(d.workDir(id), id+"-work"); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(d.workDir(id), dirMode); err != nil {
 		return fmt.Errorf("prepare grove file work directory: %w", err)
 	}
 	work := d.WorkPath(id, logical)
-	if _, err := os.Stat(work); err == nil {
-		if err := d.quarantine(work, id+"-work"); err != nil {
-			return err
-		}
-	}
 	staged, err := os.CreateTemp(d.workDir(id), ".materialize-*")
 	if err != nil {
 		return fmt.Errorf("materialize grove file: %w", err)

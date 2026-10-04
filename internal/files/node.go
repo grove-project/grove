@@ -619,8 +619,14 @@ wait:
 	pending := len(targets) - received
 	if len(holders) < required {
 		n.drain(results, pending, cancelTransfers)
-		return version, fmt.Errorf("%w: %s %s has %d of %d required copies: %w", grove.ErrDurability,
-			h.path, version.ID, len(holders), required, errors.Join(failures...))
+		err := fmt.Errorf("%w: %s %s has %d of %d required copies", grove.ErrDurability,
+			h.path, version.ID, len(holders), required)
+		if len(failures) != 0 {
+			err = fmt.Errorf("%w: %w", err, errors.Join(failures...))
+		} else if len(targets) == 0 {
+			err = fmt.Errorf("%w: no live peer can hold a replica", err)
+		}
+		return version, err
 	}
 
 	record, err = n.mutate(ctx, h.id, func(record *Record, exists bool) error {
@@ -650,8 +656,33 @@ wait:
 	}
 	h.setBase(version)
 	n.emit(Event{Kind: EventSyncCommitted, Path: h.path, Version: version.ID, Epoch: record.Lease.Epoch})
-	n.finishReplication(record, version, holders, results, pending, cancelTransfers)
+	// Holders learn of the commit before Sync returns, so a cold restart of
+	// any of them recovers this version. It is best effort: reconciliation
+	// catches up a holder that misses it.
+	n.notifyCommitted(transferCtx, record, version, holders)
+	n.finishReplication(record, version, results, pending, cancelTransfers)
 	return version, nil
+}
+
+// notifyCommitted tells holders other than this node that version is
+// committed.
+func (n *Node) notifyCommitted(ctx context.Context, record Record, version VersionMeta, holders []string) {
+	request := ReplicateRequest{
+		ClusterID: record.ClusterID, File: localFile(record), Version: version,
+		Source: n.cfg.NodeID, Committed: true,
+	}
+	var wg sync.WaitGroup
+	for _, holder := range holders {
+		if holder == n.cfg.NodeID {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = n.cfg.Peers.Replicate(ctx, holder, request)
+		}()
+	}
+	wg.Wait()
 }
 
 type replicaResult struct {
@@ -660,21 +691,26 @@ type replicaResult struct {
 }
 
 // finishReplication records the transfers still running after a commit and
-// tells holders the version is committed, in the background.
-func (n *Node) finishReplication(record Record, version VersionMeta, holders []string,
+// tells their nodes the version is committed, in the background.
+func (n *Node) finishReplication(record Record, version VersionMeta,
 	results chan replicaResult, pending int, cancel context.CancelFunc) {
+	if pending == 0 {
+		cancel()
+		return
+	}
 	n.background.Add(1)
 	go func() {
 		defer n.background.Done()
 		defer cancel()
 		ctx, done := context.WithTimeout(context.Background(), n.cfg.TransferTimeout)
 		defer done()
+		var late []string
 		for ; pending > 0; pending-- {
 			result := <-results
 			if result.err != nil {
 				continue
 			}
-			holders = append(holders, result.node)
+			late = append(late, result.node)
 			n.emit(Event{Kind: EventReplicaTransferred, Path: record.Path, Version: version.ID, Peer: result.node})
 			_, _ = n.mutate(ctx, record.FileID, func(stored *Record, exists bool) error {
 				if !exists || stored.Current == nil || stored.Current.ID != version.ID {
@@ -684,15 +720,7 @@ func (n *Node) finishReplication(record Record, version VersionMeta, holders []s
 				return nil
 			})
 		}
-		request := ReplicateRequest{
-			ClusterID: record.ClusterID, File: localFile(record), Version: version,
-			Source: n.cfg.NodeID, Committed: true,
-		}
-		for _, holder := range holders {
-			if holder != n.cfg.NodeID {
-				_ = n.cfg.Peers.Replicate(ctx, holder, request)
-			}
-		}
+		n.notifyCommitted(ctx, record, version, late)
 	}()
 }
 

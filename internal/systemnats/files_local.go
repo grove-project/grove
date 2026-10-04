@@ -74,11 +74,21 @@ func (r fileReply) err() error {
 	}
 	for _, known := range fileErrorCodes {
 		if r.Code == known.code {
-			return fmt.Errorf("%w: %s", known.err, r.Error)
+			return remoteFileError{message: r.Error, kind: known.err}
 		}
 	}
 	return errors.New(r.Error)
 }
+
+// remoteFileError is a file service error as the Grovlet reported it; it
+// matches the SDK error it was classified as.
+type remoteFileError struct {
+	message string
+	kind    error
+}
+
+func (e remoteFileError) Error() string { return e.message }
+func (e remoteFileError) Unwrap() error { return e.kind }
 
 type localFileHandle struct {
 	handle   *files.Handle

@@ -62,11 +62,11 @@ func (c *filesCluster) start(id string) *filesNode {
 		c.t.Fatal(err)
 	}
 	node, err := files.NewNode(files.Config{
-		NodeID:   id,
-		Dir:      c.dirs[id],
-		Catalog:  transport.FilesCatalog(),
-		Peers:    transport.FilesPeers(),
-		Live:     func() ([]string, bool) { return c.live, true },
+		NodeID:         id,
+		Dir:            c.dirs[id],
+		Catalog:        transport.FilesCatalog(),
+		Peers:          transport.FilesPeers(),
+		Live:           func() ([]string, bool) { return c.live, true },
 		LeaseTTL:       600 * time.Millisecond,
 		Poll:           20 * time.Millisecond,
 		ReconcileEvery: 100 * time.Millisecond,

@@ -6,6 +6,8 @@ The goal is not to build a smaller Ceph or compete with dedicated storage hardwa
 
 > **Storage that understands the application because it runs inside the application runtime.**
 
+The first implemented storage primitive is [Grove Files](files.md): ordinary local files with versioned, replicated, fenced and recoverable lifecycle. The rest of this page is direction, not current behavior.
+
 ## Use the hardware already in the cluster
 
 Grovelets may already have local NVMe and spare memory. Grove can pool those resources into distributed storage instead of requiring a second fleet of dedicated storage nodes for every workload.

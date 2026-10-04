@@ -38,11 +38,11 @@ type Peers interface {
 
 // ReplicateRequest asks a node to persist one version of a file.
 type ReplicateRequest struct {
-	ClusterID  string      `json:"cluster_id"`
-	File       LocalFile   `json:"file"`
-	Version    VersionMeta `json:"version"`
-	Source     string      `json:"source_node"`
-	Committed  bool        `json:"committed,omitempty"`
+	ClusterID string      `json:"cluster_id"`
+	File      LocalFile   `json:"file"`
+	Version   VersionMeta `json:"version"`
+	Source    string      `json:"source_node"`
+	Committed bool        `json:"committed,omitempty"`
 }
 
 // BlobRequest reads Length bytes of a version from Offset.
