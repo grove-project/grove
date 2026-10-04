@@ -85,55 +85,44 @@ func hostedHandlerRegistrations(components *componentManager) []systemnats.Handl
 
 // startHandlerPlacement runs handler-level placement for this Grovlet and
 // serves the resolved view and exclusive-lease proxy its workers use.
-func (r *systemNATSRuntime) startHandlerPlacement(ctx context.Context, cfg config, health *systemnats.Health) error {
+func (g *grovlet) startHandlerPlacement(ctx context.Context, cfg config, health *systemnats.Health) error {
 	placements, err := systemnats.NewHandlerPlacements(systemnats.HandlerPlacementConfig{
 		NodeID:            cfg.nodeID,
 		InvocationSubject: cfg.systemNATSSubject,
 		Live:              liveNodesFromHealth(health),
-		Membership:        r.membership,
+		Membership:        g.membership,
 	})
 	if err != nil {
 		return err
 	}
-	if err := r.transport.ServeHandlerPlacement(ctx, cfg.nodeID, placements); err != nil {
+	if err := g.transport.ServeHandlerPlacement(ctx, cfg.nodeID, placements); err != nil {
 		return err
 	}
-	if err := r.transport.ServeExclusiveLeases(ctx, cfg.nodeID, placements); err != nil {
+	if err := g.transport.ServeExclusiveLeases(ctx, cfg.nodeID, placements); err != nil {
 		return err
 	}
-	handlerCtx, cancel := context.WithCancel(ctx)
-	r.handlersCancel = cancel
-	r.handlersDone = make(chan struct{})
-	var group sync.WaitGroup
-	group.Add(2)
-	go func() {
-		defer group.Done()
-		_ = placements.Run(handlerCtx, r.transport)
-	}()
-	go func() {
-		defer group.Done()
-		ticker := time.NewTicker(handlerRegistrationSyncInterval)
-		defer ticker.Stop()
-		for {
-			_ = placements.SetHandlers(hostedHandlerRegistrations(r.components))
-			select {
-			case <-ticker.C:
-			case <-handlerCtx.Done():
-				return
+	g.handlersLoop = goBackground(ctx, func(handlerCtx context.Context) {
+		var group sync.WaitGroup
+		group.Add(2)
+		go func() {
+			defer group.Done()
+			_ = placements.Run(handlerCtx, g.transport)
+		}()
+		go func() {
+			defer group.Done()
+			ticker := time.NewTicker(handlerRegistrationSyncInterval)
+			defer ticker.Stop()
+			for {
+				_ = placements.SetHandlers(hostedHandlerRegistrations(g.components))
+				select {
+				case <-ticker.C:
+				case <-handlerCtx.Done():
+					return
+				}
 			}
-		}
-	}()
-	go func() {
+		}()
 		group.Wait()
-		close(r.handlersDone)
-	}()
-	r.handlers = placements
+	})
+	g.handlers = placements
 	return nil
-}
-
-func (r *systemNATSRuntime) stopHandlerPlacement() {
-	if r.handlersCancel != nil {
-		r.handlersCancel()
-		<-r.handlersDone
-	}
 }
